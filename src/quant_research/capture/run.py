@@ -43,6 +43,7 @@ from quant_research.capture.recovery import Gap
 from quant_research.capture.sinks import Sinks
 from quant_research.capture.thermal import heavy_work_allowed, read_state
 from quant_research.config import Settings, load_settings
+from quant_research.data.compact import compact_once
 from quant_research.log import configure_logging
 
 EXIT_STOP_ALL = 3
@@ -254,6 +255,14 @@ async def rest_main(
                 )
                 sinks.write("collector.backup", {"copied": len(done.copied), "unchanged": done.unchanged})
 
+            async def compact() -> None:
+                done = await asyncio.to_thread(compact_once, settings.data_root)
+                sinks.write(
+                    "collector.compaction", {"compacted": done.compacted, "rows": done.rows, "failed": len(done.failed)}
+                )
+                for path, why in done.failed:
+                    sinks.write("collector.incidents.rest", {"job": "compact", "file": path, "error": why})
+
             async def compress() -> None:
                 done = await asyncio.to_thread(
                     compress_closed_segments, settings.data_root / "raw", now_ns=time.time_ns()
@@ -307,6 +316,7 @@ async def rest_main(
                     initial_delay_s=900,
                 ),
                 periodic("compress", 600, heavy("compress", compress), health, stop, sinks=sinks, initial_delay_s=120),
+                periodic("compact", 600, heavy("compact", compact), health, stop, sinks=sinks, initial_delay_s=300),
                 periodic("backup", 3_600, heavy("backup", backup), health, stop, sinks=sinks, initial_delay_s=1_200),
                 *_common_jobs(settings, health, sinks, stop),
             ]
