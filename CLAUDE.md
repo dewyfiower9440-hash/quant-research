@@ -37,3 +37,7 @@ Stack: Python (uv)
 
 ## Gotchas
 <!-- One line per verified lesson: `- <trap> → <what to do> (YYYY-MM-DD)`. Propose a cleanup past 40 lines. -->
+- `gh run list -L 1` right after a push returned the "Dependabot Updates" run for the same SHA, not CI → filter `event == push` and `workflowName == ci` before citing a run id (2026-11-08)
+- The editor format hook runs ruff from outside the project and treated `quant_research` as third-party (stripping the import-group blank line) while the gate wanted it first-party → keep `[tool.ruff.lint.isort] known-first-party` in pyproject (2026-11-08)
+- The format hook's `ruff --fix` deletes imports that are unused at the moment of an intermediate edit → add the import in the same edit as its first use, or re-check imports after multi-edit sequences (2026-11-08)
+- The scaffold refuses a non-empty target and deleting the workspace dir is blocked by a safety check → move existing files aside, scaffold into the empty dir, move them back (2026-11-08)

@@ -11,3 +11,13 @@
 - **재검증:** scaffold 정상 생성, `docs/` 복원 확인
 - **시도 횟수:** 1
 - **상태:** 해결
+
+## F-002 (2026-11-08, 작업 2) Phase 0 측정 스크립트 Polars 집계 오류
+- **증상:** `polars.exceptions.DuplicateError: column with name 'px' has more than one occurrence`. 발생 위치는 `tools/phase0_probe.py`의 `probe_compute`입니다.
+- **재현:** `uv run python tools/phase0_probe.py --ws-seconds 30`
+- **원인:** `agg(pl.col("px").mean(), pl.col("px").std())`의 두 결과 컬럼 이름이 모두 `px`라서 중복됐습니다. 제 코드 실수입니다.
+- **수정:** 각각 `.alias("px_mean")`, `.alias("px_std")`를 붙였습니다.
+- **재검증:** 같은 명령을 다시 실행합니다(결과는 `test-results.md`).
+- **교훈:** Polars에서 같은 컬럼에 여러 집계를 걸 때는 alias가 필수입니다.
+- **시도 횟수:** 1
+- **상태:** 해결(재실행 결과 확인 후 확정)
