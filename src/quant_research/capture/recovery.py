@@ -1,8 +1,9 @@
-"""Startup recovery for raw segments (design v2.1 §3.1).
+"""Startup recovery and gap records for raw segments (design v2.1 §3.1).
 
-A torn tail (partial line, NUL padding after a crash) is copied to `_quarantine/` and the original
-segment is left untouched; readers use only `valid_bytes`. The span from the last durable record to
-the restart is registered as a gap in `_gaps/<source>.jsonl` (imported into the catalog later).
+- A torn tail (partial line, NUL padding after a crash) is copied to `_quarantine/` together with the
+  valid prefix length; the original segment is never modified and readers use only `valid_bytes`.
+- Gaps are explicit records in `_gaps/<name>.jsonl`: process restarts (from the previous run's last
+  heartbeat), WebSocket reconnects, and API history windows that were exceeded.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
@@ -27,7 +28,7 @@ class SegmentState:
 @dataclass(frozen=True, slots=True)
 class Gap:
     source: str
-    start_ns: int
+    start_ns: int | None  # None: start unknown (no previous heartbeat)
     end_ns: int
     cause: str
 
@@ -67,7 +68,9 @@ def append_durable(path: Path, obj: dict[str, object], fsync: Callable[[int], No
         fsync(fh.fileno())
 
 
-def recover_source(root: Path, source: str, *, now_ns: int, fsync: Callable[[int], None] = os.fsync) -> Gap | None:
+def quarantine_tail(root: Path, source: str, fsync: Callable[[int], None] = os.fsync) -> SegmentState | None:
+    """Inspect the previous segment of `source` (written by an earlier run of the same process, guaranteed
+    by the instance lock) and copy a torn tail aside, recording the valid prefix length."""
     seg = latest_segment(root, source)
     if seg is None:
         return None
@@ -77,12 +80,13 @@ def recover_source(root: Path, source: str, *, now_ns: int, fsync: Callable[[int
         if not q.exists():
             q.parent.mkdir(parents=True, exist_ok=True)
             q.write_bytes(state.tail)
-    if state.last_recv_ns is None:
-        return None
-    gap = Gap(source, state.last_recv_ns, now_ns, "restart")
-    append_durable(
-        root / "_gaps" / f"{source}.jsonl",
-        {"source": gap.source, "start_ns": gap.start_ns, "end_ns": gap.end_ns, "cause": gap.cause},
-        fsync,
-    )
-    return gap
+            append_durable(
+                root / "_quarantine" / "index.jsonl",
+                {"segment": str(seg), "valid_bytes": state.valid_bytes, "tail_bytes": len(state.tail)},
+                fsync,
+            )
+    return state
+
+
+def record_gap(root: Path, gap: Gap, fsync: Callable[[int], None] = os.fsync) -> None:
+    append_durable(root / "_gaps" / f"{gap.source}.jsonl", cast(dict[str, object], asdict(gap)), fsync)

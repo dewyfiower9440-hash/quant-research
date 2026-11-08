@@ -25,17 +25,28 @@ from quant_research.capture.ratelimit import (
     ],
 )
 def test_classify_status_maps_http_outcomes(status: int, headers: dict[str, str], expected: tuple[str, float]) -> None:
-    assert classify_status(status, headers, default_retry_s=60.0) == expected
+    assert classify_status(status, headers, venue="binance", default_retry_s=60.0) == expected
 
 
 def test_classify_status_418_is_an_ip_ban_that_stops_collection() -> None:
     with pytest.raises(BannedError, match="418"):
-        classify_status(418, {"Retry-After": "120"}, default_retry_s=60.0)
+        classify_status(418, {"Retry-After": "120"}, venue="binance", default_retry_s=60.0)
 
 
 def test_classify_status_451_is_a_geo_block() -> None:
     with pytest.raises(GeoBlockedError, match="451"):
-        classify_status(451, {}, default_retry_s=60.0)
+        classify_status(451, {}, venue="binance", default_retry_s=60.0)
+
+
+def test_classify_status_upbit_418_is_a_temporary_block_to_wait_out_not_a_ban() -> None:
+    """Review #2: Upbit 418 must not stop the process (design §5.2: honour the stated block time)."""
+    assert classify_status(418, {"Retry-After": "30"}, venue="upbit", default_retry_s=1.0) == ("retry", 30.0)
+    assert classify_status(418, {}, venue="upbit", default_retry_s=1.0) == ("retry", 60.0)
+
+
+def test_classify_status_upbit_451_is_also_a_geo_block() -> None:
+    with pytest.raises(GeoBlockedError, match="upbit"):
+        classify_status(451, {}, venue="upbit", default_retry_s=1.0)
 
 
 def test_binance_delay_waits_for_next_minute_when_weight_near_limit() -> None:

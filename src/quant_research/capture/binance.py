@@ -11,8 +11,10 @@ from typing import Any, cast
 
 from quant_research.capture.clockref import ClockReference
 from quant_research.capture.http import Fetcher
+from quant_research.capture.ratelimit import BannedError
 from quant_research.capture.sinks import Sinks
 from quant_research.domain.probe import clock_offset_ms
+from quant_research.errors import ExternalServiceError
 
 FAPI = "https://fapi.binance.com"
 SPOT = "https://api.binance.com"
@@ -75,29 +77,44 @@ async def metrics_refetch(
     sinks: Sinks,
     symbols: Sequence[str],
     *,
-    now_ms: int,
+    now_ms: Callable[[], int],
     days: int = 30,
     pause_s: float = 0.35,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    stop: asyncio.Event | None = None,
+    on_error: Callable[[str, str, Exception], None] | None = None,
 ) -> int:
     """Re-download the rolling 30-day window of 5m derivatives metrics (design v2.1: every row version is
-    kept; the normalizer adds only changed rows as new versions). ~1000 req/5 min/IP -> paced."""
+    kept; the normalizer adds only changed rows as new versions). ~1000 req/5 min/IP -> paced.
+
+    A full pass takes tens of minutes, so the window is recomputed per symbol (never older than the API
+    keeps), a failing symbol does not skip the rest (on_error records it), and `stop` is honoured per page.
+    BannedError always propagates."""
     calls = 0
-    first = now_ms - days * 86_400_000 + PERIOD_MS
     for source, (path, key) in METRIC_ENDPOINTS.items():
         for sym in symbols:
-            start = first
-            while start < now_ms:
-                end = min(start + PAGE_ROWS * PERIOD_MS, now_ms)
-                params: dict[str, str | int] = {key: sym, "period": "5m", "limit": PAGE_ROWS, "startTime": start}
-                params["endTime"] = end
-                if key == "pair":
-                    params["contractType"] = "PERPETUAL"
-                r = await f.get(f"{FAPI}{path}", params)
-                sinks.write(source, {"params": params, "data": r.json()})
-                calls += 1
-                start = end
-                await sleep(pause_s)
+            now = now_ms()
+            start = now - days * 86_400_000 + PERIOD_MS
+            try:
+                while start < now:
+                    if stop is not None and stop.is_set():
+                        return calls
+                    end = min(start + PAGE_ROWS * PERIOD_MS, now)
+                    params: dict[str, str | int] = {key: sym, "period": "5m", "limit": PAGE_ROWS, "startTime": start}
+                    params["endTime"] = end
+                    if key == "pair":
+                        params["contractType"] = "PERPETUAL"
+                    r = await f.get(f"{FAPI}{path}", params)
+                    sinks.write(source, {"params": params, "data": r.json()})
+                    calls += 1
+                    start = end
+                    await sleep(pause_s)
+            except BannedError:
+                raise
+            except ExternalServiceError as e:
+                if on_error is None:
+                    raise
+                on_error(source, sym, e)
     return calls
 
 

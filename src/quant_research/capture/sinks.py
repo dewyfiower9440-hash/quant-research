@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from quant_research.capture.clockref import ClockReference
-from quant_research.capture.recovery import Gap, recover_source
+from quant_research.capture.recovery import Gap, quarantine_tail, record_gap
 from quant_research.capture.segment import SegmentWriter
 
 
@@ -27,9 +27,7 @@ class Sinks:
     def write(self, source: str, payload: object) -> None:
         w = self._writers.get(source)
         if w is None:
-            gap = recover_source(self.raw_root, source, now_ns=self.now_ns(), fsync=self.fsync)
-            if gap is not None:
-                self.gaps.append(gap)
+            quarantine_tail(self.raw_root, source, self.fsync)
             w = SegmentWriter(
                 root=self.raw_root,
                 source=source,
@@ -39,8 +37,16 @@ class Sinks:
                 fsync=self.fsync,
             )
             self._writers[source] = w
-        suspect = self.clock.is_suspect(now_ns=self.now_ns())
-        w.write(payload, offset_ms=None if suspect else self.clock.offset_ms)
+        # The offset is always stored (it is most needed when large); suspicion is a separate flag.
+        w.write(payload, offset_ms=self.clock.offset_ms, clock_suspect=self.clock.is_suspect(now_ns=self.now_ns()))
+
+    def record_gap(self, gap: Gap) -> None:
+        record_gap(self.raw_root, gap, self.fsync)
+        self.gaps.append(gap)
+
+    def sync_due(self) -> None:
+        for w in self._writers.values():
+            w.sync_if_due()
 
     def close(self) -> None:
         for w in self._writers.values():

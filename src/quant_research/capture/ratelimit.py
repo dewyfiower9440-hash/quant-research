@@ -27,17 +27,30 @@ class GeoBlockedError(ExternalServiceError):
     """HTTP 451: service unavailable from this location."""
 
 
-def classify_status(status: int, headers: Mapping[str, str], *, default_retry_s: float) -> tuple[Outcome, float]:
-    """(outcome, wait seconds) for an HTTP status. Raises for statuses that must stop collection."""
+def _retry_after(headers: Mapping[str, str], default_s: float) -> float:
+    retry = headers.get("Retry-After")
+    return float(retry) if retry and retry.replace(".", "", 1).isdigit() else default_s
+
+
+def classify_status(
+    status: int, headers: Mapping[str, str], *, venue: Literal["binance", "upbit"], default_retry_s: float
+) -> tuple[Outcome, float]:
+    """(outcome, wait seconds) for an HTTP status.
+
+    - Binance 418 (IP ban): raises BannedError; the supervisor stops every collector (design §5.1).
+    - Upbit 418 (temporary block): wait the stated time and retry (design §5.2), no process stop.
+    - 451 (either venue): raises GeoBlockedError; callers record "collection impossible" for that job only.
+    """
     if 200 <= status < 300:
         return "ok", 0.0
     if status == 418:
+        if venue == "upbit":
+            return "retry", _retry_after(headers, 60.0)
         raise BannedError(f"HTTP 418 IP ban (Retry-After={headers.get('Retry-After')})")
     if status == 451:
-        raise GeoBlockedError("HTTP 451 unavailable for legal reasons (restricted location)")
+        raise GeoBlockedError(f"HTTP 451 unavailable for legal reasons ({venue})")
     if status == 429:
-        retry = headers.get("Retry-After")
-        return "retry", float(retry) if retry and retry.replace(".", "", 1).isdigit() else default_retry_s
+        return "retry", _retry_after(headers, default_retry_s)
     if status >= 500:
         return "retry", 1.0
     return "fail", 0.0

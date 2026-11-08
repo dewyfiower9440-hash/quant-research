@@ -157,7 +157,9 @@ def test_metrics_refetch_pages_the_30_day_window_for_every_endpoint(tmp_path: Pa
 
     sinks, sleeps = _sinks(tmp_path), Sleeps()
     now = 1_794_000_000_000
-    calls = asyncio.run(binance.metrics_refetch(_fetcher(handler), sinks, ["BTCUSDT"], now_ms=now, sleep=sleeps))
+    calls = asyncio.run(
+        binance.metrics_refetch(_fetcher(handler), sinks, ["BTCUSDT"], now_ms=lambda: now, sleep=sleeps)
+    )
     sinks.close()
     pages = -(-(30 * 86_400_000 - binance.PERIOD_MS) // (binance.PAGE_ROWS * binance.PERIOD_MS))
     assert calls == pages * len(binance.METRIC_ENDPOINTS)
@@ -294,7 +296,7 @@ def test_periodic_records_failures_and_keeps_running(tmp_path: Path) -> None:
     sinks.close()
     assert health.errors == {"j": 1} and health.ok == {"j": 2}
     assert "ValueError: boom" in health.last_error["j"]
-    assert _records(tmp_path, "collector.incidents")[0]["payload"]["job"] == "j"
+    assert _records(tmp_path, "collector.incidents.rest")[0]["payload"]["job"] == "j"
 
 
 def test_periodic_ban_stops_everything(tmp_path: Path) -> None:

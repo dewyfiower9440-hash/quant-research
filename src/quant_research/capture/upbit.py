@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass, field
@@ -11,7 +12,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from quant_research.capture.http import Fetcher
+from quant_research.capture.recovery import Gap
 from quant_research.capture.sinks import Sinks
+from quant_research.errors import ExternalServiceError
 
 API = "https://api.upbit.com/v1"  # no trailing slash: paths ending in "/" fail from 2026-11-16
 TRADE_PAGE = 500
@@ -60,16 +63,30 @@ class TradeCursorState:
         os.replace(tmp, self.path)  # only this process reads/writes the state file
 
 
-async def trades_catchup(f: Fetcher, sinks: Sinks, market: str, state: TradeCursorState) -> int:
+async def trades_catchup(
+    f: Fetcher,
+    sinks: Sinks,
+    market: str,
+    state: TradeCursorState,
+    *,
+    stop: asyncio.Event | None = None,
+) -> int:
     """Page backwards from the newest trade until the previously captured timestamp (or 7 days back on
-    the first run). Overlap is intentional; the normalizer deduplicates by `sequential_id`."""
+    the first run). Overlap is intentional; the normalizer deduplicates by `sequential_id`.
+
+    The saved cursor only advances after a complete pass, so an interrupted pass is redone next time.
+    If the previous capture is older than the API window (7 days), the uncovered span is recorded as a
+    gap instead of being silently lost."""
     known = state.last_ts_ms.get(market)
     newest = known
+    oldest_seen: int | None = None
     pages = 0
+    reached_known = False
     for days_ago in range(8):  # 0 = today (no parameter), 1..7 = earlier UTC days
         cursor: int | None = None
-        reached_known = False
         while True:
+            if stop is not None and stop.is_set():
+                return pages  # incomplete pass: keep the old cursor
             params: dict[str, str | int] = {"market": market, "count": TRADE_PAGE}
             if days_ago:
                 params["days_ago"] = days_ago
@@ -82,14 +99,22 @@ async def trades_catchup(f: Fetcher, sinks: Sinks, market: str, state: TradeCurs
             sinks.write("upbit.trades", {"market": market, "days_ago": days_ago, "rows": rows})
             stamps = [int(r["timestamp"]) for r in rows]
             newest = max(newest or 0, *stamps)
+            oldest_seen = min(oldest_seen or stamps[0], *stamps)
             if known is not None and min(stamps) <= known:
                 reached_known = True
                 break
             if len(rows) < TRADE_PAGE:
                 break
-            cursor = int(rows[-1]["sequential_id"])
+            next_cursor = int(rows[-1]["sequential_id"])
+            if cursor is not None and next_cursor >= cursor:
+                raise ExternalServiceError(
+                    f"upbit trades cursor did not advance for {market}: {cursor} -> {next_cursor}"
+                )
+            cursor = next_cursor
         if reached_known:
             break
+    if known is not None and not reached_known and oldest_seen is not None:
+        sinks.record_gap(Gap("upbit.trades", known, oldest_seen, f"api_window_exceeded:{market}"))
     if newest is not None:
         state.last_ts_ms[market] = newest
         state.save()

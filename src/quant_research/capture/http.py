@@ -1,7 +1,9 @@
 """HTTP GET with exchange pacing and bounded retries (design v2.1 §4 common rules).
 
-Retries only for idempotent GETs: transport errors/timeouts, 429 and 5xx, with exponential backoff
-plus jitter and a hard attempt limit. 418/451 raise immediately (see ratelimit.classify_status).
+Retries only for idempotent GETs: transport errors/timeouts, 429, Upbit 418 and 5xx, with exponential
+backoff plus jitter and a hard attempt limit. Limits are per IP, so every Fetcher of one venue shares a
+`VenueGate`: a 429/418 wait observed by one coroutine blocks all requests to that venue (otherwise the
+1 Hz pollers would keep hitting a rate-limited IP and escalate to a ban).
 """
 
 from __future__ import annotations
@@ -28,12 +30,20 @@ Params = Mapping[str, str | int | float]
 
 
 @dataclass
+class VenueGate:
+    """Shared 'do not send before' instant (time.time seconds) for one venue/IP."""
+
+    blocked_until: float = 0.0
+
+
+@dataclass
 class Fetcher:
     client: httpx.AsyncClient
     venue: Venue
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     now_s: Callable[[], float] = time.time
     rng: random.Random = field(default_factory=random.SystemRandom)  # jitter only; tests inject a stub
+    gate: VenueGate = field(default_factory=VenueGate)
     binance_weight_limit: int = 2400  # replaced at runtime from exchangeInfo.rateLimits
     max_attempts: int = 4
     requests: int = 0
@@ -41,6 +51,7 @@ class Fetcher:
     async def get(self, url: str, params: Params | None = None) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
+            await self._respect_gate()
             try:
                 self.requests += 1
                 r = await self.client.get(url, params=params)
@@ -49,7 +60,10 @@ class Fetcher:
                 await self.sleep(self._backoff(attempt))
                 continue
             outcome, wait = classify_status(
-                r.status_code, r.headers, default_retry_s=60.0 if self.venue == "binance" else 1.0
+                r.status_code,
+                r.headers,
+                venue=self.venue,
+                default_retry_s=60.0 if self.venue == "binance" else 1.0,
             )
             if outcome == "ok":
                 await self._pace(r)
@@ -57,8 +71,14 @@ class Fetcher:
             if outcome == "fail":
                 raise ExternalServiceError(f"GET {url} -> HTTP {r.status_code}: {r.text[:200]}")
             last_error = ExternalServiceError(f"GET {url} -> HTTP {r.status_code}")
-            await self.sleep(max(wait, self._backoff(attempt)))
+            delay = max(wait, self._backoff(attempt))
+            self.gate.blocked_until = max(self.gate.blocked_until, self.now_s() + delay)
         raise ExternalServiceError(f"GET {url} failed after {self.max_attempts} attempts") from last_error
+
+    async def _respect_gate(self) -> None:
+        wait = self.gate.blocked_until - self.now_s()
+        if wait > 0:
+            await self.sleep(wait)
 
     def _backoff(self, attempt: int) -> float:
         return min(30.0, 0.5 * 2**attempt) + self.rng.uniform(0, 0.25)
@@ -72,4 +92,5 @@ class Fetcher:
             _group, sec = parse_upbit_remaining(r.headers.get("remaining-req"))
             delay = upbit_delay_s(remaining_sec=sec, now_s=self.now_s())
         if delay > 0:
+            self.gate.blocked_until = max(self.gate.blocked_until, self.now_s() + delay)
             await self.sleep(delay)
