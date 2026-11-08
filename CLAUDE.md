@@ -17,6 +17,14 @@ Stack: Python (uv)
 - gate: `uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest -q --cov`
 - ci: required
 
+## Project map
+- Design (v2.1, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`
+- Execution plan (in progress, approved Phase 0-1 only): `docs/plans/2026-11-08-phase0-1-build.md`
+- Living records: `docs/progress.md` (per-task status), `docs/decisions.md` (ADR), `docs/failures.md`
+  (errors, repro, root cause, attempts), `docs/test-results.md`, `docs/measurements/`
+- Data lives OUTSIDE the repo: `C:\dev\qr-data` (raw JSONL, lake, meta SQLite, backups). Never commit data.
+- Never modify `C:\Project` (old stack, reference only), VMware VMs or other projects.
+
 ## Conventions
 - Follow the global rules in ~/.claude/CLAUDE.md (verify before "done", test-first bug fixes, minimal scope).
 - Keep this file updated when commands or architecture change.
