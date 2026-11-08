@@ -9,13 +9,13 @@
 | 1 | Scaffold와 저장소 | DONE | 2026-11-08 |
 | 2 | Phase 0 측정 | DONE (CI run 42469337357) | 2026-11-08 |
 | 3 | 원본 캡처기 최소판 | DONE (CI run 42480240871) | 2026-11-08 |
-| 4 | 조기 백업과 복원 리허설 | TODO (다음) | |
+| 4 | 조기 백업과 복원 리허설 | PARTIAL (외부 대상 미정) | 2026-11-08 |
 | 5 | 카탈로그 스키마 | TODO | |
 | 6 | as_of / join_asof API | TODO | |
 | 7 | 컴팩션과 정규화 | TODO | |
 | 8 | Binance 벌크 T1 | TODO | |
 | 9 | Upbit 분봉 백필 | TODO | |
-| 10 | 모니터와 작업 스케줄러 | TODO | |
+| 10 | 모니터와 작업 스케줄러 | 스케줄러 부분 완료(재부팅 검증 대기), 모니터 TODO | 2026-11-08 |
 | 11 | 7일 연속 운영 검증 | TODO | |
 
 ---
@@ -112,3 +112,25 @@
   - metrics 시각의 구간 기준
   - basis 오류 10개 심볼(XAUUSDT, SOXLUSDT 등 TradFi 계열로 추정)이 basis를 제공하지 않는지
 - **다음 작업:** 4. 조기 백업과 복원 리허설
+
+## 4. 조기 백업과 복원 리허설 (PARTIAL)
+- **완료 조건:** 복원 후 sha256과 행 수 100% 일치. 외부 대상이 없어 "부분 완료"입니다.
+- **구현 파일**
+  - `src/quant_research/capture/backup.py`(증분 백업, 복원 검증)
+  - `config.backup_root`
+  - rest 프로세스의 `backup` 작업(1시간 주기)
+  - 테스트 `tests/capture/test_backup.py`
+- **실행 결과(실데이터, 2026-11-08)**
+  - 백업: 72개 파일, 27.2초, 177MB
+  - 복원 리허설: 72/72 일치, 29.0초
+  - 재실행: 복사 0건, 변경 없음 72건
+- **미해결:** 외부 백업 대상. 연결된 외장 디스크가 없고, OneDrive는 사용할 수 있지만 용량을 확인하지 못했습니다. 사용자 결정이 필요합니다.
+
+## 4b(=10 일부). 작업 스케줄러 상시 실행
+- **구현 파일:** `tools/register_collector_task.ps1`(PSScriptAnalyzer 0건), `run.py --log-dir`
+- **검증**
+  - 세션과 무관한지: 부모 프로세스가 `svchost`(Task Scheduler)임을 확인
+  - 중복 차단: exit 2 확인
+  - 크래시 복구: 268초 만에 재시작(F-006 수정 후)
+  - gap 기록: 정확함
+- **미확인:** 재부팅 뒤 로그온했을 때 자동 재개. 사용자가 재부팅하면 `_gaps/process.rest.jsonl`과 heartbeat로 확인합니다.
