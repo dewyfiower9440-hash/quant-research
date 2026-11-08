@@ -79,3 +79,17 @@
   - 중복 실행 시도 → exit 2(supervisor, rest 모두)
 - **영향:** 22:41:50~22:49:18(449초) 수집 공백이 생겼고 gap으로 기록했습니다. 그 사이 수동으로 재가동했습니다.
 - **상태:** 해결. **재부팅 후 재개는 미확인**(사용자가 재부팅할 때 확인)
+
+## F-007 (2026-11-09, 작업 6·7) `.gitignore`의 `data/`가 `src/quant_research/data/`와 `tests/data/`를 무시함
+- **증상:** CI run 42534955542가 실패했습니다. pyright 메시지: `Import "quant_research.data.compact" could not be resolved`. 로컬 게이트는 통과했습니다.
+- **원인:** scaffold가 만든 `.gitignore` 19행의 `data/`는 저장소 루트의 데이터 폴더를 막으려던 것입니다. 그런데 슬래시 없는 패턴이라 **모든 경로의 `data/`**에 걸렸고, `src/quant_research/data/`(access, lake, compact)와 `tests/data/`가 커밋되지 않았습니다(`git ls-files` 0건).
+- **영향**
+  - **작업 6의 CI 성공(run 42533347966)은 해당 코드와 테스트를 포함하지 않았습니다.** 작업 6의 "DONE" 판정은 잘못이었고, 이번 수정 커밋의 CI로 다시 확정합니다.
+  - 로컬 게이트는 작업 트리 기준이라 통과했습니다. 반면 CI는 저장소 기준이라 이 차이가 드러났습니다.
+- **수정:** `data/`를 `/data/`(루트 전용)로 바꾸고, 누락된 파일 9개를 커밋합니다.
+- **재발 방지**
+  - 프로젝트 Gotcha를 추가합니다.
+  - dev-tools scaffold 템플릿의 같은 패턴은 공유 도구라 범위 밖입니다. 사용자에게 보고하고 수정을 제안합니다.
+  - 다음부터 단계를 완료할 때 `git status --porcelain --ignored`로 무시된 소스 파일이 있는지 확인합니다.
+- **재검증:** 수정 커밋의 CI run(아래 test-results)
+- **상태:** 수정 중 → CI 확인 후 해결
