@@ -34,6 +34,7 @@ from websockets.exceptions import InvalidStatus
 
 from quant_research.capture import binance, upbit
 from quant_research.capture.clockref import ClockReference
+from quant_research.capture.compress import compress_closed_segments
 from quant_research.capture.http import Fetcher, VenueGate
 from quant_research.capture.lock import AlreadyRunningError, InstanceLock
 from quant_research.capture.ratelimit import BannedError, GeoBlockedError
@@ -207,18 +208,31 @@ async def rest_main(
                 message = health.fail(f"metrics:{source}:{symbol}", e)
                 sinks.write(
                     "collector.incidents.rest",
-                    {"job": "metrics_30d", "source": source, "symbol": symbol, "error": message},
+                    {"job": "metrics", "source": source, "symbol": symbol, "error": message},
                 )
 
-            async def metrics() -> None:
-                await binance.metrics_refetch(
-                    f_fut,
-                    sinks,
-                    sorted(fut_syms),
-                    now_ms=lambda: time.time_ns() // 1_000_000,
-                    stop=stop,
-                    on_error=metric_failed,
+            def metrics_pass(days: float) -> Callable[[], Awaitable[int]]:
+                """ADR-007: full 30-day window daily (revisions), last page (~41.7 h) hourly (freshness)."""
+
+                def run_pass() -> Awaitable[int]:
+                    return binance.metrics_refetch(
+                        f_fut,
+                        sinks,
+                        sorted(fut_syms),
+                        now_ms=lambda: time.time_ns() // 1_000_000,
+                        days=days,
+                        stop=stop,
+                        on_error=metric_failed,
+                    )
+
+                return run_pass
+
+            async def compress() -> None:
+                done = await asyncio.to_thread(
+                    compress_closed_segments, settings.data_root / "raw", now_ns=time.time_ns()
                 )
+                for path, why in done.skipped:
+                    sinks.write("collector.incidents.rest", {"job": "compress", "file": str(path), "error": why})
 
             jobs = [
                 periodic(
@@ -247,7 +261,17 @@ async def rest_main(
                     "upbit_markets", 86_400, lambda: upbit.market_snapshot(f_up, sinks), health, stop, sinks=sinks
                 ),
                 periodic("upbit_trades", 1_800, trades, health, stop, sinks=sinks, initial_delay_s=5),
-                periodic("metrics_30d", 21_600, metrics, health, stop, sinks=sinks, initial_delay_s=30),
+                periodic("metrics_30d", 86_400, metrics_pass(30), health, stop, sinks=sinks, initial_delay_s=30),
+                periodic(
+                    "metrics_recent",
+                    3_600,
+                    metrics_pass(binance.PAGE_ROWS * binance.PERIOD_MS / 86_400_000),
+                    health,
+                    stop,
+                    sinks=sinks,
+                    initial_delay_s=900,
+                ),
+                periodic("compress", 600, compress, health, stop, sinks=sinks, initial_delay_s=120),
                 *_common_jobs(settings, health, sinks, stop),
             ]
             await asyncio.gather(*jobs)

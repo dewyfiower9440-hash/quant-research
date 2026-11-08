@@ -61,3 +61,38 @@
   - metrics 시각이 구간 시작인지 끝인지 미확인(보수적으로 가정)
   - 저장량은 30초 외삽값이라 작업 3에서 1시간 실측
 - **다음 작업:** 3. 원본 캡처기 최소판
+
+## 3. 원본 캡처기 최소판 (IN_PROGRESS)
+- **완료 조건(실행 계획)**
+  - fixture 테스트로 파서와 레이트 리미터 검증
+  - 강제 종료 후 꼬리 격리와 gap 등록
+  - 2중 실행 차단
+  - 실제 1시간 연속 수집과 결과 확인
+- **구현 파일:** `src/quant_research/capture/`
+  - `segment.py`: JSONL 세그먼트, 형식 v2, fsync, 오류 시 파일 포기
+  - `recovery.py`: 꼬리 격리와 gap 기록
+  - `lock.py`: 단일 인스턴스 잠금
+  - `ratelimit.py`: 거래소별 418/451/429 처리
+  - `clockref.py`: 서버 시각 offset
+  - `http.py`: 재시도와 공유 VenueGate
+  - `sinks.py`
+  - `binance.py`, `upbit.py`: T0 수집원
+  - `run.py`: rest/ws/supervisor, STOP 파일, heartbeat
+  - 테스트: `tests/capture/` 5개 파일(97개 테스트 중 capture 66개)
+- **실행 명령**
+  - 상시 수집: `uv run python -m quant_research.capture.run supervisor`(`C:\dev\quant-research`)
+  - 정상 종료: `C:\dev\qr-data\run\STOP` 파일 생성
+- **T0 수집원(실제 동작 확인)**
+  - Binance: bookTicker 1초(상위 50, REST), server_time, exchangeInfo·24hr(spot/um), OI·롱숏·taker·basis 30일 재수집(6시간 주기), forceOrder WS
+  - Upbit: 호가 L1 1초(상위 20), 체결 cursor 따라잡기(30분 주기), 마켓·경보 스냅샷
+  - **공지 WS는 제외**했습니다. 한국 API가 `announcement` 타입을 `INVALID_PARAM`으로 거부합니다(2026-11-08 실측).
+- **검증 결과(지금까지)**
+  - 게이트 통과: 97 passed, 91.49%
+  - CI: run 42471093283(aaba1ac), 42471562536(19e067c, F-004), 42472784613(d57e9df, F-005)
+  - 1시간 실측은 수정 전 코드(aaba1ac)로 진행 중입니다.
+- **실패 이력:** F-003(테스트 오류), F-004(ws heartbeat), F-005(리뷰 11건). 모두 해결했습니다.
+- **미해결 문제**
+  - 1시간 실측 결과 분석
+  - 수정된 코드로 상시 수집 재시작
+  - 세션이 끝나도 수집이 계속되도록 작업 스케줄러 등록(작업 10의 일부를 앞당겨 할지 결정)
+- **다음 작업:** 1시간 실측 분석 → 상시 수집 재시작 → 4. 조기 백업

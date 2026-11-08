@@ -210,3 +210,24 @@ def test_upbit_outage_longer_than_the_api_window_is_recorded_as_a_gap(tmp_path: 
         {"source": "upbit.trades", "start_ns": 1_000, "end_ns": 50_000, "cause": "api_window_exceeded:KRW-BTC"}
     ]
     assert state.last_ts_ms["KRW-BTC"] == 50_000
+
+
+def test_recent_metrics_pass_requests_exactly_one_integer_page_per_endpoint(tmp_path: Path) -> None:
+    """ADR-007: the hourly freshness pass is one page per endpoint and symbol, with integer timestamps."""
+    seen: list[httpx.Request] = []
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        seen.append(r)
+        return httpx.Response(200, json=[])
+
+    f = Fetcher(httpx.AsyncClient(transport=httpx.MockTransport(handler)), "binance", sleep=Sleeps(), rng=NoJitter())
+    window_days = binance.PAGE_ROWS * binance.PERIOD_MS / 86_400_000
+    sinks = _sinks(tmp_path)
+    calls = asyncio.run(
+        binance.metrics_refetch(
+            f, sinks, ["BTCUSDT"], now_ms=lambda: 1_794_000_000_000, days=window_days, sleep=Sleeps()
+        )
+    )
+    sinks.close()
+    assert calls == len(binance.METRIC_ENDPOINTS)
+    assert all(r.url.params["startTime"].isdigit() for r in seen)

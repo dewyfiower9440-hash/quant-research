@@ -53,8 +53,12 @@ class SegmentWriter:
             raise
 
     def sync_if_due(self) -> None:
-        """Time-based fsync for sources that write rarely (daily snapshots, last page of a burst)."""
+        """Time-based fsync for sources that write rarely (daily snapshots, last page of a burst), and
+        close an idle file once its UTC hour has ended so it can be compressed (ADR-006)."""
         t = self.now_ns()
+        if self._fh is not None and hour_key(t) != self._hour:
+            self.close()
+            return
         if self._fh is not None and self._unsynced and t - self._last_sync_ns >= self.fsync_every_ns:
             try:
                 self._sync(t)

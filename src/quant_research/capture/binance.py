@@ -78,7 +78,7 @@ async def metrics_refetch(
     symbols: Sequence[str],
     *,
     now_ms: Callable[[], int],
-    days: int = 30,
+    days: float = 30,
     pause_s: float = 0.35,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     stop: asyncio.Event | None = None,
@@ -94,7 +94,7 @@ async def metrics_refetch(
     for source, (path, key) in METRIC_ENDPOINTS.items():
         for sym in symbols:
             now = now_ms()
-            start = now - days * 86_400_000 + PERIOD_MS
+            start = int(now - days * 86_400_000) + PERIOD_MS
             try:
                 while start < now:
                     if stop is not None and stop.is_set():
