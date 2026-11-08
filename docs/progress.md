@@ -10,7 +10,7 @@
 | 2 | Phase 0 측정 | DONE (CI run 42469337357) | 2026-11-08 |
 | 3 | 원본 캡처기 최소판 | DONE (CI run 42480240871) | 2026-11-08 |
 | 4 | 조기 백업과 복원 리허설 | PARTIAL (외부 대상 미정) | 2026-11-08 |
-| 5 | 카탈로그 스키마 | TODO | |
+| 5 | 카탈로그 스키마 | DONE (CI 확인 후 run id 기록) | 2026-11-09 |
 | 6 | as_of / join_asof API | TODO | |
 | 7 | 컴팩션과 정규화 | TODO | |
 | 8 | Binance 벌크 T1 | TODO | |
@@ -134,3 +134,26 @@
   - 크래시 복구: 268초 만에 재시작(F-006 수정 후)
   - gap 기록: 정확함
 - **미확인:** 재부팅 뒤 로그온했을 때 자동 재개. 사용자가 재부팅하면 `_gaps/process.rest.jsonl`과 heartbeat로 확인합니다.
+
+## 5. 카탈로그 스키마 (DONE)
+- **완료 조건:** 마이그레이션 테스트, lag 정책 하향 변경 거부 테스트
+- **구현 파일**
+  - `src/quant_research/catalog/migrations/0001_initial.sql`
+  - `catalog/store.py`(Catalog API)
+  - `catalog/bootstrap.py`(T0 데이터셋, lag 사전값, 봉인 epoch 1, gap 가져오기)
+  - 테스트 `tests/catalog/test_catalog.py`(10개)
+- **불변식(SQL 트리거와 Python 양쪽에서 강제)**
+  - `seal_policy`와 `lag_policy` 행은 수정·삭제할 수 없음
+  - lag는 늘리는 방향으로만 바꿀 수 있음
+  - epoch는 연속 번호이고 경계가 뒤로 가지 않음
+  - gap 원인은 정해진 값만 허용하고, 구간은 시작 ≤ 끝
+  - 유니버스는 시점별로 관리하며 구간 끝은 포함하지 않음
+- **실데이터:** `C:\dev\qr-data\meta\catalog.db` 초기화(데이터셋 16, lag 16, epoch 16, gap 13). 재실행해도 0건 추가(멱등)
+- **결정:** ADR-011(T0 봉인 60일/30일 사전 등록)
+- **다음 작업:** 6. as_of / join_asof API
+
+## 운영 변경(2026-11-09, 결정 6) 복구 지연 단축
+- 작업 스케줄러 반복 간격을 5분에서 **1분**으로 줄였습니다(`-RepeatMinutes`, 기본 1).
+- **실측:** 프로세스 트리를 강제 종료한 뒤 **46초** 만에 재시작(이전 268초)
+- 단일 인스턴스 보장(`IgnoreNew` + 잠금)과 데이터 경로는 바뀌지 않았습니다.
+- 운영 절차와 제약은 `docs/operations.md`에 정리했습니다.
