@@ -111,3 +111,38 @@ def test_ws_main_stores_messages_and_reconnects_after_errors(tmp_path: Path) -> 
     assert health.errors["force_order"] == 1
     assert _records(tmp_path, "binance.um.force_order")[0]["payload"]["data"]["e"] == "forceOrder"
     assert _records(tmp_path, "collector.incidents")[0]["payload"]["job"] == "force_order"
+
+
+class ProbeWs:
+    """Serves messages continuously and records whether a heartbeat existed before the 3rd one."""
+
+    def __init__(self, stop: asyncio.Event, heartbeat: Path) -> None:
+        self.stop, self.heartbeat, self.served = stop, heartbeat, 0
+        self.heartbeat_seen_while_busy = False
+
+    async def recv(self) -> str:
+        self.served += 1
+        if self.served == 3:
+            self.heartbeat_seen_while_busy = self.heartbeat.exists()
+            self.stop.set()
+        return '{"data":{"e":"forceOrder"}}'
+
+
+def test_ws_main_writes_heartbeat_while_messages_keep_arriving(tmp_path: Path) -> None:
+    settings = Settings(data_root=tmp_path)
+    health = Health("ws", tmp_path / "run" / "ws.heartbeat.json")
+    probe: list[ProbeWs] = []
+
+    async def go() -> None:
+        stop = asyncio.Event()
+
+        @asynccontextmanager
+        async def connect(_url: str, **_kw: object) -> AsyncGenerator[ProbeWs]:
+            ws = ProbeWs(stop, health.path)
+            probe.append(ws)
+            yield ws
+
+        await ws_main(settings, stop, health, connect=connect, heartbeat_s=0.0)
+
+    asyncio.run(go())
+    assert probe[0].heartbeat_seen_while_busy

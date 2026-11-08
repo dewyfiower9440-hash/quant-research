@@ -196,10 +196,23 @@ WsConnect = Callable[..., AbstractAsyncContextManager[Any]]
 
 
 async def ws_main(
-    settings: Settings, stop: asyncio.Event, health: Health, *, connect: WsConnect = websockets.connect
+    settings: Settings,
+    stop: asyncio.Event,
+    health: Health,
+    *,
+    connect: WsConnect = websockets.connect,
+    heartbeat_s: float = 10.0,
 ) -> None:
     sinks = _sinks(settings)
     backoff = 1.0
+    last_beat = float("-inf")
+
+    def beat() -> None:
+        nonlocal last_beat
+        if time.monotonic() - last_beat >= heartbeat_s:  # F-004: also while messages keep arriving
+            health.write()
+            last_beat = time.monotonic()
+
     try:
         while not stop.is_set():
             opened = time.monotonic()
@@ -210,10 +223,11 @@ async def ws_main(
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=10)
                         except TimeoutError:
-                            health.write()
+                            beat()
                             continue
                         binance.handle_force_order(sinks, raw)
                         health.ok["force_order"] = health.ok.get("force_order", 0) + 1
+                        beat()
             except (OSError, websockets.WebSocketException) as e:
                 health.errors["force_order"] = health.errors.get("force_order", 0) + 1
                 health.last_error["force_order"] = f"{type(e).__name__}: {e}"[:500]
