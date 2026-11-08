@@ -157,3 +157,19 @@
 - **실측:** 프로세스 트리를 강제 종료한 뒤 **46초** 만에 재시작(이전 268초)
 - 단일 인스턴스 보장(`IgnoreNew` + 잠금)과 데이터 경로는 바뀌지 않았습니다.
 - 운영 절차와 제약은 `docs/operations.md`에 정리했습니다.
+
+## 6. as_of / join_asof API (DONE)
+- **완료 조건:** 직접 읽기 금지 아키텍처 테스트, 누수 테스트(미래 값 주입, 구간 시작 타임스탬프 주입)
+- **구현 파일**
+  - `src/quant_research/data/access.py`(`PointInTime`: `with_available`, `rows_visible`, `join_asof`, `SealViolationError`)
+  - 테스트 `tests/data/test_access.py`(12개)
+- **동작**
+  - `available_ns`는 읽을 때 계산합니다(시각 의미 + lag 정책 버전).
+  - 구간 데이터는 시각 의미가 미확인이면 구간 시작으로 간주합니다(+구간 길이 +lag).
+  - 실시간 관측 데이터는 `received_ns`를 씁니다.
+  - research 역할: 봉인 경계 이후의 결정 시각을 요청하면 `SealViolationError`, 경계 이후에 가용해지는 행은 제외합니다.
+  - validator 역할만 holdout을 읽을 수 있습니다.
+  - lag 버전을 고정해 같은 결과를 재현할 수 있습니다.
+- **아키텍처 테스트:** `src` 안에서 `pyarrow`/`duckdb` import와 `read_parquet`/`scan_parquet` 호출은 `data/lake.py`에서만 허용합니다(작업 7에서 구현).
+- **경고 처리:** Polars가 `by` 그룹에서는 정렬을 검사하지 못한다는 경고를 냈습니다. 코드가 직접 정렬하는 것을 근거로 `by`를 쓸 때만 `check_sortedness`를 끄고, 행 순서를 섞은 입력 테스트로 정확성을 검증했습니다. 경고를 오류로 바꿔 돌린 실행(`-W error::UserWarning`)도 146개 모두 통과했습니다.
+- **다음 작업:** 7. 컴팩션과 정규화
