@@ -13,4 +13,5 @@
 | 2026-11-08 19:5x KST | 3 | 19e067c | 선언 게이트(F-004) | 81 passed, 92.21% | run 42471562536 success |
 | 2026-11-08 20:2x KST | 3 | d57e9df | 선언 게이트(F-005, 리뷰 11건) | 97 passed, 91.49% | run 42472784613 success |
 | 2026-11-08 20:3x KST | 3 | aaba1ac | 1시간 실측(supervisor --duration 3600) | bookTicker 3597/3600, Upbit 호가 3598, forceOrder 2998, 작업 오류 1(basis ANTHROPICUSDT Invalid pair), 원본 1.45GB | — |
-| 2026-11-08 20:5x KST | 3 | (커밋 전) | 선언 게이트(ADR-006/007) | 106 passed, 91.21% | 커밋 후 기록 |
+| 2026-11-08 20:5x KST | 3 | 6b07d7a | 선언 게이트(ADR-006/007) | 106 passed, 91.21% | run 42477750110 success |
+| 2026-11-08 21:1x KST | 3 | 39e5a94 | 선언 게이트(supervisor STOP) | 107 passed, 91.25% | run 42480240871 success |
