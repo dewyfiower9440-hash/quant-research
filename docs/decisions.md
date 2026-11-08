@@ -76,3 +76,23 @@
 - **임시 백업:** `C:\dev\qr-backup`(같은 SSD)에 매시간 증분 백업합니다(sha256 manifest).
   - **SSD 고장은 막지 못합니다.** 외부 대상이 정해지면 `backup_root` 설정만 바꿉니다.
   - 외부 장치 현황(2026-11-08): 연결된 외장 디스크 없음. OneDrive 개인 계정은 로그인과 동기화 중(용량 한도 미확인)
+
+## ADR-009 (2026-11-08, 채택) 관리자 권한 사용 범위: 읽기 전용 조회 1회만
+- **실행:** `tools/admin_probe_readonly.ps1`을 UAC 승인을 받아 1회 실행했습니다(23:19 KST). **변경 없음.** 결과: `C:\dev\qr-data\measurements\admin-probe-20261108T141902Z.json`
+- **SSD:** KLEVV C710 현재 63°C, 한계 100°C, Wear 0. PowerOnHours와 오류 카운터는 장치가 보고하지 않습니다.
+- **시계(w32time)**
+  - 상태: NTP 동기화됨(stratum 5, time.windows.com, 마지막 동기화 17:52, 위상 오프셋 −0.4ms)
+  - 간격: SpecialPollInterval 32768초(약 9.1시간)
+  - 특이 사항: 마지막 동기화 오류 기록("정확하지 않은 시간 데이터")이 있고, 루트 분산이 7.8초입니다.
+  - 수집기가 1분마다 잰 Binance offset은 −3.5~−16ms입니다.
+- **결정:** 시계 설정을 **바꾸지 않습니다**(필요가 확인되지 않음). offset이 250ms를 넘는 구간이 실제로 생기면 `w32tm /config` 변경을 다시 제안합니다.
+- **보류(사용자 결정 필요):** SSD 온도를 주기적으로 감시하려면 관리자 권한이 필요하므로, 관리자가 만든 예약 작업이 있어야 합니다. 이 작업은 읽기 전용 조회를 10분마다 실행해 JSON으로 기록합니다. 벌크 다운로드(작업 8) 전에 필요한지 결정이 필요합니다.
+
+## ADR-010 (2026-11-08, 제안) Dependabot Actions 갱신 PR #1, #2
+- **변경:** `actions/checkout` v5 → v7.0.1(3d3c42e…), `astral-sh/setup-uv` v7 → v10.3.3(68559e9…). 두 SHA 모두 공식 태그의 커밋과 일치함을 확인했습니다.
+- **변경 사항 검토**
+  - checkout v6: Node 24, v7: 의존성 갱신
+  - setup-uv v8: manifest 제거, v9: prune-cache 기본값 false, v10: `enable-cache: auto`일 때 일부 이벤트에서 캐시 비활성화
+  - 이 프로젝트 CI는 setup-uv에 입력을 주지 않으므로(캐시 미사용) 영향이 없습니다.
+- **호환성 검증:** 최신 main(7f388e4 이후)에 두 변경을 함께 적용한 검증 브랜치 `ci/verify-actions-bump`에서 CI run 42489501998이 성공했습니다(112 passed, 91.47%, pip-audit 0건).
+- **권고:** 병합합니다(두 PR을 rebase한 뒤 병합하거나, 검증 브랜치 내용을 main에 반영). **사용자 승인 대기**입니다.
