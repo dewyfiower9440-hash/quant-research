@@ -115,3 +115,24 @@
 - **lag 사전값(bootstrap)**
   - 이벤트형 실시간 데이터: 0(관측 `received_at` 사용)
   - 5분 지표(시각 의미 미확인): 구간 시작으로 간주 + 1구간(300초)
+
+## ADR-012 (2026-11-09, 채택, 등록 대기) SSD 온도 감시와 고부하 작업 중단 기준
+- **구성:** `tools/ssd_temp_monitor.ps1`(읽기 전용, OS 변경 없음)을 `tools/register_ssd_monitor_task.ps1`로 등록합니다.
+  - 작업 `qr-ssd-temp-monitor`
+  - 권한: 사용자 본인의 관리자 토큰(`RunLevel Highest`), 로그인 중에만 실행, SYSTEM 아님
+  - 주기: 10분 + 로그온 시
+  - 실행 방식: `conhost --headless`(창 깜빡임 없음)
+- **기록 위치:** `C:\dev\qr-data\health\ssd_temp.jsonl`(시계열), `C:\dev\qr-data\run\ssd_state.json`(현재 상태)
+- **기준(사전값, 기록된 시계열로 재조정)**
+  - 경고 ≥70°C
+  - 고부하 중단 ≥75°C
+  - 재개 <68°C(히스테리시스)
+  - 근거: 2026-11-08 실측 63°C, 장치 TemperatureMax 100. 과거 유휴 80°C 기록도 있습니다(메모리, 2026-09).
+- **중단 대상:** 압축(`compress`), 백업(`backup`), 30일 지표 재수집(`metrics_30d`), 그리고 이후 벌크 다운로드(작업 8)
+  - 실시간 T0 수집(1초 폴러, WS)은 중단하지 않습니다(데이터 손실 방지 우선).
+  - 중단할 때마다 `collector.incidents.rest`에 `thermal_pause`를 기록합니다.
+- **상태가 없거나 30분 넘게 오래된 경우:** 차단하지 않고 이유만 기록합니다. 감시가 고장 나도 백업은 계속돼야 하기 때문입니다.
+- **검증**
+  - Python 판정과 연결: `tests/capture/test_thermal.py`(12개)
+  - 관리자 권한 없이 실행: 카운터 단계에서 접근 거부로 멈추고, 쓰는 파일 0개
+  - 등록: 2026-11-09 UAC가 취소되어 **미등록**입니다. 사용자 승인 후 1회 실행합니다.

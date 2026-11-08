@@ -41,6 +41,7 @@ from quant_research.capture.lock import AlreadyRunningError, InstanceLock
 from quant_research.capture.ratelimit import BannedError, GeoBlockedError
 from quant_research.capture.recovery import Gap
 from quant_research.capture.sinks import Sinks
+from quant_research.capture.thermal import heavy_work_allowed, read_state
 from quant_research.config import Settings, load_settings
 from quant_research.log import configure_logging
 
@@ -150,6 +151,22 @@ def _make_sinks(settings: Settings) -> Sinks:
     )
 
 
+def thermal_gated(
+    settings: Settings, sinks: Sinks, name: str, job: Callable[[], Awaitable[object]]
+) -> Callable[[], Awaitable[None]]:
+    """Decision 3: heavy disk work pauses while the SSD is critical (state written by the monitor task)."""
+
+    async def gated() -> None:
+        state = read_state(settings.data_root / "run" / "ssd_state.json")
+        allowed, why = heavy_work_allowed(state, now_ns=time.time_ns())
+        if not allowed:
+            sinks.write("collector.incidents.rest", {"job": name, "thermal_pause": why})
+            return
+        await job()
+
+    return gated
+
+
 def _start_process(settings: Settings, health: Health, sinks: Sinks) -> None:
     """Restart gap from this process's previous heartbeat (start unknown on a first run)."""
     previous = health.previous_beat_ns()
@@ -228,6 +245,9 @@ async def rest_main(
 
                 return run_pass
 
+            def heavy(name: str, job: Callable[[], Awaitable[object]]) -> Callable[[], Awaitable[None]]:
+                return thermal_gated(settings, sinks, name, job)
+
             async def backup() -> None:
                 done = await asyncio.to_thread(
                     backup_closed_files, settings.data_root, settings.backup_root, now_ns=time.time_ns()
@@ -268,7 +288,15 @@ async def rest_main(
                     "upbit_markets", 86_400, lambda: upbit.market_snapshot(f_up, sinks), health, stop, sinks=sinks
                 ),
                 periodic("upbit_trades", 1_800, trades, health, stop, sinks=sinks, initial_delay_s=5),
-                periodic("metrics_30d", 86_400, metrics_pass(30), health, stop, sinks=sinks, initial_delay_s=30),
+                periodic(
+                    "metrics_30d",
+                    86_400,
+                    heavy("metrics_30d", metrics_pass(30)),
+                    health,
+                    stop,
+                    sinks=sinks,
+                    initial_delay_s=30,
+                ),
                 periodic(
                     "metrics_recent",
                     3_600,
@@ -278,8 +306,8 @@ async def rest_main(
                     sinks=sinks,
                     initial_delay_s=900,
                 ),
-                periodic("compress", 600, compress, health, stop, sinks=sinks, initial_delay_s=120),
-                periodic("backup", 3_600, backup, health, stop, sinks=sinks, initial_delay_s=1_200),
+                periodic("compress", 600, heavy("compress", compress), health, stop, sinks=sinks, initial_delay_s=120),
+                periodic("backup", 3_600, heavy("backup", backup), health, stop, sinks=sinks, initial_delay_s=1_200),
                 *_common_jobs(settings, health, sinks, stop),
             ]
             await asyncio.gather(*jobs)
