@@ -1,5 +1,6 @@
 """Configuration: parsed and validated once at startup (boundary validation)."""
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -12,6 +13,12 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     greeting_name: str = Field(default="world", min_length=1)
+    # Data lives outside the repository (design v2.1 §3.1).
+    data_root: Path = Path("C:/dev/qr-data")
+    # ADR-008: temporary same-SSD backup until an external target is chosen (does not survive SSD failure).
+    backup_root: Path = Path("C:/dev/qr-backup")
+    binance_top_n: int = Field(default=50, ge=1, le=300)
+    upbit_top_n: int = Field(default=20, ge=1, le=100)
 
 
 def load_settings() -> Settings:
