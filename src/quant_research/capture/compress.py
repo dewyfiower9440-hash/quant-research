@@ -28,7 +28,7 @@ class CompressResult:
     skipped: list[tuple[Path, str]] = field(default_factory=lambda: list[tuple[Path, str]]())
 
 
-def _hour_end_ns(name: str) -> int | None:
+def hour_end_ns(name: str) -> int | None:
     m = _NAME.search(name)
     if not m:
         return None
@@ -55,7 +55,7 @@ def compress_closed_segments(
     for seg in sorted(raw_root.glob("*/*/*.jsonl")):
         if seg.parts[-3].startswith("_"):
             continue  # _gaps, _quarantine: small append-only logs, kept as text
-        end = _hour_end_ns(seg.name)
+        end = hour_end_ns(seg.name)
         if end is None or now_ns - end < min_age_s * 1e9:
             continue
         gz = seg.with_suffix(".jsonl.gz")

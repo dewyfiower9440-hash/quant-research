@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     greeting_name: str = Field(default="world", min_length=1)
     # Data lives outside the repository (design v2.1 §3.1).
     data_root: Path = Path("C:/dev/qr-data")
+    # ADR-008: temporary same-SSD backup until an external target is chosen (does not survive SSD failure).
+    backup_root: Path = Path("C:/dev/qr-backup")
     binance_top_n: int = Field(default=50, ge=1, le=300)
     upbit_top_n: int = Field(default=20, ge=1, le=100)
 

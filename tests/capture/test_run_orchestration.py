@@ -270,3 +270,25 @@ def test_supervisor_itself_shuts_down_when_the_stop_file_appears(tmp_path: Path)
     assert time.monotonic() - started < 20
     assert result.restarts[f"patient|{tmp_path}"] == 0
     assert (tmp_path / "clean_exit").read_text(encoding="utf-8") == "ok"
+
+
+def test_redirect_log_writes_per_role_file_and_exports_dir_for_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_research.capture.run import LOG_DIR_ENV, redirect_log
+
+    monkeypatch.delenv(LOG_DIR_ENV, raising=False)
+    original = sys.stderr
+    try:
+        assert redirect_log(None, "rest") is None  # nothing configured: console logging stays
+        path = redirect_log(tmp_path / "logs", "supervisor")
+        assert path == tmp_path / "logs" / "supervisor.log"
+        print("hello", file=sys.stderr)
+        child = redirect_log(None, "ws")  # a spawned child sees only the environment
+        assert child == tmp_path / "logs" / "ws.log"
+    finally:
+        for stream in (sys.stderr,):
+            if stream is not original:
+                stream.close()
+        sys.stderr = original
+    assert (tmp_path / "logs" / "supervisor.log").read_text(encoding="utf-8") == "hello\n"

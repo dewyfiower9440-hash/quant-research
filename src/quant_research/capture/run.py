@@ -33,6 +33,7 @@ import websockets
 from websockets.exceptions import InvalidStatus
 
 from quant_research.capture import binance, upbit
+from quant_research.capture.backup import backup_closed_files
 from quant_research.capture.clockref import ClockReference
 from quant_research.capture.compress import compress_closed_segments
 from quant_research.capture.http import Fetcher, VenueGate
@@ -227,6 +228,12 @@ async def rest_main(
 
                 return run_pass
 
+            async def backup() -> None:
+                done = await asyncio.to_thread(
+                    backup_closed_files, settings.data_root, settings.backup_root, now_ns=time.time_ns()
+                )
+                sinks.write("collector.backup", {"copied": len(done.copied), "unchanged": done.unchanged})
+
             async def compress() -> None:
                 done = await asyncio.to_thread(
                     compress_closed_segments, settings.data_root / "raw", now_ns=time.time_ns()
@@ -272,6 +279,7 @@ async def rest_main(
                     initial_delay_s=900,
                 ),
                 periodic("compress", 600, compress, health, stop, sinks=sinks, initial_delay_s=120),
+                periodic("backup", 3_600, backup, health, stop, sinks=sinks, initial_delay_s=1_200),
                 *_common_jobs(settings, health, sinks, stop),
             ]
             await asyncio.gather(*jobs)
@@ -452,11 +460,29 @@ def supervise(
     return result
 
 
+LOG_DIR_ENV = "QR_LOG_DIR"
+
+
+def redirect_log(log_dir: Path | None, role: str) -> Path | None:
+    """Under Task Scheduler the collector runs as pythonw.exe (no console, sys.stderr is None). Send this
+    process's log to <log_dir>/<role>.log; the directory is exported so spawned children do the same."""
+    chosen = log_dir or (Path(os.environ[LOG_DIR_ENV]) if os.environ.get(LOG_DIR_ENV) else None)
+    if chosen is None:
+        return None
+    chosen.mkdir(parents=True, exist_ok=True)
+    os.environ[LOG_DIR_ENV] = str(chosen)
+    path = chosen / f"{role}.log"
+    sys.stderr = path.open("a", encoding="utf-8", buffering=1)
+    return path
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="quant_research.capture.run")
     ap.add_argument("role", choices=["rest", "ws", "supervisor"])
     ap.add_argument("--duration", type=float, default=None, help="stop after N seconds (tests, timed runs)")
+    ap.add_argument("--log-dir", type=Path, default=None, help="write this process's log to <dir>/<role>.log")
     a = ap.parse_args(argv)
+    redirect_log(a.log_dir, a.role)
     settings = load_settings()
     configure_logging(settings.log_level, json=True)
     run_dir = settings.data_root / "run"
