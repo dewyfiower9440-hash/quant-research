@@ -1,0 +1,96 @@
+"""Upbit T0 collectors (design v2.1 §5.2). Verified 2026-11-08: orderbook `count=1` works, trade
+`cursor` pages to older trades, `days_ago` accepts 1..7, the `announcement` WS type is rejected
+(INVALID_PARAM) on the Korean API, so announcements are not collected."""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, cast
+
+from quant_research.capture.http import Fetcher
+from quant_research.capture.sinks import Sinks
+
+API = "https://api.upbit.com/v1"  # no trailing slash: paths ending in "/" fail from 2026-11-16
+TRADE_PAGE = 500
+
+
+async def top_krw_markets(f: Fetcher, n: int) -> list[str]:
+    markets = cast(list[dict[str, Any]], (await f.get(f"{API}/market/all")).json())
+    krw = [str(m["market"]) for m in markets if str(m["market"]).startswith("KRW-")]
+    tickers: list[dict[str, Any]] = []
+    for i in range(0, len(krw), 100):
+        tickers.extend(
+            cast(list[dict[str, Any]], (await f.get(f"{API}/ticker", {"markets": ",".join(krw[i : i + 100])})).json())
+        )
+    tickers.sort(key=lambda t: float(t["acc_trade_price_24h"]), reverse=True)
+    return [str(t["market"]) for t in tickers[:n]]
+
+
+async def market_snapshot(f: Fetcher, sinks: Sinks) -> None:
+    """Daily: market list with warning/caution flags (their history exists only if we snapshot it)."""
+    sinks.write("upbit.markets", (await f.get(f"{API}/market/all", {"is_details": "true"})).json())
+
+
+async def orderbook_once(f: Fetcher, sinks: Sinks, markets: list[str]) -> None:
+    payload = (await f.get(f"{API}/orderbook", {"markets": ",".join(markets), "count": 1})).json()
+    sinks.write("upbit.orderbook_l1_1s", payload)
+
+
+@dataclass
+class TradeCursorState:
+    """Newest trade timestamp captured per market; persisted so restarts resume (7-day API window)."""
+
+    path: Path
+    last_ts_ms: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+
+    @classmethod
+    def load(cls, path: Path) -> TradeCursorState:
+        if not path.exists():
+            return cls(path)
+        data = cast(dict[str, int], json.loads(path.read_text(encoding="utf-8")))
+        return cls(path, {k: int(v) for k, v in data.items()})
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.last_ts_ms), encoding="utf-8")
+        os.replace(tmp, self.path)  # only this process reads/writes the state file
+
+
+async def trades_catchup(f: Fetcher, sinks: Sinks, market: str, state: TradeCursorState) -> int:
+    """Page backwards from the newest trade until the previously captured timestamp (or 7 days back on
+    the first run). Overlap is intentional; the normalizer deduplicates by `sequential_id`."""
+    known = state.last_ts_ms.get(market)
+    newest = known
+    pages = 0
+    for days_ago in range(8):  # 0 = today (no parameter), 1..7 = earlier UTC days
+        cursor: int | None = None
+        reached_known = False
+        while True:
+            params: dict[str, str | int] = {"market": market, "count": TRADE_PAGE}
+            if days_ago:
+                params["days_ago"] = days_ago
+            if cursor is not None:
+                params["cursor"] = cursor
+            rows = cast(list[dict[str, Any]], (await f.get(f"{API}/trades/ticks", params)).json())
+            pages += 1
+            if not rows:
+                break
+            sinks.write("upbit.trades", {"market": market, "days_ago": days_ago, "rows": rows})
+            stamps = [int(r["timestamp"]) for r in rows]
+            newest = max(newest or 0, *stamps)
+            if known is not None and min(stamps) <= known:
+                reached_known = True
+                break
+            if len(rows) < TRADE_PAGE:
+                break
+            cursor = int(rows[-1]["sequential_id"])
+        if reached_known:
+            break
+    if newest is not None:
+        state.last_ts_ms[market] = newest
+        state.save()
+    return pages
