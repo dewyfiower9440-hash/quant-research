@@ -92,4 +92,4 @@
   - dev-tools scaffold 템플릿의 같은 패턴은 공유 도구라 범위 밖입니다. 사용자에게 보고하고 수정을 제안합니다.
   - 다음부터 단계를 완료할 때 `git status --porcelain --ignored`로 무시된 소스 파일이 있는지 확인합니다.
 - **재검증:** 수정 커밋의 CI run(아래 test-results)
-- **상태:** 수정 중 → CI 확인 후 해결
+- **상태:** 해결(CI run 42536249442, 169 passed)

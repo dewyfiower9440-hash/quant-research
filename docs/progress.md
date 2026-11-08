@@ -10,9 +10,9 @@
 | 2 | Phase 0 측정 | DONE (CI run 42469337357) | 2026-11-08 |
 | 3 | 원본 캡처기 최소판 | DONE (CI run 42480240871) | 2026-11-08 |
 | 4 | 조기 백업과 복원 리허설 | PARTIAL (외부 대상 미정) | 2026-11-08 |
-| 5 | 카탈로그 스키마 | DONE (CI 확인 후 run id 기록) | 2026-11-09 |
-| 6 | as_of / join_asof API | TODO | |
-| 7 | 컴팩션과 정규화 | TODO | |
+| 5 | 카탈로그 스키마 | DONE (CI run 42531815458) | 2026-11-09 |
+| 6 | as_of / join_asof API | DONE (CI run 42536249442, F-007로 재확정) | 2026-11-09 |
+| 7 | 컴팩션과 정규화 | DONE (CI run 42536249442) | 2026-11-09 |
 | 8 | Binance 벌크 T1 | TODO | |
 | 9 | Upbit 분봉 백필 | TODO | |
 | 10 | 모니터와 작업 스케줄러 | 스케줄러 부분 완료(재부팅 검증 대기), 모니터 TODO | 2026-11-08 |
@@ -173,3 +173,21 @@
 - **아키텍처 테스트:** `src` 안에서 `pyarrow`/`duckdb` import와 `read_parquet`/`scan_parquet` 호출은 `data/lake.py`에서만 허용합니다(작업 7에서 구현).
 - **경고 처리:** Polars가 `by` 그룹에서는 정렬을 검사하지 못한다는 경고를 냈습니다. 코드가 직접 정렬하는 것을 근거로 `by`를 쓸 때만 `check_sortedness`를 끄고, 행 순서를 섞은 입력 테스트로 정확성을 검증했습니다. 경고를 오류로 바꿔 돌린 실행(`-W error::UserWarning`)도 146개 모두 통과했습니다.
 - **다음 작업:** 7. 컴팩션과 정규화
+
+**정정(F-007):** 작업 6의 첫 CI(run 42533347966)에는 `src/quant_research/data/`와 `tests/data/`가 빠져 있었습니다. `.gitignore` `data/` 패턴 때문입니다. 따라서 그 시점의 DONE 판정은 잘못이었습니다. 수정 커밋의 CI run 42536249442(169 passed)로 다시 확정했습니다.
+
+## 7. 컴팩션과 정규화 (DONE)
+- **완료 조건:** 재생 결정성, 리더가 파일을 연 상태에서 컴팩션 성공, 재수정 시 두 버전 모두 조회 가능
+- **구현 파일**
+  - `normalize/rows.py`(데이터셋 11개 정규화, 실제 payload 형태 기준)
+  - `data/lake.py`(Parquet 입출력을 이 모듈에만 둠, 바이템포럴 리더)
+  - `data/compact.py`(세그먼트 하나당 불변 Parquet 하나, catalog `compacted_segment`로 멱등성 보장, CLI)
+  - migration `0002_compaction.sql`
+  - rest 프로세스의 `compact` 작업(10분 주기, 온도 차단 대상)
+- **테스트:** `tests/normalize/test_rows.py`(13), `tests/data/test_compact.py`(10)
+- **실데이터(2026-11-09)**
+  - 컴팩션: 세그먼트 188개, 21,788,866행, 실패 0, 3분 37초
+  - bookTicker 2,219,400행, 52개 심볼, 12.6시간
+  - OI 456,285행. 재수정 버전은 아직 0건(ADR-007 가정은 추후 재평가)
+- **배포:** 운영 문서의 정지 절차로 수집기를 재배포했습니다(정상 종료 19초, 이후 정상).
+- **다음 작업:** 8. Binance 벌크 T1
