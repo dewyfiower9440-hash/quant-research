@@ -251,3 +251,22 @@ def test_ws_main_writes_heartbeat_while_messages_keep_arriving(tmp_path: Path) -
 
     asyncio.run(go())
     assert probe[0].heartbeat_seen_while_busy
+
+
+def test_supervisor_itself_shuts_down_when_the_stop_file_appears(tmp_path: Path) -> None:
+    """Operator stop: children exit cleanly and must not be restarted into a stop loop."""
+    import threading
+
+    def drop_stop_file() -> None:
+        time.sleep(2.0)
+        (tmp_path / "run").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "run" / STOP_FILE).write_text("stop", encoding="utf-8")
+
+    threading.Thread(target=drop_stop_file, daemon=True).start()
+    started = time.monotonic()
+    result = supervise(
+        Settings(data_root=tmp_path), [f"patient|{tmp_path}"], max_runtime_s=60.0, target=dispatch_child, poll_s=0.3
+    )
+    assert time.monotonic() - started < 20
+    assert result.restarts[f"patient|{tmp_path}"] == 0
+    assert (tmp_path / "clean_exit").read_text(encoding="utf-8") == "ok"

@@ -410,6 +410,9 @@ def supervise(
     try:
         while (t_end is None or time.monotonic() < t_end) and not result.stopped_all:
             time.sleep(poll_s)
+            if stop_file.exists():  # operator stop: children exit on their own; do not restart them
+                log.info("supervisor.stop_file", path=str(stop_file))
+                break
             now = time.monotonic()
             for name in children:
                 if name in result.retired:
