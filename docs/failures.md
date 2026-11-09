@@ -194,3 +194,17 @@
   - 원인(절전, 네트워크, 정지)을 구분하지 못합니다.
   - 임계값 30초는 초깃값이며, 기록된 gap 분포를 보고 다시 조정합니다.
 - **상태:** 해결
+
+## F-012 (2026-11-09, 운영) 수집기 restart gap이 카탈로그에 들어가지 않음
+- **증상:** 11-08 14:41Z 이후의 `process.rest`·`process.ws` restart gap이 카탈로그 `gap`에 없었습니다. `raw/_gaps/*.jsonl`에만 있었습니다.
+- **원인:** 카탈로그로 가져오는 `Catalog.import_gaps`를 bootstrap CLI로만 실행했고, 자동으로 실행하는 곳이 없었습니다.
+- **수정:** 컴팩션 자식 프로세스의 `scan_once`가 매 주기 `import_gaps`를 실행합니다. gap identity 인덱스 덕분에 멱등입니다.
+  - 테스트: `tests/data/test_gapscan.py::test_scan_once_also_imports_the_collectors_gap_logs_idempotently`
+- **적용:** 자식 프로세스는 매번 새로 생성되므로 수집기를 다시 시작하지 않아도 반영됩니다. 이후 restart gap 12건과 10건이 들어온 것을 확인했습니다(`docs/measurements/validate-week.md` §2).
+- **상태:** 해결
+
+## F-013 (2026-11-09, 작업 8) bookDepth `percentage` 형식 변화
+- **증상:** 파일럿에서 2026-10 bookDepth 파일이 `could not parse '5.00' as dtype i64`로 실패했습니다.
+- **원인:** 2023년 파일은 `-5`, 2026년 파일은 `5.00`으로 씁니다.
+- **수정:** Float64로 읽고, 두 형식을 모두 담은 테스트를 추가했습니다. 다시 실행한 파일럿은 2개월, 60개 파일이 통과했습니다.
+- **상태:** 해결

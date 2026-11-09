@@ -56,7 +56,26 @@
 - **조회:** `select source, start_ns, end_ns from gap where detail = 'receive_gap' order by start_ns`
 - **권장(사용자 결정):** 수집 중에는 전원을 연결하고 설정 → 시스템 → 전원에서 "전원 연결 시 절전 안 함"으로 두세요. 이 SSD는 절전 중 BSOD 이력이 있습니다. Claude는 OS 전원 설정을 바꾸지 않습니다.
 
-## 8. 미결 항목
+## 8. 모니터와 알림 (작업 10, ADR-017)
+- rest 작업 프로세스가 5분마다 점검합니다. 새 incident는 `C:\dev\qr-data\run\alerts.log`에 남고 Windows 토스트로 뜹니다.
+- **조회:** `select key, severity, opened_ns, closed_ns, detail from incident order by opened_ns desc`
+- **현재 열린 incident:** `ssd_monitor`. SSD 감시 작업이 등록되지 않아서이며, 등록하면 닫힙니다.
+
+## 9. 백업과 복원 리허설
+- 백업 job(1시간 주기)이 원본을 증분 복사하고, 카탈로그 스냅샷(`C:\dev\qr-backup\catalog\catalog-YYYYMMDD.db`, 7일)을 만듭니다.
+- **리허설:** `uv run python tools/restore_drill.py --to C:/dev/qr-restore-drill --snapshot` → exit 0이면 전부 일치입니다. 복원 폴더는 자동으로 지웁니다.
+
+## 10. T1 추가 벌크와 유니버스 적재
+- **등록(사용자 실행):** `powershell -NoProfile -File C:\dev\quant-research\tools\register_bulk_extras_task.ps1`(작업 `qr-bulk-extras`)
+  - klines가 실행 중이면 exit 2로 끝나고 30분 뒤 다시 시도합니다.
+- **상태:** `run/bulk-extras.progress.json`, `logs/bulk-extras-task.log`. 완료되면 `bulk/complete-extras-universe-20261109.json`이 생깁니다.
+- **유니버스 적재(멱등):** `uv run python tools/load_universe_catalog.py --universe C:/dev/qr-data/bulk/universe-20261109.json`
+- **벌크와 REST 대조:** `uv run python tools/validate_bulk_klines.py [--seed N]`
+- **7일 검증 보고:** `uv run python tools/validate_week.py`
+
+## 11. 미결 항목
 - 외부 백업: 보류(2026-11-09). OneDrive 용량 5GB로는 부족합니다. 같은 SSD의 로컬 백업만 있어 SSD가 고장 나면 실시간 수집분을 영구히 잃습니다(progress §4).
 - SSD 온도 감시 작업(관리자 예약 작업, 읽기 전용)
-- 재부팅 후 재개 검증
+- 재부팅 후 재개 검증(사용자 승인 필요)
+- Upbit 분봉 백필 작업 등록(사용자 실행, `tools/register_upbit_backfill_task.ps1`)
+- T1 추가 벌크 작업 등록(사용자 실행, `tools/register_bulk_extras_task.ps1`)

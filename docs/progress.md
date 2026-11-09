@@ -13,10 +13,10 @@
 | 5 | 카탈로그 스키마 | DONE (CI run 42531815458) | 2026-11-09 |
 | 6 | as_of / join_asof API | DONE (CI run 42536249442, F-007로 재확정) | 2026-11-09 |
 | 7 | 컴팩션과 정규화 | DONE (CI run 42536249442) | 2026-11-09 |
-| 8 | Binance 벌크 T1 | IN_PROGRESS (klines 4종 199/632 심볼, 33%, 실패 0. funding·metrics·bookDepth 미착수) | 2026-11-09 |
-| 9 | Upbit 분봉 백필 | IN_PROGRESS (구현·파일럿·trades 대조 완료, 전체 실행 작업 등록 대기) | 2026-11-09 |
-| 10 | 모니터와 작업 스케줄러 | PARTIAL (스케줄러, 수신 공백 기록, 백업 경쟁 수정 완료. 디스크·RAM·시계 경보, 알림, SSD 감시 등록, 재부팅 검증 남음) | 2026-11-09 |
-| 11 | 7일 연속 운영 검증 | TODO | |
+| 8 | Binance 벌크 T1 | IN_PROGRESS (klines 4종 418/632 심볼, 68%, 실패 3(재시도 대상). REST 대조 100/100 일치. funding·metrics·bookDepth·현물 klines 구현·파일럿 완료, 전체 실행 작업 등록 대기) | 2026-11-09 |
+| 9 | Upbit 분봉 백필 | IN_PROGRESS (구현·파일럿·trades 대조 완료. 전체 실행 작업 등록이 자동 모드에서 거부됨: 사용자 실행 필요) | 2026-11-09 |
+| 10 | 모니터와 작업 스케줄러 | PARTIAL (모니터·incident·토스트 알림, 강제 종료 복구 16.2초 실측 완료. 재부팅 후 복구 검증, SSD 감시 작업 등록 남음: 사용자 승인 필요) | 2026-11-09 |
+| 11 | 7일 연속 운영 검증 | IN_PROGRESS (도구 완료, 중간 보고 1.16일. 최종 판정 2026-11-15 이후) | 2026-11-09 |
 
 ---
 
@@ -277,3 +277,51 @@
     - 소규모 재개 테스트(0GUSDT, 1000XECUSDT): 이미 받은 41개는 건너뛰고 91개를 새로 받음(390만 행, 73.6MB), 실패 0, gap 18, exit 0. 최대 working set 195MB, private 254MB
     - 작업 시작 10:42:25: 앞의 11개 심볼(1,132개 파일)을 건너뛰고 이어서 진행
 - **남은 일:** 전체 완료 후 체크섬 실패 0 확인, REST 대조 샘플 검증, 용량 실측
+
+## Phase 1 마무리 (2026-11-09, 계획 `docs/plans/2026-11-09-phase1-completion.md`)
+- **시작 시점 점검(13:06Z)**
+  - 벌크 klines 345/632(57.7%), 실패 3건: MATICUSDT premium 2021-06~08. 절전에서 깨어난 직후 DNS 실패로 생겼으며, 다음 실행에서 재시도됩니다.
+  - 수집기는 정상이었고 basis 400 소음이 23개 심볼에서 났습니다.
+  - **두 번째 절전** 11:39:39Z~13:02:55Z(83분)를 발견했습니다.
+- **1. 카탈로그 백업(4단계):** `snapshot_catalog`/`restore_catalog_and_verify`. 실데이터 리허설 결과 원본 711/711개, 카탈로그 1/1개가 일치했습니다(§4).
+- **2. 모니터(10단계)**
+  - 구성: `monitor/checks.py`(순수 판정), `monitor/incidents.py`(카탈로그 `incident`, 마이그레이션 0006), `monitor/observe.py`(rest job, 5분 주기), `adapters/notify.py` + `tools/notify.ps1`(로그온 세션 토스트), `run/alerts.log`
+  - 점검 항목: ws 하트비트 120초, 디스크 50GB/20GB, RAM 1GB, 시계 250ms·5분, SSD 상태, 5분 이상 수신 공백
+  - basis -4104 심볼은 처음 한 번만 보고하고 이후에는 건너뜁니다.
+  - **실측 결과**
+    - 13:35Z STOP으로 재시작하는 데 30초 걸렸습니다.
+    - 13:36:32Z에 rest 작업 프로세스를 **강제 종료**하자 supervisor가 **16.2초 만에 복구**했습니다(재시작 대기 10초 포함). 10단계의 강제 종료 후 복구 완료 조건을 충족합니다.
+    - 첫 모니터 실행(13:38Z)에서 `ssd_monitor` incident를 열고 토스트를 보냈습니다(SSD 감시 작업 미등록).
+    - 14:03Z에 두 번째 절전(11:39Z~)의 수신 공백 incident가 열리고 알림이 갔으며, 14:08Z에 닫혔습니다.
+  - **F-012:** 수집기 gap 로그(`raw/_gaps`)를 카탈로그에 넣는 작업이 수동이어서, 11-08 14:41Z 이후의 restart gap이 빠져 있었습니다. 이제 컴팩션 자식 프로세스의 스캔에서 매번 가져옵니다(멱등).
+- **3. Upbit 백필 작업 등록:** 자동 모드 분류기가 "무단 지속 실행"으로 거부했습니다(2회째). 우회하지 않았으며 사용자가 직접 실행해야 합니다(아래 명령).
+- **4b. 상품·유니버스(설계 §5.3·§5.4)**
+  - 리허설 중 `instrument`와 `universe_membership`이 0행인 것을 발견했습니다.
+  - `catalog/universe_load.py`와 `tools/load_universe_catalog.py`로 상품 1,269개(Binance 969, Upbit KRW 300)를 적재했습니다.
+  - 소속 구간 1,614개를 적재했습니다.
+    - `binance.um.pit_top100.v1`: 1,507
+    - `binance.um.collector_top.v1`: 71
+    - `upbit.collector_krw.v1`: 36
+  - 다시 실행하면 0개가 추가됩니다(멱등).
+  - MATIC→POL 같은 계보 연결은 출처 목록이 필요해 이번 범위에서 뺐습니다.
+- **4. T1 추가 데이터(8단계)**
+  - 구성: `bulk/extras.py`(파서, 월 묶음 저장), `bulk/s3.py`, `tools/bulk_extras.py`, `tools/register_bulk_extras_task.ps1`
+  - 파일럿(BTCUSDT·1000SHIBUSDT, 종류마다 최근 1개월)
+    - funding 2개월 186행
+    - metrics 2개월 61개 파일, 1만 8천 행
+    - 현물 klines(BTCUSDT, SHIBUSDT) 2개월
+    - bookDepth 2개월 60개 파일, 200만 행. 비공개 메모리 530MB였습니다.
+  - **F-013:** bookDepth `percentage`가 2023년 파일은 `-5`, 2026년 파일은 `5.00`이었습니다. 파일럿에서 실패해 발견했고 Float64로 고쳤습니다.
+  - 전체 실행은 klines와 같은 `run/bulk.lock`을 쓰므로 klines가 끝난 뒤에 진행됩니다. 작업 등록이 필요합니다.
+- **5. 벌크와 REST 대조(8단계 완료 조건):** `tools/validate_bulk_klines.py`
+  - seed 20261109: 40/40개 표본, 20,000봉 일치
+  - seed 7: 60/60개 표본, 29,956봉 일치
+  - 첫 실행(38/40)의 두 건은 상장 전 구간에 창이 떨어져 양쪽 모두 0봉이었습니다. 빈 비교는 계속 실패로 두고, 표본 창을 실제 데이터 범위 안에서 고르도록 고쳤습니다.
+- **6. 7일 검증(11단계):** `tools/validate_week.py` → `docs/measurements/validate-week.md`
+  - 중간 보고(1.16일) 커버리지: bookTicker 82.3%, Upbit 호가 68.9%, 강제청산 82.3%
+  - 결측은 대부분 절전 2회(190분, 83분)와 11-08 Upbit 장애(225분)입니다.
+  - OI·비율 30일 재수집에서 값이 바뀐 키는 0/약 62만이었습니다.
+- **커밋과 CI:** d6dcdc8(run 42624331261), e8c09bc(42626757724), 223acb1(42627623060), 3d37186(42628316477), 741e3f1(42630262427), 1d0c690(42632224371) 모두 success
+- **사용자 실행이 필요한 명령(일반 사용자 작업, 관리자 권한 불필요)**
+  - `! powershell -NoProfile -File C:\dev\quant-research\tools\register_upbit_backfill_task.ps1`
+  - `! powershell -NoProfile -File C:\dev\quant-research\tools\register_bulk_extras_task.ps1`
