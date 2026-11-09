@@ -80,7 +80,7 @@ task: qr-phase2
   - 내용: `data/lake.py` `load_bulk(dataset, symbols, months)`(필요한 파일만, 최신 버전), `backtest/panel.py`(1m → timeframe 봉, 봉 available = 구성 1m 행의 available 최대값, 결정 격자 as-of, PIT 유니버스 구성원 마스크, 결측 마스크)
   - 봉인 검사는 PIT API의 공개 메서드로 합니다(access.py에 결정 시점 검사 메서드를 분리하고 join_asof도 이를 사용).
   - 테스트: 봉 available, 봉인 위반 거부, 구성원 마스크, 결측 봉, 읽은 파일 수(필요한 파일만)
-- [ ] 4. **연산자 컴파일러와 누수 테스트**
+- [x] 4. **연산자 컴파일러와 누수 테스트**
   - 내용: `strategy/compile.py`. 특징·신호를 Polars 식으로 바꿉니다(시계열은 심볼별 over, 횡단면은 시점별 구성원만, 국면은 확장 창 분위).
   - 테스트: 연산자마다 손으로 계산한 값, **연산자마다 미래 값 주입 누수 테스트**(T 이후 값을 바꿔도 T 이전 출력이 같음), 구간 시작 시각 주입(봉 시각을 시작으로 바꿔 넣으면 탐지), lookback 워밍업은 null
 - [ ] 5. **비용 모델**
