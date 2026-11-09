@@ -22,6 +22,7 @@ FORCE_ORDER_URL = "wss://fstream.binance.com/market/stream?streams=!forceOrder@a
 
 PERIOD_MS = 300_000
 PAGE_ROWS = 500
+UNSUPPORTED_CONTRACT = '"code":-4104'  # Invalid contract type (basis is not offered for TradFi perps)
 METRIC_ENDPOINTS: dict[str, tuple[str, str]] = {
     "binance.um.oi_hist": ("/futures/data/openInterestHist", "symbol"),
     "binance.um.top_ls_account": ("/futures/data/topLongShortAccountRatio", "symbol"),
@@ -83,16 +84,20 @@ async def metrics_refetch(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     stop: asyncio.Event | None = None,
     on_error: Callable[[str, str, Exception], None] | None = None,
+    unsupported: set[tuple[str, str]] | None = None,
 ) -> int:
     """Re-download the rolling 30-day window of 5m derivatives metrics (design v2.1: every row version is
     kept; the normalizer adds only changed rows as new versions). ~1000 req/5 min/IP -> paced.
 
     A full pass takes tens of minutes, so the window is recomputed per symbol (never older than the API
     keeps), a failing symbol does not skip the rest (on_error records it), and `stop` is honoured per page.
-    BannedError always propagates."""
+    BannedError always propagates. A (source, symbol) answered with -4104 (contract type not offered, e.g.
+    basis for TradFi perps) joins `unsupported` and is skipped by later passes sharing that set."""
     calls = 0
     for source, (path, key) in METRIC_ENDPOINTS.items():
         for sym in symbols:
+            if unsupported is not None and (source, sym) in unsupported:
+                continue
             now = now_ms()
             start = int(now - days * 86_400_000) + PERIOD_MS
             try:
@@ -112,6 +117,8 @@ async def metrics_refetch(
             except BannedError:
                 raise
             except ExternalServiceError as e:
+                if unsupported is not None and UNSUPPORTED_CONTRACT in str(e):
+                    unsupported.add((source, sym))
                 if on_error is None:
                     raise
                 on_error(source, sym, e)

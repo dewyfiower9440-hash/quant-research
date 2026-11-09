@@ -33,6 +33,7 @@ ROW_COUNT_SQL: dict[str, str] = {
     "backfill_chunk": "select count(*) from backfill_chunk",
     "backfill_done": "select count(*) from backfill_done",
     "gapscan_segment": "select count(*) from gapscan_segment",
+    "incident": "select count(*) from incident",
 }
 
 MarketType = Literal["spot", "usdm_perp", "usdm_future"]

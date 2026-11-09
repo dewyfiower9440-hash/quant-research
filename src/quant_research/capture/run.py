@@ -33,6 +33,7 @@ import structlog
 import websockets
 from websockets.exceptions import InvalidStatus
 
+from quant_research.adapters.notify import ToastNotifier
 from quant_research.capture import binance, upbit
 from quant_research.capture.backup import backup_closed_files, snapshot_catalog
 from quant_research.capture.clockref import ClockReference
@@ -45,6 +46,7 @@ from quant_research.capture.sinks import Sinks
 from quant_research.capture.thermal import heavy_work_allowed, read_state
 from quant_research.config import Settings, load_settings
 from quant_research.log import configure_logging
+from quant_research.monitor.observe import monitor_once
 
 EXIT_STOP_ALL = 3
 EXIT_RETIRE = 4
@@ -147,12 +149,15 @@ async def _wait(stop: asyncio.Event, seconds: float) -> None:
         return
 
 
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
 def _make_sinks(settings: Settings) -> Sinks:
-    repo = Path(__file__).resolve().parents[3]
     return Sinks(
         raw_root=settings.data_root / "raw",
         collector_version=version("quant-research"),
-        git_sha=git_sha(repo),
+        git_sha=git_sha(repo_root()),
         clock=ClockReference(),
     )
 
@@ -235,6 +240,8 @@ async def rest_main(
                     {"job": "metrics", "source": source, "symbol": symbol, "error": message},
                 )
 
+            unsupported: set[tuple[str, str]] = set()  # e.g. basis of TradFi perps: reported once, then skipped
+
             def metrics_pass(days: float) -> Callable[[], Awaitable[int]]:
                 """ADR-007: full 30-day window daily (revisions), last page (~41.7 h) hourly (freshness)."""
 
@@ -247,6 +254,7 @@ async def rest_main(
                         days=days,
                         stop=stop,
                         on_error=metric_failed,
+                        unsupported=unsupported,
                     )
 
                 return run_pass
@@ -285,6 +293,22 @@ async def rest_main(
                 sinks.write(
                     "collector.gapscan", {"scanned": scan.scanned, "gaps": scan.gaps, "vanished": scan.vanished}
                 )
+
+            notifier = ToastNotifier(repo_root() / "tools" / "notify.ps1", settings.data_root / "run" / "alerts.json")
+            monitor_since = {"ns": health.started_ns}
+
+            async def monitor() -> None:
+                """Plan step 10: host/collector checks -> catalog incidents -> toast for new ones."""
+                checked = time.time_ns()
+                fresh = await asyncio.to_thread(
+                    monitor_once, settings.data_root, sinks.clock, notifier, since_ns=monitor_since["ns"]
+                )
+                monitor_since["ns"] = checked
+                if fresh:
+                    sinks.write(
+                        "collector.incidents.monitor",
+                        [{"key": f.key, "severity": f.severity, "detail": f.detail} for f in fresh],
+                    )
 
             async def compress() -> None:
                 done = await asyncio.to_thread(
@@ -341,6 +365,7 @@ async def rest_main(
                 periodic("compress", 600, heavy("compress", compress), health, stop, sinks=sinks, initial_delay_s=120),
                 periodic("compact", 600, heavy("compact", compact), health, stop, sinks=sinks, initial_delay_s=300),
                 periodic("backup", 3_600, heavy("backup", backup), health, stop, sinks=sinks, initial_delay_s=1_200),
+                periodic("monitor", 300, monitor, health, stop, sinks=sinks, initial_delay_s=90),
                 *_common_jobs(settings, health, sinks, stop),
             ]
             await asyncio.gather(*jobs)

@@ -231,3 +231,39 @@ def test_recent_metrics_pass_requests_exactly_one_integer_page_per_endpoint(tmp_
     sinks.close()
     assert calls == len(binance.METRIC_ENDPOINTS)
     assert all(r.url.params["startTime"].isdigit() for r in seen)
+
+
+def test_metrics_refetch_skips_a_symbol_whose_contract_type_is_unsupported_after_the_first_400(
+    tmp_path: Path,
+) -> None:
+    """2026-11-09: TradFi perps answer basis with 400 -4104 on every pass (23 symbols of noise)."""
+    calls: list[str] = []
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        calls.append(str(r.url))
+        if "basis" in r.url.path and r.url.params.get("pair") == "XAUUSDT":
+            return httpx.Response(400, text='{"code":-4104,"msg":"Invalid contract type."}')
+        return httpx.Response(200, json=[])
+
+    f = Fetcher(httpx.AsyncClient(transport=httpx.MockTransport(handler)), "binance", sleep=Sleeps(), rng=NoJitter())
+    sinks = _sinks(tmp_path)
+    unsupported: set[tuple[str, str]] = set()
+    errors: list[tuple[str, str]] = []
+    for _ in range(2):
+        asyncio.run(
+            binance.metrics_refetch(
+                f,
+                sinks,
+                ["XAUUSDT"],
+                now_ms=lambda: 1_794_000_000_000,
+                days=0.1,
+                sleep=Sleeps(),
+                on_error=lambda src, sym, _e: errors.append((src, sym)),
+                unsupported=unsupported,
+            )
+        )
+    sinks.close()
+    assert unsupported == {("binance.um.basis", "XAUUSDT")}
+    assert errors == [("binance.um.basis", "XAUUSDT")]  # reported once, then skipped
+    assert sum("basis" in c for c in calls) == 1
+    assert sum("openInterestHist" in c for c in calls) == 2  # the other endpoints still run for it
