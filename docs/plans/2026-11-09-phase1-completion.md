@@ -62,7 +62,7 @@ task: qr-phase1-completion
 - [x] 2. 모니터: 마이그레이션 0006, `monitor/checks.py`, rest job, 알림, basis 소음 제거(테스트 먼저). 재시작해 적용하고, 강제 종료 후 복구를 실측합니다.
 - [ ] 3. Upbit 분봉 전체 백필 작업 등록(step9 계획 5단계)과 진행 보고
 - [ ] 4. T1 추가 데이터: 파서, 월 묶음 다운로더, 실행 도구, 작업 등록(테스트 먼저). 소규모 파일럿을 먼저 돌립니다.
-- [ ] 4b. 카탈로그 `universe_membership`(유니버스 보고서의 시점별 top-100 구간)과 `instrument`(Binance exchangeInfo, Upbit 마켓 스냅샷)을 채웁니다. 1단계 리허설에서 두 테이블이 0행인 것을 발견했고, 설계 §5.3·§5.4가 요구하는 항목입니다.
+- [x] 4b. 카탈로그 `universe_membership`(유니버스 보고서의 시점별 top-100 구간)과 `instrument`(Binance exchangeInfo, Upbit 마켓 스냅샷)을 채웁니다. 1단계 리허설에서 두 테이블이 0행인 것을 발견했고, 설계 §5.3·§5.4가 요구하는 항목입니다.
 - [ ] 5. 벌크와 REST 표본 대조 도구와 실행 결과
 - [ ] 6. 7일 검증 도구와 중간 보고
 - [ ] 7. 문서(progress, decisions, failures, operations, test-results, 실행 계획 체크박스)
