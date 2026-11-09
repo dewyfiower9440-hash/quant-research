@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import time
 import traceback
@@ -33,7 +32,6 @@ from pathlib import Path
 
 import httpx
 
-S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 KINDS = {
     "klines": "binance.um.bulk.klines_1m",
     "markPriceKlines": "binance.um.bulk.mark_klines_1m",
@@ -41,32 +39,6 @@ KINDS = {
     "premiumIndexKlines": "binance.um.bulk.premium_klines_1m",
 }
 EXIT_OK, EXIT_ERROR, EXIT_RUNNING, EXIT_PAUSED, EXIT_FAILED_FILES = 0, 1, 2, 3, 4
-
-
-def listing(client: httpx.Client, prefix: str) -> list[tuple[str, int, str]]:
-    out: list[tuple[str, int, str]] = []
-    marker = ""
-    while True:
-        r = client.get(S3, params={"prefix": prefix, "marker": marker})
-        r.raise_for_status()
-        for block in re.findall(r"<Contents>(.*?)</Contents>", r.text, flags=re.S):
-            key = re.search(r"<Key>([^<]+)</Key>", block)
-            size = re.search(r"<Size>(\d+)</Size>", block)
-            mod = re.search(r"<LastModified>([^<]+)</LastModified>", block)
-            if key and size and mod and key.group(1).endswith(".zip"):
-                out.append((key.group(1), int(size.group(1)), mod.group(1)))
-        if "<IsTruncated>true</IsTruncated>" not in r.text:
-            return out
-        marker = out[-1][0]
-
-
-def wanted_months(spans: list[list[str | None]], months: list[str], warmup: int) -> set[str]:
-    wanted: set[str] = set()
-    for start, end in spans:
-        lo = months.index(str(start)) - warmup
-        hi = months.index(end) if end is not None else len(months)
-        wanted |= set(months[max(0, lo) : hi])
-    return wanted
 
 
 def dir_bytes(root: Path) -> int:
@@ -89,6 +61,7 @@ def main() -> int:
     from quant_research.adapters.jobhost import Log, memory_sample, write_json
     from quant_research.bulk.download import BulkTarget, download_targets
     from quant_research.bulk.guard import Limits, Sample, combine, resource_gate
+    from quant_research.bulk.s3 import listing, wanted_months
     from quant_research.capture.lock import AlreadyRunningError, InstanceLock
     from quant_research.capture.thermal import heavy_work_allowed, read_state
     from quant_research.catalog.bootstrap import bootstrap

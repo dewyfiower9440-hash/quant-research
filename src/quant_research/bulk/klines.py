@@ -56,8 +56,10 @@ def parse_kline_csv(text: str) -> pl.DataFrame:
     )
 
 
-def missing_minutes(opens_ns: list[int], *, month_start_ns: int, month_end_ns: int) -> list[tuple[int, int]]:
-    """[start, end) spans of the 1-minute grid in [month_start, month_end) without a bar."""
+def missing_minutes(
+    opens_ns: list[int], *, month_start_ns: int, month_end_ns: int, step_ns: int = MINUTE_NS
+) -> list[tuple[int, int]]:
+    """[start, end) spans of the `step_ns` grid (default 1 minute) in [month_start, month_end) without a row."""
     present = sorted(set(opens_ns))
     gaps: list[tuple[int, int]] = []
     expected = month_start_ns
@@ -66,7 +68,7 @@ def missing_minutes(opens_ns: list[int], *, month_start_ns: int, month_end_ns: i
             continue
         if t > expected:
             gaps.append((expected, t))
-        expected = t + MINUTE_NS
+        expected = t + step_ns
     if expected < month_end_ns:
         gaps.append((expected, month_end_ns))
     return gaps

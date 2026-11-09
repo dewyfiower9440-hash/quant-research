@@ -133,7 +133,7 @@ def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:
     """All compacted rows of a dataset. Bitemporal datasets collapse identical repeats to their first
     receipt and keep changed values under the same key as later versions."""
     files = sorted((data_root / "lake" / dataset_id).glob("*/*.parquet"))
-    if dataset_id.startswith("binance.um.bulk."):
+    if dataset_id.startswith(("binance.um.bulk.", "binance.spot.bulk.")):
         files = _latest_bulk_versions(files)
     if not files:
         return pl.DataFrame()

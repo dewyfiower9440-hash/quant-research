@@ -47,14 +47,14 @@ class DownloadResult:
     paused_reason: str | None = None
 
 
-def _month_bounds_ns(month: str) -> tuple[int, int]:
+def month_bounds_ns(month: str) -> tuple[int, int]:
     y, m = (int(x) for x in month.split("-"))
     start = datetime(y, m, 1, tzinfo=UTC)
     end = datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=UTC)
     return int(start.timestamp()) * 10**9, int(end.timestamp()) * 10**9
 
 
-def _always_allowed() -> tuple[bool, str]:
+def always_allowed() -> tuple[bool, str]:
     return True, "no thermal gate"
 
 
@@ -65,7 +65,7 @@ def download_targets(
     catalog: Catalog,
     client: httpx.Client,
     pause_s: float = 0.2,
-    heavy_allowed: Callable[[], tuple[bool, str]] = _always_allowed,
+    heavy_allowed: Callable[[], tuple[bool, str]] = always_allowed,
 ) -> DownloadResult:
     result = DownloadResult()
     have = {(str(r[0]), str(r[1])) for r in catalog.conn.execute("select url, last_modified from bulk_file")}
@@ -97,7 +97,7 @@ def download_targets(
         version = t.last_modified.replace(":", "").replace("-", "").replace(".", "")
         target = data_root / "lake" / t.dataset_id / t.month / f"{t.symbol}-{t.month}-{version}.parquet"
         write_frame(frame.with_columns(), target, symbol=t.symbol)
-        start_ns, end_ns = _month_bounds_ns(t.month)
+        start_ns, end_ns = month_bounds_ns(t.month)
         holes = (
             missing_minutes(frame["event_ns"].to_list(), month_start_ns=start_ns, month_end_ns=end_ns)
             if frame.height

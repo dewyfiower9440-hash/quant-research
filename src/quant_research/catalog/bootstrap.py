@@ -70,6 +70,15 @@ BULK_DATASETS: tuple[Dataset, ...] = (
     ),
     # plan step 9: REST backfill; a minute without a candle is `no_trade` (gap cause), not missing data
     Dataset("upbit.candles_1m", "upbit", "interval_start", ONE_MIN_MS, "Upbit REST 1m candles backfill, KRW top-N"),
+    # phase-1 completion step 4: T1 extras (bulk/extras.py). Metrics stamps are of unknown meaning (Phase 0).
+    Dataset("binance.um.bulk.funding", "binance", "event", None, "data.binance.vision monthly fundingRate"),
+    Dataset(
+        "binance.um.bulk.metrics_5m", "binance", "unknown_interval", FIVE_MIN_MS, "data.binance.vision daily metrics"
+    ),
+    Dataset("binance.um.bulk.book_depth", "binance", "event", None, "data.binance.vision daily bookDepth snapshots"),
+    Dataset(
+        "binance.spot.bulk.klines_1m", "binance", "interval_start", ONE_MIN_MS, "data.binance.vision spot monthly 1m"
+    ),
 )
 
 

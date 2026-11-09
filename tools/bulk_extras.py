@@ -1,0 +1,258 @@
+"""Phase-1 completion step 4: T1 extra bulk data (design v2.1 §5.5). Resumable and idempotent.
+
+    uv run python tools/bulk_extras.py --universe C:/dev/qr-data/bulk/universe-20261109.json \
+        [--kinds fundingRate bookDepth metrics spotKlines] [--symbols BTCUSDT] [--limit-months 1] [--log-file PATH]
+
+Kinds, in this order (cheap first):
+- fundingRate  monthly, every universe symbol, its membership months (+ warm-up)
+- bookDepth    daily, the BOOK_DEPTH_TOP symbols with the most membership months (design: "상위 20")
+- metrics      daily, every universe symbol, its membership months (+ warm-up)
+- spotKlines   monthly 1m, the spot pair of every universe symbol (1000SHIBUSDT -> SHIBUSDT), if listed
+Only finished months are taken (the current UTC month is skipped). Daily files are combined per
+symbol-month (bulk/extras.py). Same safety as tools/bulk_download.py: shares `run/bulk.lock` (so it never
+runs beside the klines download; a pilot uses run/bulk-extras-pilot.lock), thermal + resource gate
+before every month (exit 3), progress in `run/bulk-extras.progress.json`, completion marker
+`bulk/complete-extras-<universe>.json`.
+Exit codes: 0 complete, 1 error, 2 already running (or klines download running), 3 paused by a gate,
+4 finished with failed months (retried on the next start).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import time
+import traceback
+from datetime import UTC, datetime
+from pathlib import Path
+
+import httpx
+
+BOOK_DEPTH_TOP = 20
+EXIT_OK, EXIT_ERROR, EXIT_RUNNING, EXIT_PAUSED, EXIT_FAILED_FILES = 0, 1, 2, 3, 4
+ALL_KINDS = ["fundingRate", "bookDepth", "metrics", "spotKlines"]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--universe", type=Path, required=True)
+    ap.add_argument("--kinds", nargs="*", default=ALL_KINDS, choices=ALL_KINDS)
+    ap.add_argument("--symbols", nargs="*", default=None, help="futures symbols (pilot)")
+    ap.add_argument("--limit-months", type=int, default=None, help="pilot: newest N months per symbol and kind")
+    ap.add_argument("--pause", type=float, default=0.05)
+    ap.add_argument("--log-file", type=Path, default=None)
+    ap.add_argument("--polars-threads", type=int, default=2)
+    a = ap.parse_args()
+    os.environ.setdefault("POLARS_MAX_THREADS", str(a.polars_threads))  # before Polars is imported
+
+    from quant_research.adapters.jobhost import Log, memory_sample, write_json
+    from quant_research.bulk.download import BulkTarget
+    from quant_research.bulk.extras import (
+        FIVE_MIN_NS,
+        download_month_group,
+        parse_book_depth_csv,
+        parse_funding_csv,
+        parse_metrics_csv,
+    )
+    from quant_research.bulk.guard import Limits, Sample, combine, resource_gate
+    from quant_research.bulk.klines import MINUTE_NS, parse_kline_csv
+    from quant_research.bulk.s3 import listing, wanted_months
+    from quant_research.capture.lock import AlreadyRunningError, InstanceLock
+    from quant_research.capture.thermal import heavy_work_allowed, read_state
+    from quant_research.catalog.bootstrap import bootstrap
+    from quant_research.catalog.store import Catalog
+    from quant_research.catalog.universe_load import split_multiplier
+    from quant_research.config import load_settings
+
+    kinds = {
+        "fundingRate": (
+            "binance.um.bulk.funding",
+            "data/futures/um/monthly/fundingRate/{s}/",
+            False,
+            parse_funding_csv,
+            None,
+        ),
+        "bookDepth": (
+            "binance.um.bulk.book_depth",
+            "data/futures/um/daily/bookDepth/{s}/",
+            True,
+            parse_book_depth_csv,
+            None,
+        ),
+        "metrics": (
+            "binance.um.bulk.metrics_5m",
+            "data/futures/um/daily/metrics/{s}/",
+            True,
+            parse_metrics_csv,
+            FIVE_MIN_NS,
+        ),
+        "spotKlines": (
+            "binance.spot.bulk.klines_1m",
+            "data/spot/monthly/klines/{s}/1m/",
+            False,
+            parse_kline_csv,
+            MINUTE_NS,
+        ),
+    }
+
+    log = Log(a.log_file)
+    settings = load_settings()
+    root = settings.data_root
+    full_run = a.symbols is None and a.limit_months is None and sorted(a.kinds) == sorted(ALL_KINDS)
+    marker = root / "bulk" / f"complete-extras-{a.universe.stem}.json"
+    progress_path = root / "run" / "bulk-extras.progress.json"
+    if full_run and marker.exists():
+        log(f"ALREADY COMPLETE ({marker}); nothing to do")
+        log.close()
+        return EXIT_OK
+    # A full run shares the klines lock (never two bulk jobs at once). A pilot (--symbols/--limit-months,
+    # a few files) uses its own lock so it can check a kind while the klines download runs.
+    lock_name = "bulk.lock" if full_run else "bulk-extras-pilot.lock"
+    try:
+        lock = InstanceLock(root / "run" / lock_name).__enter__()
+    except AlreadyRunningError as e:
+        log(f"REFUSED (bulk lock held, klines download or another extras run): {e}")
+        log.close()
+        return EXIT_RUNNING
+
+    report = json.loads(a.universe.read_text(encoding="utf-8"))
+    months: list[str] = report["months"]
+    spans: dict[str, list[list[str | None]]] = report["spans"]
+    warmup = int(report.get("warmup_months", 3))
+    symbols: list[str] = a.symbols or sorted(spans)
+    current_month = datetime.now(UTC).strftime("%Y-%m")
+    wants = {s: {m for m in wanted_months(spans[s], months, warmup) if m < current_month} for s in symbols}
+    depth_symbols = sorted(symbols, key=lambda s: (-len(wants[s]), s))[:BOOK_DEPTH_TOP]
+    limits = Limits()
+    state_path = root / "run" / "ssd_state.json"
+    lake_dirs = [root / "lake" / spec[0] for spec in kinds.values()]
+
+    def bulk_bytes() -> int:
+        return sum(p.stat().st_size for d in lake_dirs if d.exists() for p in d.rglob("*.parquet"))
+
+    def sample(bulk: int) -> tuple[Sample, dict[str, int]]:
+        mem = memory_sample()
+        return Sample(shutil.disk_usage(root).free, bulk, mem["available_ram"], mem["private"]), mem
+
+    current_bulk = bulk_bytes()
+
+    def gate() -> tuple[bool, str]:
+        s, _mem = sample(current_bulk)
+        return combine(heavy_work_allowed(read_state(state_path), now_ns=time.time_ns()), resource_gate(s, limits))
+
+    totals = {"months_downloaded": 0, "files": 0, "already": 0, "rows": 0, "bytes": 0, "gaps": 0, "failed": 0}
+    started = time.time()
+    exit_code = EXIT_ERROR
+    catalog = Catalog.open(root / "meta" / "catalog.db")
+    bootstrap(catalog)
+
+    def progress(state: str, kind: str, n: int, of: int, sym: str, note: str = "") -> None:
+        s, mem = sample(current_bulk)
+        write_json(
+            progress_path,
+            {
+                "state": state,
+                "updated_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+                "pid": os.getpid(),
+                "kind": kind,
+                "kind_index": a.kinds.index(kind) + 1 if kind else len(a.kinds),
+                "kinds": a.kinds,
+                "symbol_index": n,
+                "symbols": of,
+                "symbol": sym,
+                "elapsed_s": int(time.time() - started),
+                "totals": totals,
+                "memory_mb": {k: v // 2**20 for k, v in mem.items()},
+                "free_disk_gb": round(s.free_disk / 2**30, 1),
+                "extras_gb": round(current_bulk / 2**30, 2),
+                "note": note,
+            },
+        )
+
+    try:
+        log(f"START pid={os.getpid()} kinds={a.kinds} symbols={len(symbols)} full_run={full_run} limits={limits}")
+        with httpx.Client(timeout=60, headers={"User-Agent": "quant-research-bulk"}) as client:
+            for kind in a.kinds:
+                dataset_id, prefix, daily, parse, grid = kinds[kind]
+                targets = depth_symbols if kind == "bookDepth" else symbols
+                for n, sym in enumerate(targets, 1):
+                    source_sym = split_multiplier(sym.removesuffix("USDT"))[0] + "USDT" if kind == "spotKlines" else sym
+                    files = listing(client, prefix.format(s=source_sym))
+                    by_month: dict[str, list[BulkTarget]] = {}
+                    for key, size, mod in files:
+                        month = key[-14:-7] if daily else key[-11:-4]
+                        if month in wants[sym]:
+                            url = f"https://data.binance.vision/{key}"
+                            by_month.setdefault(month, []).append(
+                                BulkTarget(dataset_id, kind, source_sym, month, url, size, mod)
+                            )
+                    chosen = sorted(by_month)[-a.limit_months :] if a.limit_months else sorted(by_month)
+                    for month in chosen:
+                        done = download_month_group(
+                            by_month[month],
+                            data_root=root,
+                            catalog=catalog,
+                            client=client,
+                            parse=parse,
+                            grid_ns=grid,
+                            pause_s=a.pause,
+                            heavy_allowed=gate,
+                        )
+                        if done.paused_reason:
+                            log(f"PAUSED at {kind} {sym} {month}: {done.paused_reason}; rerun resumes")
+                            progress("paused", kind, n, len(targets), sym, done.paused_reason)
+                            exit_code = EXIT_PAUSED
+                            return exit_code
+                        totals["months_downloaded"] += 1 if done.downloaded else 0
+                        totals["files"] += done.downloaded
+                        totals["already"] += done.already_have
+                        totals["rows"] += done.rows if done.downloaded else 0
+                        totals["bytes"] += done.zip_bytes
+                        totals["gaps"] += done.gaps
+                        totals["failed"] += len(done.failed)
+                        for url, why in done.failed:
+                            log(f"FAILED {url}: {why}")
+                    if n % 10 == 0 or n == len(targets):
+                        current_bulk = bulk_bytes()
+                    progress("running", kind, n, len(targets), sym)
+                    _s, mem = sample(current_bulk)
+                    log(
+                        f"[{kind} {n}/{len(targets)}] {source_sym} months={len(chosen)} totals={totals} "
+                        f"elapsed={time.time() - started:.0f}s private_mb={mem['private'] // 2**20} "
+                        f"avail_mb={mem['available_ram'] // 2**20} extras_gb={current_bulk / 2**30:.2f}"
+                    )
+        exit_code = EXIT_FAILED_FILES if totals["failed"] else EXIT_OK
+        progress("done" if exit_code == EXIT_OK else "done_with_failures", "", 0, 0, "")
+        if full_run and exit_code == EXIT_OK:
+            write_json(
+                marker,
+                {
+                    "completed_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "universe": str(a.universe),
+                    "kinds": a.kinds,
+                    "book_depth_symbols": depth_symbols,
+                    "totals": totals,
+                    "extras_gb": round(current_bulk / 2**30, 2),
+                },
+            )
+            log(f"COMPLETE marker written: {marker}")
+        return exit_code
+    except (httpx.HTTPError, OSError) as e:
+        log(f"ERROR {type(e).__name__}: {e}; rerun resumes from the catalog")
+        progress("error", "", 0, 0, "", f"{type(e).__name__}: {e}")
+        exit_code = EXIT_ERROR
+        return exit_code
+    except Exception:
+        log(f"CRASH {traceback.format_exc()}")  # pythonw has no console
+        raise
+    finally:
+        catalog.close()
+        log(f"END exit={exit_code} totals={totals} elapsed={time.time() - started:.0f}s")
+        log.close()
+        lock.__exit__(None, None, None)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
