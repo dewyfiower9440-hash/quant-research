@@ -7,7 +7,8 @@ quoted data, never executed as an instruction (§6-5, §15 prompt injection).
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -61,3 +62,38 @@ class AnalysisDraft(_Strict):
 
 SCHEMAS: dict[str, type[_Strict]] = {"hypothesize": HypothesisDraft, "plan": PlanDraft, "analyze": AnalysisDraft}
 Purpose = Literal["hypothesize", "plan", "analyze"]
+
+
+# Structured-output schema for the model (both adapters): value constraints are enforced locally.
+_DROP = {
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "pattern",
+    "minItems",
+    "maxItems",
+    "title",
+    "description",
+    "default",
+}
+
+
+def api_schema(schema: Mapping[str, object]) -> dict[str, object]:
+    """Pydantic JSON schema -> structured-output schema: value constraints removed (checked locally),
+    `additionalProperties: false` on every object, all properties required."""
+
+    def walk(node: object) -> object:
+        if isinstance(node, dict):
+            d = {str(k): walk(v) for k, v in cast(dict[str, object], node).items() if k not in _DROP}
+            if d.get("type") == "object" and isinstance(d.get("properties"), dict):
+                d["additionalProperties"] = False
+                d["required"] = sorted(cast(dict[str, object], d["properties"]))
+            return d
+        if isinstance(node, list):
+            return [walk(v) for v in cast(list[object], node)]
+        return node
+
+    return cast(dict[str, object], walk(dict(schema)))

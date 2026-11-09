@@ -6,9 +6,9 @@ import anthropic
 import httpx2 as httpx
 import pytest
 
-from quant_research.director.claude import FALLBACK_BETA, MODEL_ID, ClaudeLLM, PaidCallsNotApproved, api_schema
+from quant_research.director.claude_api import FALLBACK_BETA, MODEL_ID, ClaudeApiLLM, PaidCallsNotApproved
 from quant_research.director.llm import LLMRequest
-from quant_research.director.schemas import HypothesisDraft
+from quant_research.director.schemas import HypothesisDraft, api_schema
 
 
 @dataclass
@@ -55,9 +55,9 @@ class FakeClient:
     beta: FakeBeta
 
 
-def llm(reply: Resp | Exception) -> tuple[ClaudeLLM, FakeMessages]:
+def llm(reply: Resp | Exception) -> tuple[ClaudeApiLLM, FakeMessages]:
     msgs = FakeMessages(reply)
-    return ClaudeLLM(FakeClient(FakeBeta(msgs))), msgs
+    return ClaudeApiLLM(FakeClient(FakeBeta(msgs))), msgs
 
 
 REQ = LLMRequest("hypothesize", "system text", {"required_family": "trend"}, HypothesisDraft.model_json_schema(), 8_000)
@@ -65,7 +65,7 @@ REQ = LLMRequest("hypothesize", "system text", {"required_family": "trend"}, Hyp
 
 def test_construction_without_approval_is_refused() -> None:
     with pytest.raises(PaidCallsNotApproved, match="explicit approval"):
-        ClaudeLLM.create(approved=False)
+        ClaudeApiLLM.create(approved=False)
 
 
 def test_request_uses_the_pinned_model_structured_output_effort_fallback_and_no_tools() -> None:
@@ -73,7 +73,11 @@ def test_request_uses_the_pinned_model_structured_output_effort_fallback_and_no_
     client.complete(REQ)
     sent = msgs.seen[0]
     assert sent["model"] == "claude-opus-5-5" and sent["max_tokens"] == 8_000 and "tools" not in sent
-    assert sent["betas"] == [FALLBACK_BETA] and sent["fallbacks"] == "default"
+    assert "betas" not in sent and "fallbacks" not in sent  # no automatic model fallback by default (2026-11-10)
+    on, msgs_on = llm(Resp([Block("text", '{"ok": 1}')]))
+    on.use_fallback = True
+    on.complete(REQ)
+    assert msgs_on.seen[0]["betas"] == [FALLBACK_BETA] and msgs_on.seen[0]["fallbacks"] == "default"
     config = sent["output_config"]
     assert isinstance(config, dict) and config["effort"] == "high" and config["format"]["type"] == "json_schema"
 

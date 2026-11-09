@@ -4,7 +4,8 @@
 - `FakeLLM`: deterministic, free, offline; scripted misbehaviour (invalid JSON, schema violations, refusals,
   prompt-injection text, duplicates) for the robustness tests and the 10-cycle run;
 - `ReplayLLM`: returns the responses stored in research.db for an earlier run (reproducibility);
-- `ClaudeLLM` (director/claude.py): the official Anthropic SDK; constructing it requires explicit approval.
+- `ClaudeApiLLM` (director/claude_api.py): paid API path, not approved;
+- `ClaudeCliLLM` (director/claude_cli.py): the official Claude Code CLI on the user's own subscription login.
 No implementation gets tools: the model can only return text that the Director parses (schemas.py).
 """
 

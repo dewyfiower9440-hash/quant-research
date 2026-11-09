@@ -6,8 +6,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "src" / "quant_research"
 LOOP_PACKAGES = ("director", "research")
-NETWORK_MODULES = {"httpx", "httpx2", "requests", "urllib", "socket", "websockets", "aiohttp", "anthropic"}
-LLM_ADAPTER = Path("director/claude.py")  # the only module allowed to import the Anthropic SDK
+NETWORK_MODULES = {
+    "httpx",
+    "httpx2",
+    "requests",
+    "urllib",
+    "socket",
+    "websockets",
+    "aiohttp",
+    "anthropic",
+    "subprocess",
+    "asyncio",
+}
+LLM_ADAPTERS = {Path("director/claude_api.py"), Path("director/claude_cli.py")}  # the only network / process boundaries
 
 
 def _modules() -> list[tuple[Path, ast.Module]]:
@@ -40,7 +51,7 @@ def test_only_the_llm_adapter_may_import_network_clients() -> None:
             else:
                 continue
             for n in names:
-                if n.split(".")[0] in NETWORK_MODULES and rel != LLM_ADAPTER:
+                if n.split(".")[0] in NETWORK_MODULES and rel not in LLM_ADAPTERS:
                     offenders.append(f"{rel}:{line} imports {n}")
     assert offenders == []
 

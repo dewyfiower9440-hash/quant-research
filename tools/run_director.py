@@ -1,13 +1,15 @@
 """Phase 3 step 7: unattended research cycles of the Director on real research-split data.
 
     uv run python tools/run_director.py [--cycles 10] [--seed 7] [--run-id ID] [--memory on|off]
-        [--policy posterior|uniform] [--llm fake|claude --approve-paid-calls] [--out PATH]
+        [--policy posterior|uniform] [--llm fake|claude-cli|claude-api] [--out PATH]
 
 Data: the 8 large symbols already downloaded, 1h decisions; selection split 2025-01..04, confirmation split
 2025-05..06, each with a 30-day warm-up (features only). Everything is research split (before the
 2026-07-01 seal); the PIT API refuses the holdout.
-LLM: `fake` (default) is free and offline. `claude` needs --approve-paid-calls (user approval) and runs under
-the Budget: total cap $5 over all paid runs (summed from research.db), per-cycle and per-call token limits.
+LLM: `fake` (default) is free and offline. `claude-cli` runs the unmodified Claude Code CLI (`claude -p`) on
+the user's own claude.ai subscription login (no API key; refuses if any API-billing variable is set; a usage
+limit pauses the run). `claude-api` (paid per-token API) is refused: paid calls are not approved (2026-11-10).
+Token limits per cycle and per call apply to every LLM.
 Writes a measurement report (CPU, memory, trials, LLM tokens and cost per cycle). Makes no claim about any
 strategy: the validator does not exist before Phase 5.
 """
@@ -36,8 +38,7 @@ def main() -> int:
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--memory", choices=["on", "off"], default="on")
     ap.add_argument("--policy", choices=["posterior", "uniform"], default="posterior")
-    ap.add_argument("--llm", choices=["fake", "claude"], default="fake")
-    ap.add_argument("--approve-paid-calls", action="store_true", help="user approval for paid Claude API calls")
+    ap.add_argument("--llm", choices=["fake", "claude-cli", "claude-api"], default="fake")
     ap.add_argument("--max-total-usd", type=float, default=5.0)
     ap.add_argument("--universe-n", type=int, default=5, help="universe size of the specs (part of the experiment)")
     ap.add_argument("--out", type=Path, default=Path("docs/measurements/phase3-director-run.md"))
@@ -63,10 +64,13 @@ def main() -> int:
     hour, day = 3_600 * 10**9, 86_400 * 10**9
     run_id = a.run_id or f"{a.llm}-s{a.seed}-{a.memory}-{a.policy}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
     llm: LLMClient
-    if a.llm == "claude":
-        from quant_research.director.claude import ClaudeLLM
+    if a.llm == "claude-api":
+        print("refused: paid Claude API calls are not approved (use --llm claude-cli or fake)")
+        return 2
+    if a.llm == "claude-cli":
+        from quant_research.director.claude_cli import ClaudeCliLLM
 
-        llm = ClaudeLLM.create(approved=a.approve_paid_calls)
+        llm = ClaudeCliLLM.create(root / "run" / "llm-cli")
     else:
         llm = FakeLLM(seed=a.seed)
     gate = research_gate(root)
