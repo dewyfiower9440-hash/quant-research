@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -107,6 +109,18 @@ class Catalog:
 
     def close(self) -> None:
         self.conn.close()
+
+    @contextmanager
+    def transaction(self) -> Generator[None]:
+        """All-or-nothing group of writes (`begin immediate`: takes the write lock up front, waits up to
+        busy_timeout for other writers such as the rest worker's compaction)."""
+        self.conn.execute("begin immediate")
+        try:
+            yield
+        except BaseException:
+            self.conn.execute("rollback")
+            raise
+        self.conn.execute("commit")
 
     def schema_version(self) -> int:
         return int(self.conn.execute("pragma user_version").fetchone()[0])

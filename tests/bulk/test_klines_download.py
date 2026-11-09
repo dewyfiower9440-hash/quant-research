@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -192,4 +193,21 @@ def test_a_corrupt_csv_fails_only_its_own_file(tmp_path: Path) -> None:
     )
     assert done.downloaded == 1 and len(done.failed) == 2
     assert any("no rows" in why for _url, why in done.failed)
+    cat.close()
+
+
+def test_gaps_and_file_record_are_written_together_or_not_at_all(tmp_path: Path) -> None:
+    """Review #6: a failure after the gap rows must not leave gaps for a file that is not recorded."""
+    cat = Catalog.open(tmp_path / "meta" / "catalog.db")
+    cat.conn.execute(
+        "create trigger fail_bulk_file before insert on bulk_file begin select raise(abort, 'disk full'); end"
+    )
+    rows = "".join(
+        f"{1577836800000 + i * MIN_MS},1,1,1,1,1,{1577836800000 + i * MIN_MS + 59999},1,1,1,1,0\n" for i in (0, 2)
+    )
+    client = httpx.Client(transport=_server(_files(rows)))
+    with pytest.raises(sqlite3.IntegrityError, match="disk full"):
+        download_targets([_target()], data_root=tmp_path, catalog=cat, client=client, pause_s=0)
+    assert cat.conn.execute("select count(*) from gap").fetchone()[0] == 0
+    assert not cat.conn.in_transaction  # rolled back, the connection is usable for the next file
     cat.close()

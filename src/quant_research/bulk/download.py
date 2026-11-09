@@ -104,27 +104,29 @@ def download_targets(
             else [(start_ns, end_ns)]
         )
         now = time.time_ns()
-        for lo, hi in holes:
+        with catalog.transaction():  # gaps and the file record together or not at all (review #6)
+            for lo, hi in holes:
+                catalog.conn.execute(
+                    "insert or ignore into gap(source, start_ns, end_ns, cause, detail, recorded_ns) "
+                    "values (?,?,?,?,?,?)",
+                    (t.dataset_id, lo, hi, "unknown", f"{t.symbol} missing 1m bars in bulk file", now),
+                )
             catalog.conn.execute(
-                "insert or ignore into gap(source, start_ns, end_ns, cause, detail, recorded_ns) values (?,?,?,?,?,?)",
-                (t.dataset_id, lo, hi, "unknown", f"{t.symbol} missing 1m bars in bulk file", now),
+                "insert into bulk_file(url, last_modified, dataset_id, symbol, month, sha256, zip_bytes, "
+                "rows_written, lake_path, fetched_ns) values (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    t.url,
+                    t.last_modified,
+                    t.dataset_id,
+                    t.symbol,
+                    t.month,
+                    digest,
+                    len(blob.content),
+                    frame.height,
+                    str(target),
+                    now,
+                ),
             )
-        catalog.conn.execute(
-            "insert into bulk_file(url, last_modified, dataset_id, symbol, month, sha256, zip_bytes, rows_written, "
-            "lake_path, fetched_ns) values (?,?,?,?,?,?,?,?,?,?)",
-            (
-                t.url,
-                t.last_modified,
-                t.dataset_id,
-                t.symbol,
-                t.month,
-                digest,
-                len(blob.content),
-                frame.height,
-                str(target),
-                now,
-            ),
-        )
         have.add((t.url, t.last_modified))
         result.downloaded += 1
         result.rows += frame.height
