@@ -32,6 +32,7 @@ class GapScanResult:
     scanned: int = 0
     gaps: int = 0
     vanished: int = 0
+    imported: int = 0  # collector gap-log lines (restart/reconnect) newly loaded into the catalog
 
 
 def _closed_segments(raw_root: Path, dataset_id: str, now_ns: int) -> list[Path]:
@@ -92,9 +93,15 @@ def scan_receive_gaps(data_root: Path, catalog: Catalog, *, now_ns: int) -> GapS
 
 
 def scan_once(data_root: Path) -> GapScanResult:
-    """Open the catalog, scan, close: for the compaction child process (SQLite objects stay local)."""
+    """Open the catalog, scan, close: for the compaction child process (SQLite objects stay local).
+    Also loads the collectors' own gap logs (`raw/_gaps`, restart/reconnect; idempotent by the gap
+    identity index) so every gap reaches the catalog without a manual bootstrap run."""
     catalog = Catalog.open(data_root / "meta" / "catalog.db")
     try:
-        return scan_receive_gaps(data_root, catalog, now_ns=time.time_ns())
+        with catalog.transaction():
+            imported = catalog.import_gaps(data_root / "raw").imported
+        result = scan_receive_gaps(data_root, catalog, now_ns=time.time_ns())
+        result.imported = imported
+        return result
     finally:
         catalog.close()

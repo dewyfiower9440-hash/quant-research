@@ -291,7 +291,8 @@ async def rest_main(
                 # silences of the 1 Hz sources (host suspend, outages) become catalog gaps (step 10)
                 scan = await asyncio.to_thread(gapscan_in_child, settings.data_root)
                 sinks.write(
-                    "collector.gapscan", {"scanned": scan.scanned, "gaps": scan.gaps, "vanished": scan.vanished}
+                    "collector.gapscan",
+                    {"scanned": scan.scanned, "gaps": scan.gaps, "vanished": scan.vanished, "imported": scan.imported},
                 )
 
             notifier = ToastNotifier(repo_root() / "tools" / "notify.ps1", settings.data_root / "run" / "alerts.json")

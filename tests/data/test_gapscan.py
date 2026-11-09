@@ -100,3 +100,22 @@ def test_a_segment_that_vanished_after_listing_is_scanned_next_run(
     assert (done.scanned, done.vanished, done.gaps) == (0, 1, 0)
     assert not path.exists()
     cat.close()
+
+
+def test_scan_once_also_imports_the_collectors_gap_logs_idempotently(tmp_path: Path) -> None:
+    """2026-11-09: restart gaps after 11-08 14:41Z were only in raw/_gaps (import ran by hand)."""
+    logs = tmp_path / "raw" / "_gaps"
+    logs.mkdir(parents=True)
+    lines = [
+        {"source": "process.rest", "start_ns": 5, "end_ns": 9, "cause": "restart"},
+        {"source": "process.ws", "start_ns": None, "end_ns": 9, "cause": "restart"},
+    ]
+    (logs / "process.rest.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    first = gapscan_module.scan_once(tmp_path)
+    again = gapscan_module.scan_once(tmp_path)
+    assert (first.imported, again.imported) == (2, 0)
+    catalog = Catalog.open(tmp_path / "meta" / "catalog.db")
+    try:
+        assert catalog.conn.execute("select count(*) from gap where cause = 'restart'").fetchone()[0] == 2
+    finally:
+        catalog.close()
