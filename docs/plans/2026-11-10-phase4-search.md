@@ -64,7 +64,7 @@ task: qr-phase4-search
 - [x] 2. **S0 정적 검사 단계화.**
   - `strategy/s0.py`를 파이프라인 단계로 연결합니다. 정규형 해시로 중복을 제거하고, 지표 계층(생성 수, 중복 제거 후 수)을 기록합니다.
   - 검증: 중복이나 거부도 trial(stage S0)로 1건씩 기록됩니다. 회계 불변식 테스트를 통과해야 합니다.
-- [ ] 3. **S1 IC 표(ADR-022 조건부 승인 정의 그대로).**
+- [x] 3. **S1 IC 표(ADR-022 조건부 승인 정의 그대로).**
   - 라벨: `decision_time + latency` 이후 다음 봉 시가 기준 h봉 수익률. 비용·펀딩 포함판을 따로 둡니다.
   - IC: 횡단면 Spearman. 유의성은 HAC(Newey-West) t 또는 겹치지 않는 표본.
   - 결과는 `feature_eval`에 기록합니다. 계열별 대리 지표(이벤트형은 이벤트 조건 수익률).
@@ -109,3 +109,4 @@ task: qr-phase4-search
 - 2026-11-10 계획 승인(사용자 "승인", ExitPlanMode). 단계 1 착수.
 - 2026-11-10 단계 1: `strategy/space.py`, 테스트 19개. 공간 크기(제약 후): trend 200,160 · mean_reversion 120,960 · momentum 115,200 · funding_basis 69,120 · volatility 1,344,720(합계 약 185만, 고정 격자 27점). 시드 3·2,000개 표본에서 S0 통과율: trend 96.0%·volatility 99.7%(거부는 모두 제약 위반), 나머지 100% — 계획대로. 구조 축 `sizing=equal`에서도 `vol_window`는 168로 고정해 의미 없는 중복을 막았습니다.
 - 2026-11-10 단계 2: `search/s0_stage.py`(`run_s0`), 테스트 6개. 후보 1개 = S0 trial 1건(배치당 트랜잭션 1개). 통과=done, 제약·S0 위반=rejected(사유 전부), 정규형 중복=rejected(`duplicate: ... trial N`, 배치 안·이전 배치 모두). 제약 위반 후보는 spec이 없어 `spec_hash="point:"+sha256(point)`로 실험을 등록합니다 — 계획에 없던 세부, 회계 불변식 유지를 위해 추가.
+- 2026-11-10 단계 3: `search/s1.py`(순수: 라벨, Spearman IC, NW HAC t, 이벤트 조건 수익률, `IcFeatureEvaluator`), `search/s1_stage.py`(`run_s1`: S1 trial 1건 + feature_eval 1행), 테스트 17개. 라벨은 `exec_open[k+h]/exec_open[k]-1`(결정 후 첫 체결가). 합성 IC(ρ=0.3 → 기대 0.2876) ±0.02 재현, 랜덤워크 과거 특징 |IC|<0.03, 누수 라벨은 IC>0.9로 탐지, HAC t는 교과서 반복문 구현과 1e-12 일치. 계획과의 차이: (1) 비용 포함판은 이벤트 수익률에서 포지션당 왕복 비용 1회를 뺀 `event_mean_net`으로 정의(횡단면 순위 IC는 상수 비용에 불변이라 IC 자체의 비용판은 의미 없음), (2) 펀딩 포함판은 펀딩 데이터 미적재(OPS-006)라 미구현이며 모든 S1 결과에 `funding_not_modelled` 표시, (3) S2 승격 순위는 `event_hac_t`(순수익 기준) — ADR로 기록 예정.
