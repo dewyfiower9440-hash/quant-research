@@ -311,3 +311,25 @@
   - 사후 비용은 실제로 응답한 모델 가격으로 계산합니다.
   - 상한: 누적 $5, 사이클 $2.5, 호출당 입력 50k·출력 8k 토큰
 - **모델:** `claude-opus-5-5`, effort high, 구조화 출력, 도구 없음, refusal fallback "default"(skill 기본 지침. 사용자에게 고지했고, 원하지 않으면 끕니다)
+
+## ADR-025 (2026-11-10, 사용자 결정 반영) 실제 LLM은 Claude Code CLI 구독 경로, 유료 API 경로는 거부, 자동 fallback 기본 꺼짐
+- **결정**
+  - 실제 LLM 호출은 `director/claude_cli.py`(`ClaudeCliLLM`)만 씁니다. 수정하지 않은 `claude` 바이너리의 문서화된 비대화 모드(`claude -p`)를 사용자 본인의 claude.ai 로그인으로 실행합니다.
+  - `director/claude_api.py`(`ClaudeApiLLM`, 공식 SDK)는 API 전용 경로로 남깁니다. `tools/run_director.py --llm claude-api`는 거부합니다.
+  - 두 어댑터 모두 자동 모델 fallback을 기본으로 끕니다. CLI에는 `--fallback-model`을 넘기지 않습니다.
+- **과금 방지**
+  - API 과금 환경 변수(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry)가 하나라도 있으면 어댑터 생성을 거부합니다. 자식 프로세스 환경에서도 지웁니다.
+  - `auth status`가 `authMethod=claude.ai`일 때만 실행합니다.
+  - `--bare`는 쓰지 않습니다. bare 모드는 OAuth를 읽지 않고 API 키를 요구하기 때문입니다.
+- **금지(사용자 지시)**
+  - 인증 토큰을 읽거나 추출하지 않습니다.
+  - 비공식 API, 세션 우회, 사용량 한도 우회를 쓰지 않습니다.
+  - 한도에 걸리면 `UsageLimitReached`를 내고 PAUSED로 갑니다. 재시도하지 않습니다.
+- **근거**
+  - code.claude.com/docs의 headless, authentication, legal-and-compliance 문서(2026-11-10 확인)
+  - 공식 문서는 사용자가 수정하지 않은 바이너리에 본인 구독으로 로그인하는 사용을 막지 않는다고 적고 있습니다.
+- **미확인**
+  - 개인 자동화를 명시적으로 허용하는 문구는 없습니다.
+  - 한도 메시지의 종료 코드는 문서에 없어 텍스트 표지와 `api_error_status=429`로 감지합니다.
+  - CLI가 보고하는 플랜(`pro`)과 사용자가 확인한 플랜(Max)이 다릅니다.
+- **CLI의 `total_cost_usd`**는 클라이언트 추정치이며 구독에서는 청구액이 아닙니다. 호출 상세에만 남깁니다.
