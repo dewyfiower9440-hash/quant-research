@@ -1,6 +1,6 @@
 [project]
 name = "quant-research"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 authors = [
     { name = "dewyfiower9440-hash", email = "256257058+dewyfiower9440-hash@users.noreply.github.com" }
