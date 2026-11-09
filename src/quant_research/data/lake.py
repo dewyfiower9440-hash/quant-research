@@ -104,7 +104,7 @@ def write_frames(frames: list[pl.DataFrame], target: Path) -> None:
     and write once: temporary name, then rename to a name nobody has opened yet."""
     target.parent.mkdir(parents=True, exist_ok=True)
     frame = frames[0] if len(frames) == 1 else pl.concat(frames, how="diagonal_relaxed")
-    tmp = target.with_name(target.name + ".tmp")
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")  # unique per writer process
     frame.write_parquet(tmp, compression="zstd", statistics=True)
     os.replace(tmp, target)
 
@@ -113,7 +113,7 @@ def write_frame(frame: pl.DataFrame, target: Path, *, symbol: str | None = None)
     """Write a typed frame once (bulk files): temporary name, then rename to a fresh name."""
     target.parent.mkdir(parents=True, exist_ok=True)
     out = frame.with_columns(pl.lit(symbol).alias("symbol")) if symbol is not None else frame
-    tmp = target.with_name(target.name + ".tmp")
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")  # unique per writer process
     out.write_parquet(tmp, compression="zstd", statistics=True)
     os.replace(tmp, target)
 

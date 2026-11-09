@@ -117,10 +117,11 @@ class Catalog:
         self.conn.execute("begin immediate")
         try:
             yield
+            self.conn.execute("commit")  # a failing commit (e.g. deferred FK) is rolled back below
         except BaseException:
-            self.conn.execute("rollback")
+            if self.conn.in_transaction:  # SQLite may already have rolled back on its own
+                self.conn.execute("rollback")
             raise
-        self.conn.execute("commit")
 
     def schema_version(self) -> int:
         return int(self.conn.execute("pragma user_version").fetchone()[0])

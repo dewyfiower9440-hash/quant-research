@@ -121,7 +121,17 @@ def compact_closed_segments(
             # compress replaced the .jsonl by .jsonl.gz after listing; the .gz is compacted next run
             result.vanished += 1
             continue
-        except (KeyError, ValueError, TypeError, EOFError, OSError, MemoryError, sqlite3.Error, PolarsError) as e:
+        except (
+            KeyError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            EOFError,
+            OSError,
+            MemoryError,
+            sqlite3.Error,
+            PolarsError,
+        ) as e:
             # one bad segment must not block every later segment and source (review #2); retried next run
             result.failed.append((str(path), f"{type(e).__name__}: {e}"))
             continue

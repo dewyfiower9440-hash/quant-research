@@ -182,3 +182,17 @@ def test_bootstrap_registers_t0_datasets_priors_and_seal_once(tmp_path: Path) ->
     assert seal.research_until_ns == T0_START_NS + 60 * DAY
     assert seal.holdout_until_ns == T0_START_NS + 90 * DAY
     c.close()
+
+
+def test_failed_commit_rolls_back_and_leaves_the_connection_usable(tmp_path: Path) -> None:
+    """Review-2 #4: a commit that fails (deferred FK check) must not leave the transaction open."""
+    c = _catalog(tmp_path)
+    with pytest.raises(sqlite3.IntegrityError), c.transaction():
+        c.conn.execute("pragma defer_foreign_keys = on")
+        c.conn.execute(
+            "insert into universe_membership(instrument_id, rule_version, from_ns, to_ns) values (999, 'u', 0, 1)"
+        )
+    assert not c.conn.in_transaction
+    with c.transaction():  # next transaction starts normally
+        c.register_dataset(_dataset())
+    c.close()

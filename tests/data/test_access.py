@@ -219,3 +219,11 @@ def test_decision_times_must_be_integer_nanoseconds(catalog: Catalog, dtype: pl.
     decisions = pl.Series("decision_ns", [20_000 * S]).cast(dtype)
     with pytest.raises(AppError, match="integer nanoseconds"):
         PointInTime(catalog).join_asof(decisions, frame, "oi")
+
+
+def test_rows_without_event_time_stay_joinable_by_receive_time(catalog: Catalog) -> None:
+    """Review-2 #3: the revision filter must not silently drop rows whose event_ns is null."""
+    pit = PointInTime(catalog)
+    frame = pl.DataFrame({"event_ns": [5 * S, None, None], "received_ns": [5 * S, 6 * S, 7 * S], "value": [1, 2, 3]})
+    out = pit.join_asof(pl.Series("decision_ns", [6 * S, 8 * S]), frame, "trades")
+    assert out["value"].to_list() == [2, 3]

@@ -241,3 +241,32 @@ def test_stream_matches_the_whole_file_reader_including_torn_tails(tmp_path: Pat
     whole = read_segment(path)
     assert records == whole.records and len(records) == 2
     assert stream.sha256 == whole.sha256 and stream.skipped_bytes == whole.skipped_bytes == len(tail)
+
+
+def test_a_concurrent_writers_temporary_file_is_never_reused(tmp_path: Path) -> None:
+    """Review-2 #1: an orphaned compactor from a killed worker may still be writing <target>.tmp."""
+    data, cat = _setup(tmp_path)
+    target = _segment(data / "raw", "binance.um.book_ticker_1s", T0, [_book("1")])
+    lake_dir = data / "lake" / "binance.um.book_ticker_1s" / target.parent.name
+    lake_dir.mkdir(parents=True)
+    foreign = lake_dir / (target.name.removesuffix(".jsonl") + ".parquet.tmp")
+    foreign.write_bytes(b"half-written by another process")
+    done = compact_closed_segments(data, cat, now_ns=T0 + 2 * HOUR_NS)
+    assert done.compacted == 1 and foreign.read_bytes() == b"half-written by another process"
+    assert load_dataset(data, "binance.um.book_ticker_1s")["bid_price"].to_list() == [1.0]
+    cat.close()
+
+
+def test_an_unexpected_normalizer_error_fails_only_its_segment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review-2 #2: e.g. AttributeError from a payload of the wrong shape must not abort the run."""
+    data, cat = _setup(tmp_path)
+
+    def broken(_rec: object) -> list[dict[str, object]]:
+        raise AttributeError("'list' object has no attribute 'get'")
+
+    monkeypatch.setitem(compact_module.NORMALIZERS, "binance.um.oi_hist", broken)
+    _segment(data / "raw", "binance.um.oi_hist", T0, [_oi("1")])
+    _segment(data / "raw", "binance.um.book_ticker_1s", T0, [_book("2")])
+    done = compact_closed_segments(data, cat, now_ns=T0 + 2 * HOUR_NS)
+    assert done.compacted == 1 and len(done.failed) == 1 and "AttributeError" in done.failed[0][1]
+    cat.close()

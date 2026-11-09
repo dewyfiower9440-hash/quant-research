@@ -114,7 +114,9 @@ class PointInTime:
         frontier = pl.col("event_ns").cum_max().shift(1)
         if by is not None:
             frontier = frontier.over(by)
-        right = right.filter(frontier.is_null() | (pl.col("event_ns") >= frontier))
+        # rows without an event time are kept (they join on receive time as before)
+        keep = frontier.is_null() | pl.col("event_ns").is_null() | (pl.col("event_ns") >= frontier)
+        right = right.filter(keep)
         left = left.with_columns(pl.col("decision_ns").cast(pl.Int64)).sort("decision_ns")
         # Both sides are sorted on the as-of key just above. Polars cannot verify sortedness inside `by`
         # groups (in-memory engine), so the check is skipped only then; the guarantee is this sort and the
