@@ -34,7 +34,7 @@ import websockets
 from websockets.exceptions import InvalidStatus
 
 from quant_research.capture import binance, upbit
-from quant_research.capture.backup import backup_closed_files
+from quant_research.capture.backup import backup_closed_files, snapshot_catalog
 from quant_research.capture.clockref import ClockReference
 from quant_research.capture.compress import compress_closed_segments
 from quant_research.capture.http import Fetcher, VenueGate
@@ -258,9 +258,19 @@ async def rest_main(
                 done = await asyncio.to_thread(
                     backup_closed_files, settings.data_root, settings.backup_root, now_ns=time.time_ns()
                 )
+                # plan step 4: consistent catalog copy (VACUUM INTO), one per UTC day, 7 days kept
+                snap = await asyncio.to_thread(
+                    snapshot_catalog, settings.data_root, settings.backup_root, now_ns=time.time_ns()
+                )
                 sinks.write(
                     "collector.backup",
-                    {"copied": len(done.copied), "unchanged": done.unchanged, "vanished": done.vanished},
+                    {
+                        "copied": len(done.copied),
+                        "unchanged": done.unchanged,
+                        "vanished": done.vanished,
+                        "catalog_snapshot": None if snap is None else snap.path.name,
+                        "catalog_rows": None if snap is None else sum(snap.tables.values()),
+                    },
                 )
 
             async def compact() -> None:

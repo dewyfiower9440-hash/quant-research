@@ -19,6 +19,22 @@ from typing import Literal, cast
 
 from quant_research.errors import AppError
 
+# Literal per-table row counts for backup snapshots and restore drills (no dynamic SQL); a test keeps
+# this in step with the migrations.
+ROW_COUNT_SQL: dict[str, str] = {
+    "instrument": "select count(*) from instrument",
+    "dataset": "select count(*) from dataset",
+    "gap": "select count(*) from gap",
+    "seal_policy": "select count(*) from seal_policy",
+    "universe_membership": "select count(*) from universe_membership",
+    "lag_policy": "select count(*) from lag_policy",
+    "compacted_segment": "select count(*) from compacted_segment",
+    "bulk_file": "select count(*) from bulk_file",
+    "backfill_chunk": "select count(*) from backfill_chunk",
+    "backfill_done": "select count(*) from backfill_done",
+    "gapscan_segment": "select count(*) from gapscan_segment",
+}
+
 MarketType = Literal["spot", "usdm_perp", "usdm_future"]
 TimeSemantics = Literal["event", "interval_start", "interval_end", "snapshot", "unknown_interval"]
 GAP_CAUSES = frozenset(

@@ -7,9 +7,16 @@ from pathlib import Path
 import pytest
 
 from quant_research.capture import backup as backup_module
-from quant_research.capture.backup import backup_closed_files, restore_and_verify
+from quant_research.capture.backup import (
+    KEEP_CATALOG_SNAPSHOTS,
+    backup_closed_files,
+    restore_and_verify,
+    restore_catalog_and_verify,
+    snapshot_catalog,
+)
 from quant_research.capture.compress import compress_closed_segments
 from quant_research.capture.segment import SegmentWriter
+from quant_research.catalog.store import ROW_COUNT_SQL, Catalog
 
 HOUR_NS = 3_600 * 10**9
 T0 = (1_794_000_000 * 10**9) // HOUR_NS * HOUR_NS
@@ -115,3 +122,68 @@ def test_a_file_compressed_between_listing_and_copy_is_skipped_not_failed(
     manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
     assert victim.relative_to(data).as_posix() not in manifest
     current.close()
+
+
+DAY_NS = 86_400 * 10**9
+
+
+def _catalog_with_rows(data: Path, gaps: int) -> None:
+    catalog = Catalog.open(data / "meta" / "catalog.db")
+    try:
+        for i in range(gaps):
+            catalog.conn.execute(
+                "insert into gap(source, start_ns, end_ns, cause, detail, recorded_ns) values (?,?,?,?,?,?)",
+                ("s", i, i + 1, "unknown", "t", 1),
+            )
+    finally:
+        catalog.close()
+
+
+def test_catalog_snapshot_restores_with_identical_hash_and_row_counts(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _catalog_with_rows(data, 3)
+    dest = tmp_path / "backup"
+    snap = snapshot_catalog(data, dest, now_ns=T0)
+    assert snap is not None and snap.tables["gap"] == 3
+    report = restore_catalog_and_verify(dest, tmp_path / "restore")
+    assert report.ok and report.files == 1
+
+
+def test_catalog_snapshot_restore_detects_a_corrupted_snapshot(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _catalog_with_rows(data, 2)
+    dest = tmp_path / "backup"
+    snap = snapshot_catalog(data, dest, now_ns=T0)
+    assert snap is not None
+    blob = bytearray(snap.path.read_bytes())
+    blob[-100] ^= 0xFF
+    snap.path.write_bytes(bytes(blob))
+    report = restore_catalog_and_verify(dest, tmp_path / "restore")
+    assert not report.ok and report.mismatches == [snap.path.name]
+
+
+def test_catalog_snapshot_keeps_one_per_day_for_the_last_seven_days(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _catalog_with_rows(data, 1)
+    dest = tmp_path / "backup"
+    for day in range(9):
+        snapshot_catalog(data, dest, now_ns=T0 + day * DAY_NS)
+        snapshot_catalog(data, dest, now_ns=T0 + day * DAY_NS + HOUR_NS)  # same day: replaced, not added
+    kept = sorted(p.name for p in (dest / "catalog").glob("*.db"))
+    assert len(kept) == KEEP_CATALOG_SNAPSHOTS == 7
+    index = json.loads((dest / "catalog" / "snapshots.json").read_text(encoding="utf-8"))
+    assert sorted(index) == kept
+
+
+def test_catalog_snapshot_without_a_catalog_is_skipped(tmp_path: Path) -> None:
+    assert snapshot_catalog(tmp_path / "data", tmp_path / "backup", now_ns=T0) is None
+
+
+def test_row_count_queries_cover_every_catalog_table(tmp_path: Path) -> None:
+    catalog = Catalog.open(tmp_path / "c.db")
+    try:
+        query = "select name from sqlite_master where type='table' and name not like 'sqlite_%'"
+        tables = {str(r[0]) for r in catalog.conn.execute(query)}
+    finally:
+        catalog.close()
+    assert set(ROW_COUNT_SQL) == tables  # a new migration must add its table to the snapshot check
