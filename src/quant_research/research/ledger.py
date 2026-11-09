@@ -27,6 +27,16 @@ def experiment_key(spec_hash: str, config: Mapping[str, object]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class TrialOrigin:
+    """Where an evaluation came from (design §8: model id and LLM training cutoff on every trial)."""
+
+    model_id: str | None = None
+    llm_cutoff: str | None = None
+    hypothesis_id: int | None = None
+    cycle_id: int | None = None
+
+
 @dataclass
 class TrialHandle:
     trial_id: int
@@ -83,12 +93,31 @@ class TrialLedger:
 
     @contextmanager
     def evaluate(
-        self, experiment: str, spec_hash: str, stage: Stage, *, fold: str | None = None
+        self,
+        experiment: str,
+        spec_hash: str,
+        stage: Stage,
+        *,
+        fold: str | None = None,
+        origin: TrialOrigin | None = None,
     ) -> Generator[TrialHandle]:
+        o = origin or TrialOrigin()
         cur = self.store.conn.execute(
-            "insert into trial(experiment_key, spec_hash, stage, fold, status, env_id, code_sha, started_ns) "
-            "values (?,?,?,?, 'running', ?,?,?)",
-            (experiment, spec_hash, stage, fold, self.env_id, self.code_sha, self.now_ns()),
+            "insert into trial(experiment_key, spec_hash, stage, fold, status, env_id, code_sha, started_ns, "
+            "model_id, llm_cutoff, hypothesis_id, cycle_id) values (?,?,?,?, 'running', ?,?,?,?,?,?,?)",
+            (
+                experiment,
+                spec_hash,
+                stage,
+                fold,
+                self.env_id,
+                self.code_sha,
+                self.now_ns(),
+                o.model_id,
+                o.llm_cutoff,
+                o.hypothesis_id,
+                o.cycle_id,
+            ),
         )
         handle = TrialHandle(int(cur.lastrowid or 0))
         try:

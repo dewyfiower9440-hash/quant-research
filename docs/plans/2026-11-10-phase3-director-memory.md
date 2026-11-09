@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 task: qr-phase3
 ---
 
@@ -75,9 +75,9 @@ tools/run_director.py   --llm fake|claude --cycles N --budget-usd X(claude는 �
 - `Hypothesis` 필드: `family`, `statement`, `falsification_test`, `required_data`, `required_features`(Phase 4 연결), `prior`, `anonymized=1`
 
 ## 4. 구현 순서 (각 단계: 테스트 먼저 → 구현 → 게이트 → 커밋 → CI)
-- [ ] 1. research.db 마이그레이션 0002와 MemoryStore
+- [x] 1. research.db 마이그레이션 0002와 MemoryStore
   - 테스트: 근거 없는 발견 거부(NOT NULL과 검사), supersede 체인, 원인 코드 열거, 재시작 후 복원, 쓰기 실패 시 예외 전파(루프 정지)
-- [ ] 2. 익명화
+- [x] 2. 익명화
   - 테스트: 대응표 왕복, 프롬프트 페이로드에 실제 심볼·날짜·가격 수준이 없음(누출 탐지), 별칭 고정성
 - [ ] 3. 스키마와 FakeLLM
   - 테스트: 스키마 위반 시 1회 재요청 후 폐기·기록, 크기 상한, 거부(refusal) 처리

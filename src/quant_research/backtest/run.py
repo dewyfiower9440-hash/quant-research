@@ -25,7 +25,7 @@ from quant_research.backtest.engines import EngineResult, EngineUnsupported, run
 from quant_research.backtest.market import F64, Fidelity, FidelityUnavailable, prepare
 from quant_research.backtest.panel import Panel, select_top_liquidity
 from quant_research.catalog.store import Catalog
-from quant_research.research.ledger import Stage, TrialLedger
+from quant_research.research.ledger import Stage, TrialLedger, TrialOrigin
 from quant_research.strategy.canonical import spec_hash
 from quant_research.strategy.compile import compile_spec
 from quant_research.strategy.ops import OPS
@@ -133,6 +133,7 @@ def run_backtest(
     *,
     stage: Stage = "smoke",
     fold: str | None = None,
+    origin: TrialOrigin | None = None,
 ) -> RunOutcome:
     h = spec_hash(spec)
     datasets = spec_datasets(spec)
@@ -157,7 +158,7 @@ def run_backtest(
         "symbols": sorted(set(frame["symbol"].to_list())),
     }
     key = ledger.register_experiment(h, spec.model_dump_json(), run_config)
-    with ledger.evaluate(key, h, stage, fold=fold) as trial:
+    with ledger.evaluate(key, h, stage, fold=fold, origin=origin) as trial:
         violations = check(spec)
         if violations:
             trial.reject("S0: " + "; ".join(violations))
