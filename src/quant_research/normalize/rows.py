@@ -179,6 +179,7 @@ VERSION_KEYS: dict[str, tuple[str, ...]] = {
     "binance.um.taker_ls": ("symbol", "event_ns"),
     "binance.um.basis": ("symbol", "event_ns"),
     "upbit.trades": ("market", "sequential_id"),
+    "upbit.candles_1m": ("market", "event_ns"),  # overlapping backfill runs; a changed value is a version
 }
 
 

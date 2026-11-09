@@ -141,9 +141,9 @@ def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:
     keys = VERSION_KEYS.get(dataset_id)
     if keys is None:
         return frame
-    value_cols = [c for c in frame.columns if c not in {*keys, "received_ns", "offset_ms", "clock_suspect"}]
-    return (
-        frame.sort("received_ns")
-        .unique(subset=[*keys, *value_cols], keep="first", maintain_order=True)
-        .sort([*keys, "received_ns"])
-    )
+    # live captures carry received_ns; REST backfills carry fetched_ns (they were not observed live)
+    order = "received_ns" if "received_ns" in frame.columns else "fetched_ns"
+    value_cols = [
+        c for c in frame.columns if c not in {*keys, "received_ns", "fetched_ns", "offset_ms", "clock_suspect"}
+    ]
+    return frame.sort(order).unique(subset=[*keys, *value_cols], keep="first", maintain_order=True).sort([*keys, order])

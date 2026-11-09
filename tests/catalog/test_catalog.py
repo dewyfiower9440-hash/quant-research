@@ -171,6 +171,11 @@ def test_bootstrap_registers_t0_datasets_priors_and_seal_once(tmp_path: Path) ->
     first = bootstrap(c)
     second = bootstrap(c)
     n = len(T0_DATASETS) + len(BULK_DATASETS)
+    upbit_candles = c.seal("upbit.candles_1m")  # step 9 backfill shares the history seal (ADR-013)
+    assert (upbit_candles.research_until_ns, upbit_candles.holdout_until_ns) == (
+        BULK_RESEARCH_UNTIL_NS,
+        BULK_HOLDOUT_UNTIL_NS,
+    )
     bulk = c.seal("binance.um.bulk.klines_1m")
     assert (bulk.research_until_ns, bulk.holdout_until_ns) == (BULK_RESEARCH_UNTIL_NS, BULK_HOLDOUT_UNTIL_NS)
     assert c.lag_ns("binance.um.bulk.mark_klines_1m") == 60 * NS

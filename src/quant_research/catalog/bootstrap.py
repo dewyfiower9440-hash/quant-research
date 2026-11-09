@@ -52,16 +52,24 @@ ONE_MIN_MS = 60_000
 # research LLM, design v2.1 §9-6), sealed holdout 2026-07-01 .. 2026-11-01.
 BULK_RESEARCH_UNTIL_NS = 1_782_864_000 * 10**9  # 2026-07-01T00:00:00Z
 BULK_HOLDOUT_UNTIL_NS = 1_793_491_200 * 10**9  # 2026-11-01T00:00:00Z
-BULK_DATASETS: tuple[Dataset, ...] = tuple(
-    Dataset(
-        f"binance.um.bulk.{name}_1m", "binance", "interval_start", ONE_MIN_MS, f"data.binance.vision monthly {kind} 1m"
-    )
-    for name, kind in (
-        ("klines", "klines"),
-        ("mark_klines", "markPriceKlines"),
-        ("index_klines", "indexPriceKlines"),
-        ("premium_klines", "premiumIndexKlines"),
-    )
+BULK_DATASETS: tuple[Dataset, ...] = (
+    *(
+        Dataset(
+            f"binance.um.bulk.{name}_1m",
+            "binance",
+            "interval_start",
+            ONE_MIN_MS,
+            f"data.binance.vision monthly {kind} 1m",
+        )
+        for name, kind in (
+            ("klines", "klines"),
+            ("mark_klines", "markPriceKlines"),
+            ("index_klines", "indexPriceKlines"),
+            ("premium_klines", "premiumIndexKlines"),
+        )
+    ),
+    # plan step 9: REST backfill; a minute without a candle is `no_trade` (gap cause), not missing data
+    Dataset("upbit.candles_1m", "upbit", "interval_start", ONE_MIN_MS, "Upbit REST 1m candles backfill, KRW top-N"),
 )
 
 
