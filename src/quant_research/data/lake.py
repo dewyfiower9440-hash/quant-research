@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -31,41 +32,78 @@ def segment_stem(path: Path) -> str:
     return name[: -len(".jsonl.gz")] if name.endswith(".jsonl.gz") else name[: -len(".jsonl")]
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class SegmentStream:
+    """Records of a raw segment, read line by line in constant memory (review #1).
+
+    Only the valid prefix is yielded: the first line that is not newline-terminated or not valid JSON
+    ends the records, and it plus everything after it is counted in `skipped_bytes` (a torn tail).
+    `records` and `skipped_bytes` are final once iteration is exhausted; `sha256` is of the file bytes.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.sha256 = _file_sha256(path)
+        self.records = 0
+        self.skipped_bytes = 0
+
+    def __iter__(self) -> Iterator[RawRecord]:
+        gz = self.path.name.endswith(".gz")
+        with gzip.open(self.path, "rb") if gz else self.path.open("rb") as fh:
+            torn = False
+            for line in fh:
+                if not torn and line.endswith(b"\n"):
+                    try:
+                        obj = cast(dict[str, object], json.loads(line))
+                    except (ValueError, UnicodeDecodeError):
+                        torn = True
+                    else:
+                        if "recv_ns" in obj:
+                            self.records += 1
+                            yield RawRecord(
+                                recv_ns=int(cast(int, obj["recv_ns"])),
+                                offset_ms=cast(float | None, obj.get("offset_ms")),
+                                clock_suspect=bool(obj.get("clock_suspect", obj.get("offset_ms") is None)),
+                                payload=obj.get("payload"),
+                            )
+                        continue
+                torn = True
+                self.skipped_bytes += len(line)
+
+
 def read_segment(path: Path) -> SegmentContent:
-    """Records of a raw segment; for a plain .jsonl only the valid prefix (a torn tail is counted)."""
-    raw = path.read_bytes()
-    data = gzip.decompress(raw) if path.name.endswith(".gz") else raw
-    records: list[RawRecord] = []
-    pos = 0
-    while True:
-        nl = data.find(b"\n", pos)
-        if nl < 0:
-            break
-        try:
-            obj = cast(dict[str, object], json.loads(data[pos:nl]))
-        except (ValueError, UnicodeDecodeError):
-            break
-        if "recv_ns" in obj:
-            records.append(
-                RawRecord(
-                    recv_ns=int(cast(int, obj["recv_ns"])),
-                    offset_ms=cast(float | None, obj.get("offset_ms")),
-                    clock_suspect=bool(obj.get("clock_suspect", obj.get("offset_ms") is None)),
-                    payload=obj.get("payload"),
-                )
-            )
-        pos = nl + 1
-    return SegmentContent(records, hashlib.sha256(raw).hexdigest(), len(data) - pos)
+    """All records of a raw segment at once (small segments, tests); compaction uses SegmentStream."""
+    stream = SegmentStream(path)
+    records = list(stream)
+    return SegmentContent(records, stream.sha256, stream.skipped_bytes)
 
 
 def lake_path(data_root: Path, dataset_id: str, stem: str, day: str) -> Path:
     return data_root / "lake" / dataset_id / day / f"{stem}.parquet"
 
 
+def rows_frame(rows: list[Row]) -> pl.DataFrame:
+    """One batch of normalized rows as a columnar frame (the dicts can be dropped right after)."""
+    return pl.from_dicts(rows, infer_schema_length=None)
+
+
 def write_rows(rows: list[Row], target: Path) -> None:
     """Write once: temporary name, then rename to a name nobody has opened yet."""
+    write_frames([rows_frame(rows)], target)
+
+
+def write_frames(frames: list[pl.DataFrame], target: Path) -> None:
+    """Concatenate batch frames (a column that was all-null in one batch takes its type from the others)
+    and write once: temporary name, then rename to a name nobody has opened yet."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    frame = pl.from_dicts(rows, infer_schema_length=None)
+    frame = frames[0] if len(frames) == 1 else pl.concat(frames, how="diagonal_relaxed")
     tmp = target.with_name(target.name + ".tmp")
     frame.write_parquet(tmp, compression="zstd", statistics=True)
     os.replace(tmp, target)

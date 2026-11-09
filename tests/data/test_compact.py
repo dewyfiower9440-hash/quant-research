@@ -5,10 +5,12 @@ import json
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from quant_research.catalog.store import Catalog
+from quant_research.data import compact as compact_module
 from quant_research.data.compact import compact_closed_segments
-from quant_research.data.lake import load_dataset
+from quant_research.data.lake import SegmentStream, load_dataset, read_segment
 
 HOUR_NS = 3_600 * 10**9
 T0 = (1_794_000_000 * 10**9) // HOUR_NS * HOUR_NS
@@ -171,3 +173,71 @@ def test_normalizer_failure_is_reported_and_the_segment_is_retried_later(tmp_pat
 def test_load_dataset_without_files_returns_an_empty_frame(tmp_path: Path) -> None:
     assert load_dataset(tmp_path, "binance.um.force_order").height == 0
     assert isinstance(load_dataset(tmp_path, "binance.um.force_order"), pl.DataFrame)
+
+
+# --- review #1/#2: bounded-memory streaming and per-segment failure isolation ---
+
+
+def test_small_batches_produce_the_same_lake_file_as_one_batch(tmp_path: Path) -> None:
+    payloads: list[object] = [_book(str(i)) for i in range(1, 8)]
+    frames: list[pl.DataFrame] = []
+    for name, batch in (("one", 10_000), ("many", 2)):
+        data = tmp_path / name / "data"
+        cat = Catalog.open(data / "meta" / "catalog.db")
+        _segment(data / "raw", "binance.um.book_ticker_1s", T0, payloads, gz=True)
+        done = compact_closed_segments(data, cat, now_ns=T0 + 2 * HOUR_NS, batch_rows=batch)
+        assert done.rows == 7 and done.failed == []
+        frames.append(load_dataset(data, "binance.um.book_ticker_1s"))
+        cat.close()
+    assert frames[0].equals(frames[1])
+
+
+def test_columns_that_are_null_in_an_early_batch_get_their_type_from_later_batches(tmp_path: Path) -> None:
+    data, cat = _setup(tmp_path)
+    nullish = _book("1")
+    nullish[0]["bidPrice"] = None  # first batch: all-null column
+    _segment(data / "raw", "binance.um.book_ticker_1s", T0, [nullish, _book("2")])
+    done = compact_closed_segments(data, cat, now_ns=T0 + 2 * HOUR_NS, batch_rows=1)
+    assert done.failed == []
+    assert load_dataset(data, "binance.um.book_ticker_1s").sort("received_ns")["bid_price"].to_list() == [None, 2.0]
+    cat.close()
+
+
+def test_one_unreadable_segment_does_not_block_later_segments(tmp_path: Path) -> None:
+    data, cat = _setup(tmp_path)
+    bad = _segment(data / "raw", "binance.um.oi_hist", T0, [_oi("1")], gz=True)
+    bad.write_bytes(bad.read_bytes()[:20])  # truncated gzip stream
+    _segment(data / "raw", "binance.um.oi_hist", T0 + HOUR_NS, [_oi("2", ts_ms=1_794_000_300_000)])
+    _segment(data / "raw", "upbit.orderbook_l1_1s", T0, [[{"market": "KRW-X", "timestamp": 1, "orderbook_units": []}]])
+    _segment(data / "raw", "binance.um.book_ticker_1s", T0, [_book("3")])  # sorts after the failing sources
+    done = compact_closed_segments(data, cat, now_ns=T0 + 3 * HOUR_NS)
+    assert done.compacted == 2 and len(done.failed) == 2
+    assert load_dataset(data, "binance.um.book_ticker_1s")["bid_price"].to_list() == [3.0]
+    cat.close()
+
+
+def test_a_segment_removed_between_listing_and_reading_is_skipped_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The compress job may replace .jsonl by .jsonl.gz while compaction runs; the .gz is picked up next run."""
+    data, cat = _setup(tmp_path)
+    _segment(data / "raw", "binance.um.book_ticker_1s", T0, [_book("1")])
+
+    def vanish_then_open(path: Path) -> SegmentStream:
+        path.unlink()  # the concurrent compress job wins the race
+        return SegmentStream(path)
+
+    monkeypatch.setattr(compact_module, "SegmentStream", vanish_then_open)
+    done = compact_closed_segments(data, cat, now_ns=T0 + 2 * HOUR_NS)
+    assert (done.compacted, done.failed, done.vanished) == (0, [], 1)
+    cat.close()
+
+
+def test_stream_matches_the_whole_file_reader_including_torn_tails(tmp_path: Path) -> None:
+    tail = b'{"recv_ns": 9, "pay'
+    path = _segment(tmp_path / "raw", "binance.um.book_ticker_1s", T0, [_book("1"), _book("2")], tail=tail)
+    stream = SegmentStream(path)
+    records = list(stream)
+    whole = read_segment(path)
+    assert records == whole.records and len(records) == 2
+    assert stream.sha256 == whole.sha256 and stream.skipped_bytes == whole.skipped_bytes == len(tail)

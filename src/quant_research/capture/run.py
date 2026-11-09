@@ -21,11 +21,12 @@ import os
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import structlog
@@ -43,13 +44,16 @@ from quant_research.capture.recovery import Gap
 from quant_research.capture.sinks import Sinks
 from quant_research.capture.thermal import heavy_work_allowed, read_state
 from quant_research.config import Settings, load_settings
-from quant_research.data.compact import compact_once
 from quant_research.log import configure_logging
 
 EXIT_STOP_ALL = 3
 EXIT_RETIRE = 4
 STOP_FILE = "STOP"
+if TYPE_CHECKING:  # the collector process itself never imports Polars (compaction runs in a child)
+    from quant_research.data.compact import CompactResult
+
 log = structlog.get_logger(__name__)
+POLARS_THREADS = 2  # the collectors share the PC with research jobs and the bulk download
 
 
 def git_sha(repo: Path) -> str:
@@ -256,7 +260,7 @@ async def rest_main(
                 sinks.write("collector.backup", {"copied": len(done.copied), "unchanged": done.unchanged})
 
             async def compact() -> None:
-                done = await asyncio.to_thread(compact_once, settings.data_root)
+                done = await asyncio.to_thread(compact_in_child, settings.data_root)
                 sinks.write(
                     "collector.compaction", {"compacted": done.compacted, "rows": done.rows, "failed": len(done.failed)}
                 )
@@ -410,6 +414,20 @@ def next_backoff(previous_s: float, healthy_for_s: float) -> float:
     return 5.0 if healthy_for_s >= 600 else min(300.0, max(5.0, previous_s * 2))
 
 
+def _compact_job(data_root: Path) -> CompactResult:
+    """Runs inside the short-lived compaction process; Polars is imported there, never in the collector."""
+    from quant_research.data.compact import compact_once
+
+    return compact_once(data_root)
+
+
+def compact_in_child(data_root: Path) -> CompactResult:
+    """Compaction in a fresh spawned process that exits afterwards, so its peak memory (Polars heap,
+    fragmented Python arenas) goes back to the OS instead of staying in the rest worker (review #1)."""
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        return pool.submit(_compact_job, data_root).result()
+
+
 def _child_entry(role: str) -> None:
     """Child process target (multiprocessing spawn on Windows imports this module fresh)."""
     main([role])
@@ -520,6 +538,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--duration", type=float, default=None, help="stop after N seconds (tests, timed runs)")
     ap.add_argument("--log-dir", type=Path, default=None, help="write this process's log to <dir>/<role>.log")
     a = ap.parse_args(argv)
+    # Inherited by every spawned child; Polars sizes its thread pool from it at import (review #1).
+    os.environ.setdefault("POLARS_MAX_THREADS", str(POLARS_THREADS))
     redirect_log(a.log_dir, a.role)
     settings = load_settings()
     configure_logging(settings.log_level, json=True)
