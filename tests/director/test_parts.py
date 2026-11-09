@@ -98,7 +98,8 @@ def test_cost_uses_the_official_price_table() -> None:
 def test_budget_blocks_a_call_that_could_break_the_total_or_cycle_cap() -> None:
     b = Budget(max_total_usd=5.0, max_cycle_usd=1.0, max_output_tokens=8_000)
     one_call = b.check(model_id="claude-opus-5-5", prompt_text="x" * 3_000, billed=True)
-    assert one_call == pytest.approx((1_000 * 4 + 8_000 * 20) / 1e6)
+    # billed estimates assume the most expensive model that a refusal fallback could route to (Fable 5.1)
+    assert one_call == pytest.approx((1_000 * 10 + 8_000 * 50) / 1e6)
     b.spent_billed_usd = 4.9
     with pytest.raises(BudgetExceeded, match="total cap"):
         b.check(model_id="claude-opus-5-5", prompt_text="x" * 3_000, billed=True)

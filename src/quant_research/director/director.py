@@ -237,7 +237,8 @@ class Director:
                 raise LeakBlocked(f"{purpose} request contains {found[:5]}")
             estimate = self.budget.check(model_id=self.llm.model_id, prompt_text=text, billed=self.llm.billed)
             resp = self.llm.complete(req)
-            priced = self.llm.model_id if self.llm.billed else PRICED_AS
+            served = getattr(self.llm, "served_model", None)  # a fallback model may have answered
+            priced = (str(served) if served else self.llm.model_id) if self.llm.billed else PRICED_AS
             usage = cost_usd(
                 priced,
                 input_tokens=resp.input_tokens,

@@ -34,6 +34,9 @@ class Price:
 PRICES: dict[str, Price] = {
     "claude-opus-5-5": Price(input=4.0, output=20.0, cache_write_5m=5.0, cache_write_1h=8.0, cache_read=0.20),
     "claude-sonnet-5-5": Price(input=2.0, output=10.0, cache_write_5m=2.5, cache_write_1h=4.0, cache_read=0.10),
+    # a server-side refusal fallback may answer with another model; the page does not say whose rates apply,
+    # so billed pre-call estimates use the most expensive listed model (this one)
+    "claude-fable-5-1": Price(input=10.0, output=50.0, cache_write_5m=12.5, cache_write_1h=20.0, cache_read=0.25),
 }
 PRICE_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-10)"
 PRICED_AS = "claude-opus-5-5"  # fake runs report what the same tokens would cost on the planned model
@@ -61,7 +64,7 @@ class Budget:
     """Limits; `spent_billed_usd` is cumulative over all paid runs (loaded from research.db)."""
 
     max_total_usd: float = 5.0
-    max_cycle_usd: float = 1.0
+    max_cycle_usd: float = 2.5  # worst-case estimates (fallback pricing) of ~3 calls + retries; total cap binds
     max_calls_per_cycle: int = 8
     max_input_tokens: int = 50_000
     max_output_tokens: int = 8_000
@@ -80,7 +83,10 @@ class Budget:
             raise BudgetExceeded(f"prompt ~{tokens_in} tokens > per-call limit {self.max_input_tokens}")
         if self.cycle_calls + 1 > self.max_calls_per_cycle:
             raise BudgetExceeded(f"call {self.cycle_calls + 1} > {self.max_calls_per_cycle} calls per cycle")
-        estimate = cost_usd(model_id, input_tokens=tokens_in, output_tokens=self.max_output_tokens)
+        if billed:  # worst case over every model that could answer (fallbacks)
+            estimate = max(cost_usd(m, input_tokens=tokens_in, output_tokens=self.max_output_tokens) for m in PRICES)
+        else:
+            estimate = cost_usd(model_id, input_tokens=tokens_in, output_tokens=self.max_output_tokens)
         if billed:
             if self.spent_billed_usd + estimate > self.max_total_usd:
                 raise BudgetExceeded(

@@ -88,7 +88,7 @@ tools/run_director.py   --llm fake|claude --cycles N --budget-usd X(claude는 �
 - [x] 6. Director 사이클 실행기와 예산
   - 테스트: 정상 사이클, 예산 초과 PAUSED, 데이터 요청 → outbox → REPLAN, VALIDATE 스텁, 중간 종료 후 재개 시 trial 중복이나 누락 0
 - [ ] 7. 가짜 LLM 무인 10사이클(실데이터 패널: 이미 받은 8심볼, 연구 구간) → 측정 보고서
-- [ ] 8. ClaudeLLM 어댑터: **새 의존성 `anthropic` 승인 후**
+- [x] 8. ClaudeLLM 어댑터: **새 의존성 `anthropic` 승인 후**
   - SDK 1.x는 httpx2를 사용합니다.
   - 테스트는 Protocol 수준의 가짜 클라이언트로만 합니다(네트워크 0).
 - [ ] 9. 실제 API 비용 측정: **키 설정과 유료 호출 승인 후**
