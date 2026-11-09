@@ -1,7 +1,9 @@
 ---
-status: in-progress
+status: done
 task: qr-phase3
 ---
+
+> 2026-11-10 종료: 단계 1~8, 10~12 완료. 단계 9(유료 API 비용 측정)는 사용자 미승인으로 **DEFERRED**입니다(ADR-025, 실제 LLM 검증은 구독 CLI 경로 12단계로 수행).
 
 # Phase 3: Research Director, 상태 기계, Memory, LLM 연동 (설계 v2.1 §13 Phase 3)
 
@@ -91,17 +93,18 @@ tools/run_director.py   --llm fake|claude --cycles N --budget-usd X(claude는 �
 - [x] 8. ClaudeLLM 어댑터: **새 의존성 `anthropic` 승인 후**
   - SDK 1.x는 httpx2를 사용합니다.
   - 테스트는 Protocol 수준의 가짜 클라이언트로만 합니다(네트워크 0).
-- [ ] 9. 실제 API 비용 측정: **키 설정과 유료 호출 승인 후**
+- [ ] 9. 실제 API 비용 측정: **키 설정과 유료 호출 승인 후** — DEFERRED(2026-11-10 미승인, ADR-025)
   - 상한 $5로 3~10사이클을 실행하고, 사이클당 토큰과 비용을 실측합니다.
   - 승인이 없으면 이 단계는 PENDING으로 두고, Phase 3 상태를 `IMPLEMENTED / LLM_COST_MEASUREMENT_PENDING`으로 기록합니다.
 - [x] 10. 문서(progress, ADR, failures, operations, test-results, 측정표)
-- [ ] 11. **F-016 스키마 계약 수정** (2026-11-10 사용자 승인)
+- [x] 11. **F-016 스키마 계약 수정** (2026-11-10 사용자 승인, 커밋 94c5c5f)
   - 특징 이름 규칙을 `^[a-z][a-z0-9_]{0,31}$`로 바꾸고, DSL 문법으로 실제 존재하는 이름만 받습니다.
   - API로 보내는 스키마에서 지운 제약은 설명과 시스템 프롬프트로 전달합니다.
   - 재시도 피드백에 필드별 제약을 담습니다.
   - 실패한 실제 응답 6건을 회귀 테스트로 추가하고, 가짜 LLM에 위반 시나리오를 추가합니다.
-- [ ] 12. **실제 LLM(CLI 구독 경로) 3사이클 재검증** (2026-11-10 사용자 승인, 최대 3사이클)
+- [x] 12. **실제 LLM(CLI 구독 경로) 3사이클 재검증** (2026-11-10 사용자 승인, 최대 3사이클)
   - 필수 기준: 3사이클 모두 실제 평가 단계에 도달하고, trial 중복과 누락이 0건입니다.
+  - 결과(run `cli-s7-on-posterior-20261110-r2`, `docs/measurements/phase3-cli-3cycles-r2.md`): 3/3 BACKTEST 도달, LLM 9/9 1차 시도 `ok`(schema_invalid 0), trial 9건(S2 6, S3 3), 전역 done 중복 0, running 잔류 0. **통과.**
 
 ## 5. 검증 기준 (Phase 3 완료 판정)
 1. **가짜 LLM 무인 10사이클:** 사람 개입 없이 10사이클이 끝나거나, 정책상 PAUSED로 정상 종료합니다.

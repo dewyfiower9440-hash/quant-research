@@ -411,7 +411,8 @@
 
 # Phase 3: Research Director, 상태 기계, Memory, LLM 연동 (계획 `docs/plans/2026-11-10-phase3-director-memory.md`, 2026-11-10 승인)
 
-## 상태: **IMPLEMENTED (가짜 LLM 검증 완료) / 실제 LLM 검증: FAILED_SCHEMA — 3사이클 모두 가설 스키마 불일치, 수정 후 재실행은 사용자 승인 대기** (2026-11-10)
+## 상태: **IMPLEMENTED / 가짜 LLM 10사이클 검증 완료 / 실제 LLM(구독 CLI) 3사이클 재검증 통과(F-016 수정 후) / 유료 API 비용 측정 DEFERRED(미승인)** (2026-11-10)
+- 이전 상태 "FAILED_SCHEMA"는 F-016 수정(94c5c5f)과 재실행 r2로 해소됐습니다(아래 "실제 LLM 3사이클 재검증" 절).
 - 유료 API 경로(`claude-api`)는 승인되지 않아 거부합니다. 실제 LLM은 구독 CLI 경로(`claude-cli`)만 씁니다(ADR-025).
 - **범위 밖(구현 완료로 선언하지 않음):** Phase 4 대규모 탐색, Phase 5 독립 통계 검증. VALIDATE 상태는 기록만 하는 스텁이며, 홀드아웃에는 접근하지 않습니다.
 - **주장 금지:** 10사이클 실행은 자율 연구 능력의 증명이 아닙니다. 전략 성과의 증거도 아닙니다.
@@ -476,3 +477,26 @@
   - 정가 환산 추정 $0.97은 사전 최악 추정의 합계입니다. 구독이라 청구액이 아닙니다.
 - **구독 플랜:** CLI `auth status`는 `subscriptionType=pro`, `planTier=pro`로 보고합니다. 사용자는 Max라고 확인했습니다. 차이의 원인은 **미확인**입니다(로그인 시점에 저장된 값일 가능성).
 - **정책 판단 근거:** 공식 headless 문서의 인터페이스이고, 사용자 본인의 로그인이며, 수정하지 않은 바이너리를 소규모로 씁니다. 개인 자동화를 명시적으로 허용하는 문구는 없으므로 이 부분은 **미확인**으로 둡니다(ADR-025).
+
+## 실제 LLM 3사이클 재검증: F-016 수정 후 (2026-11-10, run `cli-s7-on-posterior-20261110-r2`, `docs/measurements/phase3-cli-3cycles-r2.md`)
+- **조건:** 커밋 94c5c5f(프롬프트 phase3-v2), 같은 CLI 경로·호출 조건, 사이클 3개(사용자 승인 상한). 청구 0건.
+- **결과(research.db 읽기 전용 조회로 확인, 사이클 61~63)**
+  - LLM 호출 9건(가설·계획·해석 × 3) 모두 1차 시도 `ok`. schema_invalid 0, 재시도 0.
+  - 가설 3건: trend, momentum, volatility. `statement` 440~456자(상한 600). 특징 이름은 모두 DSL 문법 이름(예: `ema_480_close`, `ret_24`, `rolling_max_24_high`).
+  - trial 9건(사이클마다 S2 2 + S3 1, 모두 done), 실험 키 중복 0, 전역 done 중복 0, running 잔류 0.
+  - 실패 원인 기록: 61 missing_data·weak_signal·regime_dependent, 62 missing_data·cost_erosion, 63 missing_data·cost_erosion·overfit.
+  - 시간 132.6초, CPU 21.0초, 최대 private 메모리 683MB. 호출 지연 7.4~20.8초.
+- **7개 항목 재판정**
+  1. 유효한 DSL 가설: 3/3. **통과**
+  2. 실패 분석이 다음 결정에 반영됨: 계열이 trend → momentum → volatility로 바뀌었고, 전이 근거에 직전 원인 코드가 남았습니다. 3사이클이라 학습 효과 판단에는 표본이 부족합니다. **부분 통과**
+  3. Memory 사용: 사이클마다 원인 코드와 발견 1건(3사이클 합계 3건, 예: finding 33·34, 근거 trial 참조)이 기록됐고, 다음 사이클 OBSERVE 전이 근거에 `last_causes`로 읽혔습니다. **통과(소표본)**
+  4. 중복 실험 없음: 0건. **통과**
+  5. 스키마 오류 복구: 이번 실행에서는 오류가 없었습니다. 복구 경로는 가짜 LLM `too_long`·`unknown_feature` 시나리오 테스트로 검증했습니다. **테스트로 통과, 실제 미발생**
+  6. 사용량 한도 안전 정지: 실제 한도 미도달. **실제 미확인**
+  7. 가짜 LLM과의 차이: F-016 실제 응답 6건을 회귀 고정했습니다(`tests/director/fixtures/f016_real_answers.json`).
+- **관찰(원인 미확인)**
+  - 3사이클 모두 `missing_data`가 기록됐습니다. 가설의 `required_data`는 모두 `["klines"]`였고, 원인 근거는 `funding_not_modelled` 표시(OPS-003/006)입니다. 즉 가설이 아니라 펀딩 미모델 상태 때문에 붙는 원인입니다. 이 원인이 매 사이클 붙는 것이 정책 신호를 흐리는지는 Phase 4에서 판단합니다.
+  - `exhausted`: trend는 1사이클 뒤, momentum은 2사이클 뒤 고정 격자 소진으로 제외됐습니다(이전 실행에서 평가한 점 포함). Phase 4 계획의 "27점 격자 한계" 1번을 실데이터로 다시 확인한 것입니다.
+  - CLI가 보고한 `input_tokens`는 호출당 2이고 나머지는 `cache_read_tokens`(최대 1,638)입니다. 첫 사이클은 캐시 0입니다. CLI의 입력 토큰 집계 방식은 **미확인**이라 입력 토큰 실측값으로 쓰지 않습니다.
+  - 측정표 헤더의 비용 문구는 `tools/run_director.py` 문구 수정 전 코드로 생성돼 "가짜 LLM" 문구가 남아 있었습니다. 수치는 그대로 두고 헤더에 정정 메모를 달았습니다.
+- **Phase 4 반영:** 탐색 자체는 LLM 없이 돕니다. Director 호출은 사이클당 3회, 지연 약 10~45초/사이클을 예산 초깃값으로 씁니다.

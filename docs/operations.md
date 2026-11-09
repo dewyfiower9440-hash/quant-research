@@ -188,3 +188,16 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
   - OI·비율 재수집 대조, 벌크 체크섬 100%, REST 대조를 보고합니다.
   - 사용자가 커버리지 결과를 확인합니다.
 - **Phase 2 영향:** 실시간 데이터(bookTicker 스프레드 등)를 비용 모델에 쓰는 기능은 "미검증" 표시를 단 채로만 동작합니다.
+
+### OPS-008 Claude Code CLI 구독 플랜 표시 불일치 (2026-11-10)
+- **상태:** OPEN
+- **증상:** `claude auth status --json`(CLI 2.1.321)이 `subscriptionType=pro`, `planTier=pro`를 보고합니다. 사용자는 계정이 Max라고 확인했습니다.
+  - 로그인 방식은 `claude.ai`이고 API 제공자는 firstParty입니다. 인증 정보는 출력하거나 기록하지 않았습니다.
+- **영향 범위:** Director 실제 LLM 호출(`--llm claude-cli`)의 사용량 한도를 예상할 수 없습니다.
+  - Pro와 Max는 5시간 세션 한도와 주간 한도가 다릅니다.
+  - API 청구 경로는 쓰지 않으므로 과금에는 영향이 없습니다.
+- **위험도:** 낮음. 한도에 걸리면 Director는 재시도하지 않고 PAUSED로 멈춥니다.
+- **원인:** **미확인**입니다. 로그인할 때 저장된 플랜 값이 업그레이드 뒤에 갱신되지 않았을 가능성과, 다른 계정이나 조직으로 로그인했을 가능성이 있습니다.
+- **해결 계획:** 사용자가 `claude auth logout`, `claude auth login`으로 다시 로그인한 뒤 `claude auth status`로 확인합니다.
+  - 인증 토큰은 읽거나 추출하지 않습니다.
+- **완료 판정 기준:** CLI가 보고하는 플랜이 사용자 계정 플랜과 같습니다. 그렇지 않으면 공식 지원 채널에 문의한 결과를 기록합니다.

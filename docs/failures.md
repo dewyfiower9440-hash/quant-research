@@ -232,3 +232,23 @@
    - 수정: 해제 근거를 HYPOTHESIZE에서 확인합니다.
 - **테스트(먼저 실패를 확인함):** `test_only_recorded_data_requests_block_a_family_not_modelling_caveats`, `test_the_policy_skips_families_in_cooldown_so_cycles_stay_productive`, `test_a_family_whose_fixed_grid_is_fully_evaluated_is_skipped_as_exhausted`, `test_when_every_family_is_exhausted_or_blocked_the_run_pauses_instead_of_spending_llm_calls`, `test_when_only_cooldowns_block_every_family_the_oldest_cooldown_is_released`
 - **상태:** 해결. 최종 실데이터 실행에서 10/10 사이클이 평가까지 진행됐습니다.
+
+## F-016 (2026-11-10, Phase 3 실제 LLM) 실제 모델의 가설 6/6이 스키마 검증 실패
+- **증상:** run `cli-s7-on-posterior-20261110`(구독 CLI, 3사이클)에서 가설 호출 6건이 모두 `schema_invalid`였습니다. 3사이클 모두 REPLAN → DONE으로 끝났고 trial은 0건입니다.
+  - 1차 시도(3/3): `statement`가 600자를 넘었습니다(701, 849, 609자).
+  - 2차 시도(3/3): 특징 이름이 `^[a-z_]{1,32}$` 규칙을 위반했습니다(예: `ret_24h`, `ema_50_close`, `realized_vol_60d`).
+- **재현:** `tests/director/fixtures/f016_real_answers.json`(실제 응답 원문 6건). `tests/director/test_schema_contract.py`가 이 6건을 고정합니다.
+- **근본 원인(스키마 계약 불일치)**
+  1. `api_schema`가 값 제약(maxLength, pattern 등)과 description을 지우고 보냈습니다. 그래서 모델은 1차 시도에서 그 제약을 알 수 없었습니다.
+  2. 특징 이름 규칙이 숫자를 허용하지 않았고, 허용 어휘(DSL 연산자)를 알려 주지 않았습니다. 모델은 자유 형식 이름을 썼습니다.
+  3. 재시도 피드백은 pydantic 오류 문자열을 300자에서 자른 것이었습니다. 첫 오류만 전달됐고 규칙은 전달되지 않았습니다.
+  4. 가짜 LLM은 스키마를 항상 지켰기 때문에, 가짜 LLM 테스트는 이 계약 결함을 잡을 수 없었습니다.
+- **수정(커밋 94c5c5f)**
+  - 특징 이름은 `^[a-z][a-z0-9_]{0,31}$` 형식과 DSL 문법을 모두 만족해야 합니다. 문법: `<column> | <operator> | <op>_<window>[_<column>] | <xs·regime op>_<column>`(창은 1~2000봉).
+    - 저장된 기존 이름은 모두 `[]`이므로 호환됩니다. 기존 테스트 이름 `ema`도 그대로 유효합니다.
+    - `_`로 시작하는 이름은 이제 거부됩니다(저장된 사례 0건).
+  - 전송 스키마에서 지운 제약은 각 속성의 `description` 문장으로 다시 적습니다. 시스템 프롬프트에는 `constraint_notes`로 모든 필드의 타입, 허용값, 한도를 넣습니다(프롬프트 버전 phase3-v2).
+  - 재시도 피드백은 `[{"field", "problem"}]` 목록입니다. 답변 원문은 되돌려 보내지 않고, 익명화 redact를 적용합니다.
+  - 로컬 pydantic 검증이 최종 권위입니다. 자르거나 값을 바꿔 통과시키는 처리는 없습니다.
+- **테스트(먼저 실패를 확인함):** 실제 응답 6건 회귀, 600/601자 경계, 숫자가 든 DSL 이름 수락, 존재하지 않는 이름과 패턴 위반 거부, 전송 스키마의 제약 설명, 제약 안내 내용, 피드백 후 재생성 성공(가짜 LLM `too_long`, `unknown_feature` 시나리오).
+- **상태:** 해결(2026-11-10). 실제 LLM 재검증 run `cli-s7-on-posterior-20261110-r2`에서 LLM 호출 9/9가 1차 시도에 스키마를 통과했고, 3/3 사이클이 BACKTEST까지 진행했습니다(trial 9건, 중복 0). `docs/measurements/phase3-cli-3cycles-r2.md`.

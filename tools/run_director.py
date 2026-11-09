@@ -185,17 +185,24 @@ def main() -> int:
 
 
 def _report(path: Path, totals: dict[str, object], rows: list[dict[str, object]]) -> None:
+    billed = totals.get("billed") is True
+    cost_note = (
+        "> 유료 API 호출입니다. `사용량 $`는 응답 사용량에 공식 정가를 곱한 청구 가능 비용입니다(청구서 대조 전)."
+        if billed
+        else f"> LLM `{totals.get('llm')}`: API 청구가 없습니다(가짜 LLM 또는 구독 CLI). `예상 $`와 `사용량 $`는 같은 "
+        "토큰을 claude-opus-5-5 정가로 환산한 **추정치**이며 청구액이 아닙니다."
+    )
     lines = [
         "# Phase 3 Director 실행 측정 (tools/run_director.py)",
         "",
-        "> 가짜 LLM은 비용이 들지 않습니다. 예상 비용은 같은 토큰을 claude-opus-5-5 정가로 환산한 값입니다.",
+        cost_note,
         "> 이 결과는 자율 연구 능력의 증명이 아니고 전략 성과의 증거도 아닙니다.",
         "> 목적은 연구 루프, 시도 회계, Memory 재사용, 자원 사용량을 확인하는 것입니다.",
         "",
         f"- 합계: `{json.dumps(totals, ensure_ascii=False)}`",
         "",
         "| # | 상태 | 계열 | 경로 | trial | 중복 생략 | 원인 | LLM 호출 | 입력/출력 토큰 | 예상 $ "
-        "| 청구 가능 $ | 시간 s | CPU s |",
+        "| 사용량 $ | 시간 s | CPU s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
