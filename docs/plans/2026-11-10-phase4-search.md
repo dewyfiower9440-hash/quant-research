@@ -61,7 +61,7 @@ task: qr-phase4-search
   - `Space.size()`는 제약을 통과한 파라미터 조합 수 × 구조 조합 수, `nominal_size()`는 제약 전 곱입니다.
   - `generate(space, seed, count)`: numpy `default_rng(seed)`로 축마다 균등 표본. 제약 위반이나 S0 위반은 버리지 않고 사유와 함께 거부 후보로 돌려줍니다(단계 2에서 S0 trial로 기록).
   - 검증: 손으로 센 작은 공간(=12)과 일치, 같은 시드 = 같은 결과, 생성 후보 100%가 S0 통과 또는 사유 있는 거부, 축 밖 점 거부, 각 계열 공간 > 1,000.
-- [ ] 2. **S0 정적 검사 단계화.**
+- [x] 2. **S0 정적 검사 단계화.**
   - `strategy/s0.py`를 파이프라인 단계로 연결합니다. 정규형 해시로 중복을 제거하고, 지표 계층(생성 수, 중복 제거 후 수)을 기록합니다.
   - 검증: 중복이나 거부도 trial(stage S0)로 1건씩 기록됩니다. 회계 불변식 테스트를 통과해야 합니다.
 - [ ] 3. **S1 IC 표(ADR-022 조건부 승인 정의 그대로).**
@@ -108,3 +108,4 @@ task: qr-phase4-search
 ## 진행 기록
 - 2026-11-10 계획 승인(사용자 "승인", ExitPlanMode). 단계 1 착수.
 - 2026-11-10 단계 1: `strategy/space.py`, 테스트 19개. 공간 크기(제약 후): trend 200,160 · mean_reversion 120,960 · momentum 115,200 · funding_basis 69,120 · volatility 1,344,720(합계 약 185만, 고정 격자 27점). 시드 3·2,000개 표본에서 S0 통과율: trend 96.0%·volatility 99.7%(거부는 모두 제약 위반), 나머지 100% — 계획대로. 구조 축 `sizing=equal`에서도 `vol_window`는 168로 고정해 의미 없는 중복을 막았습니다.
+- 2026-11-10 단계 2: `search/s0_stage.py`(`run_s0`), 테스트 6개. 후보 1개 = S0 trial 1건(배치당 트랜잭션 1개). 통과=done, 제약·S0 위반=rejected(사유 전부), 정규형 중복=rejected(`duplicate: ... trial N`, 배치 안·이전 배치 모두). 제약 위반 후보는 spec이 없어 `spec_hash="point:"+sha256(point)`로 실험을 등록합니다 — 계획에 없던 세부, 회계 불변식 유지를 위해 추가.
