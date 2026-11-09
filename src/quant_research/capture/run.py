@@ -51,6 +51,7 @@ EXIT_RETIRE = 4
 STOP_FILE = "STOP"
 if TYPE_CHECKING:  # the collector process itself never imports Polars (compaction runs in a child)
     from quant_research.data.compact import CompactResult
+    from quant_research.data.gapscan import GapScanResult
 
 log = structlog.get_logger(__name__)
 POLARS_THREADS = 2  # the collectors share the PC with research jobs and the bulk download
@@ -257,7 +258,10 @@ async def rest_main(
                 done = await asyncio.to_thread(
                     backup_closed_files, settings.data_root, settings.backup_root, now_ns=time.time_ns()
                 )
-                sinks.write("collector.backup", {"copied": len(done.copied), "unchanged": done.unchanged})
+                sinks.write(
+                    "collector.backup",
+                    {"copied": len(done.copied), "unchanged": done.unchanged, "vanished": done.vanished},
+                )
 
             async def compact() -> None:
                 done = await asyncio.to_thread(compact_in_child, settings.data_root)
@@ -266,6 +270,11 @@ async def rest_main(
                 )
                 for path, why in done.failed:
                     sinks.write("collector.incidents.rest", {"job": "compact", "file": path, "error": why})
+                # silences of the 1 Hz sources (host suspend, outages) become catalog gaps (step 10)
+                scan = await asyncio.to_thread(gapscan_in_child, settings.data_root)
+                sinks.write(
+                    "collector.gapscan", {"scanned": scan.scanned, "gaps": scan.gaps, "vanished": scan.vanished}
+                )
 
             async def compress() -> None:
                 done = await asyncio.to_thread(
@@ -419,6 +428,18 @@ def _compact_job(data_root: Path) -> CompactResult:
     from quant_research.data.compact import compact_once
 
     return compact_once(data_root)
+
+
+def _gapscan_job(data_root: Path) -> GapScanResult:
+    from quant_research.data.gapscan import scan_once
+
+    return scan_once(data_root)
+
+
+def gapscan_in_child(data_root: Path) -> GapScanResult:
+    """Receive-gap scan in a short-lived spawned process (same isolation as compaction)."""
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        return pool.submit(_gapscan_job, data_root).result()
 
 
 def compact_in_child(data_root: Path) -> CompactResult:

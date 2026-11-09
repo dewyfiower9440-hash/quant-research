@@ -4,6 +4,9 @@ import gzip
 import json
 from pathlib import Path
 
+import pytest
+
+from quant_research.capture import backup as backup_module
 from quant_research.capture.backup import backup_closed_files, restore_and_verify
 from quant_research.capture.compress import compress_closed_segments
 from quant_research.capture.segment import SegmentWriter
@@ -89,4 +92,26 @@ def test_restore_drill_detects_a_corrupted_backup(tmp_path: Path) -> None:
     report = restore_and_verify(dest, tmp_path / "restore")
     assert not report.ok
     assert report.mismatches == ["state/upbit_trades.json"]
+    current.close()
+
+
+def test_a_file_compressed_between_listing_and_copy_is_skipped_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-09 06:46Z: compress replaced the .jsonl by its .gz while backup ran -> FileNotFoundError."""
+    data, current = _layout(tmp_path)
+    dest = tmp_path / "backup"
+    listed = backup_module.eligible_files(data, T0 + 2 * HOUR_NS + 5)
+    victim = next(p for p in listed if p.parent.parent.name == "b")
+
+    def listing_then_compress(root: Path, now_ns: int) -> list[Path]:
+        victim.unlink()  # the concurrent compress job wins the race
+        return listed
+
+    monkeypatch.setattr(backup_module, "eligible_files", listing_then_compress)
+    done = backup_closed_files(data, dest, now_ns=T0 + 2 * HOUR_NS + 5)
+    assert done.vanished == 1 and victim not in done.copied
+    assert len(done.copied) == len(listed) - 1  # every other file was still backed up
+    manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    assert victim.relative_to(data).as_posix() not in manifest
     current.close()

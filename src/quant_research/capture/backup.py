@@ -37,7 +37,7 @@ def _lines(path: Path) -> int:
         return sum(1 for _ in fh)
 
 
-def _eligible(data_root: Path, now_ns: int) -> list[Path]:
+def eligible_files(data_root: Path, now_ns: int) -> list[Path]:
     out: list[Path] = []
     raw = data_root / "raw"
     for p in sorted(raw.glob("*/*/*.jsonl*")):
@@ -58,6 +58,7 @@ def _eligible(data_root: Path, now_ns: int) -> list[Path]:
 class BackupResult:
     copied: list[Path] = field(default_factory=lambda: list[Path]())
     unchanged: int = 0
+    vanished: int = 0  # listed, then replaced by its .gz (compress job) before it was copied
 
 
 def backup_closed_files(data_root: Path, dest: Path, *, now_ns: int) -> BackupResult:
@@ -68,19 +69,25 @@ def backup_closed_files(data_root: Path, dest: Path, *, now_ns: int) -> BackupRe
         else {}
     )
     result = BackupResult()
-    for src in _eligible(data_root, now_ns):
+    for src in eligible_files(data_root, now_ns):
         rel = src.relative_to(data_root).as_posix()
-        size = src.stat().st_size
-        known = manifest.get(rel)
-        if known is not None and known.get("size") == size:
-            digest = _sha256(src) if rel.startswith(("raw/_", "state/")) else str(known["sha256"])
-            if digest == known["sha256"]:
-                result.unchanged += 1
-                continue
         target = dest / "files" / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".tmp")
-        shutil.copyfile(src, tmp)
+        try:
+            size = src.stat().st_size
+            known = manifest.get(rel)
+            if known is not None and known.get("size") == size:
+                digest = _sha256(src) if rel.startswith(("raw/_", "state/")) else str(known["sha256"])
+                if digest == known["sha256"]:
+                    result.unchanged += 1
+                    continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, tmp)
+        except FileNotFoundError:
+            # compress replaced this .jsonl by its .gz after listing; the .gz is copied on the next run
+            tmp.unlink(missing_ok=True)
+            result.vanished += 1
+            continue
         digest = _sha256(tmp)
         os.replace(tmp, target)  # destination is written only by this job
         manifest[rel] = {"size": size, "sha256": digest, "lines": _lines(target)}
