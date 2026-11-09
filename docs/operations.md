@@ -37,7 +37,19 @@
 - `C:\dev\qr-data\meta\catalog.db`(SQLite WAL). 초기화와 gap 가져오기: `uv run python -m quant_research.catalog.bootstrap`(멱등)
 - 봉인 경계와 lag 정책은 수정·삭제할 수 없습니다(SQL 트리거). 변경은 새 epoch나 새 version을 추가하는 방식으로만 하며, lag는 늘리는 방향으로만 바꿀 수 있습니다.
 
-## 6. 미결 항목
-- 외부 백업(OneDrive) 검증과 구성
+## 6. 벌크 다운로드 작업 (작업 8)
+- **작업:** `qr-bulk-download`. 등록은 `tools/register_bulk_task.ps1`로 하며, 일반 사용자 권한이고 로그인 상태에서만 실행됩니다.
+  - 30분마다 시작을 시도합니다(7일 동안). 실행 중이면 무시됩니다(IgnoreNew와 `run/bulk.lock`).
+- **상태 확인**
+  - 진행 상태: `C:\dev\qr-data\run\bulk.progress.json`(state, weighted_progress, eta_s, totals, memory_mb)
+  - 로그: `C:\dev\qr-data\logs\bulk-download-task.log`
+- **종료 코드:** 0 완료, 2 이미 실행 중, 3 자원·온도 차단으로 중지(다음 주기에 재개), 4 실패 파일 있음(다음 주기에 재시도), 1 오류
+- **일시 정지:** `Disable-ScheduledTask qr-bulk-download`
+  - 실행 중인 프로세스를 끝내려면 `Stop-ScheduledTask qr-bulk-download`를 실행합니다.
+  - 파일 단위로 기록하므로 중간에 강제 종료해도 다음 실행에서 이어 받습니다.
+- **완료 후:** `bulk/complete-universe-20261109.json`이 생기면 `Unregister-ScheduledTask -TaskName qr-bulk-download -Confirm:$false`로 작업을 지웁니다.
+
+## 7. 미결 항목
+- 외부 백업: 보류(2026-11-09). OneDrive 용량 5GB로는 부족합니다. 같은 SSD의 로컬 백업만 있어 SSD가 고장 나면 실시간 수집분을 영구히 잃습니다(progress §4).
 - SSD 온도 감시 작업(관리자 예약 작업, 읽기 전용)
 - 재부팅 후 재개 검증
