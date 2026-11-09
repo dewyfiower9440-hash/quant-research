@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: qr-phase0-1-step10a
 ---
 
@@ -29,8 +29,8 @@ task: qr-phase0-1-step10a
 - **절전 방지(OS 전원 설정):** 사용자 지시("다른 OS 설정 변경 금지")에 따라 변경하지 않습니다. 위험과 방법은 운영 문서에 기록합니다.
 
 ## 단계
-- [ ] 1. 테스트 먼저: 세그먼트 안 공백, 경계를 넘는 공백, 멱등, 증분, 사라진 파일, 백업 경쟁
-- [ ] 2. 구현: 마이그레이션 0005, gapscan, 컴팩션 job 연결, 백업 수정
-- [ ] 3. 게이트, 커밋, push, CI
-- [ ] 4. 수집기 재시작(STOP, 1분 이내)으로 적용하고, 소급 기록(190분과 Upbit 장애)을 실데이터로 확인
-- [ ] 5. 문서(progress, failures F-011, decisions ADR-016, operations)
+- [x] 1. 테스트 먼저: 세그먼트 안 공백, 경계를 넘는 공백, 멱등, 증분, 사라진 파일, 백업 경쟁
+- [x] 2. 구현: 마이그레이션 0005, gapscan, 컴팩션 job 연결, 백업 수정
+- [x] 3. 게이트, 커밋, push, CI
+- [x] 4. 수집기 재시작(STOP, 1분 이내)으로 적용하고, 소급 기록(190분과 Upbit 장애)을 실데이터로 확인
+- [x] 5. 문서(progress, failures F-011, decisions ADR-016, operations)

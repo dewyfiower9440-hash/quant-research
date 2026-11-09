@@ -49,7 +49,14 @@
   - 파일 단위로 기록하므로 중간에 강제 종료해도 다음 실행에서 이어 받습니다.
 - **완료 후:** `bulk/complete-universe-20261109.json`이 생기면 `Unregister-ScheduledTask -TaskName qr-bulk-download -Confirm:$false`로 작업을 지웁니다.
 
-## 7. 미결 항목
+## 7. 절전·공백
+- **절전 영향:** 노트북이 절전(덮개 닫힘, 유휴)에 들어가면 수집기 프로세스가 멈춥니다. 그동안의 실시간 데이터(bookTicker, 호가, 강제청산)는 **영구히 손실**됩니다.
+- **자동 복구:** 깨어나면 프로세스가 그대로 이어서 실행됩니다. Upbit 체결(7일 범위)과 Binance 지표(30일 범위)는 자동으로 따라잡습니다.
+- **공백 기록:** 이 공백은 rest 작업 프로세스의 컴팩션 주기(10분) 안에 수신 공백 스캔이 gap으로 기록합니다(`gap.detail = 'receive_gap'`). 공백이 들어 있는 시간대의 세그먼트가 닫힌 뒤에 기록됩니다.
+- **조회:** `select source, start_ns, end_ns from gap where detail = 'receive_gap' order by start_ns`
+- **권장(사용자 결정):** 수집 중에는 전원을 연결하고 설정 → 시스템 → 전원에서 "전원 연결 시 절전 안 함"으로 두세요. 이 SSD는 절전 중 BSOD 이력이 있습니다. Claude는 OS 전원 설정을 바꾸지 않습니다.
+
+## 8. 미결 항목
 - 외부 백업: 보류(2026-11-09). OneDrive 용량 5GB로는 부족합니다. 같은 SSD의 로컬 백업만 있어 SSD가 고장 나면 실시간 수집분을 영구히 잃습니다(progress §4).
 - SSD 온도 감시 작업(관리자 예약 작업, 읽기 전용)
 - 재부팅 후 재개 검증
