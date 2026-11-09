@@ -158,12 +158,22 @@ def test_gap_cause_is_a_closed_set_and_spans_must_be_ordered(tmp_path: Path) -> 
 
 
 def test_bootstrap_registers_t0_datasets_priors_and_seal_once(tmp_path: Path) -> None:
-    from quant_research.catalog.bootstrap import T0_DATASETS, T0_START_NS, bootstrap
+    from quant_research.catalog.bootstrap import (
+        BULK_DATASETS,
+        BULK_HOLDOUT_UNTIL_NS,
+        BULK_RESEARCH_UNTIL_NS,
+        T0_DATASETS,
+        T0_START_NS,
+        bootstrap,
+    )
 
     c = _catalog(tmp_path)
     first = bootstrap(c)
     second = bootstrap(c)
-    n = len(T0_DATASETS)
+    n = len(T0_DATASETS) + len(BULK_DATASETS)
+    bulk = c.seal("binance.um.bulk.klines_1m")
+    assert (bulk.research_until_ns, bulk.holdout_until_ns) == (BULK_RESEARCH_UNTIL_NS, BULK_HOLDOUT_UNTIL_NS)
+    assert c.lag_ns("binance.um.bulk.mark_klines_1m") == 60 * NS
     assert (first.datasets_added, first.lag_policies_added, first.seal_epochs_added) == (n, n, n)
     assert (second.datasets_added, second.lag_policies_added, second.seal_epochs_added) == (0, 0, 0)
     assert c.lag_ns("binance.um.oi_hist") == 300 * NS  # unknown interval meaning: one extra interval

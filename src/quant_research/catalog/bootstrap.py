@@ -47,6 +47,24 @@ T0_DATASETS: tuple[Dataset, ...] = (
 )
 
 
+ONE_MIN_MS = 60_000
+# ADR-013: bulk history seal. Research until 2026-07-01 (after the June 2026 knowledge cutoff of the
+# research LLM, design v2.1 §9-6), sealed holdout 2026-07-01 .. 2026-11-01.
+BULK_RESEARCH_UNTIL_NS = 1_782_864_000 * 10**9  # 2026-07-01T00:00:00Z
+BULK_HOLDOUT_UNTIL_NS = 1_793_491_200 * 10**9  # 2026-11-01T00:00:00Z
+BULK_DATASETS: tuple[Dataset, ...] = tuple(
+    Dataset(
+        f"binance.um.bulk.{name}_1m", "binance", "interval_start", ONE_MIN_MS, f"data.binance.vision monthly {kind} 1m"
+    )
+    for name, kind in (
+        ("klines", "klines"),
+        ("mark_klines", "markPriceKlines"),
+        ("index_klines", "indexPriceKlines"),
+        ("premium_klines", "premiumIndexKlines"),
+    )
+)
+
+
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
     datasets_added: int
@@ -82,6 +100,26 @@ def bootstrap(c: Catalog) -> BootstrapResult:
                     research_until_ns=T0_START_NS + T0_RESEARCH_DAYS * DAY_NS,
                     holdout_until_ns=T0_START_NS + (T0_RESEARCH_DAYS + T0_HOLDOUT_DAYS) * DAY_NS,
                     rationale="ADR-011 T0 pre-registration: first 60 days research, next 30 days sealed holdout",
+                )
+            )
+            seals += 1
+    for d in BULK_DATASETS:
+        try:
+            c.register_dataset(d)
+            datasets += 1
+        except sqlite3.IntegrityError:
+            pass
+        if c.conn.execute("select 1 from lag_policy where dataset_id = ?", (d.dataset_id,)).fetchone() is None:
+            c.add_lag_policy(LagPolicy(d.dataset_id, ONE_MIN_MS * 1_000_000, "v2.1 §5.4 prior: one decision bar (1m)"))
+            lags += 1
+        if c.conn.execute("select 1 from seal_policy where dataset_id = ?", (d.dataset_id,)).fetchone() is None:
+            c.add_seal_epoch(
+                SealEpoch(
+                    d.dataset_id,
+                    1,
+                    research_until_ns=BULK_RESEARCH_UNTIL_NS,
+                    holdout_until_ns=BULK_HOLDOUT_UNTIL_NS,
+                    rationale="ADR-013: research < 2026-07-01 (after LLM cutoff 2026-06), holdout to 2026-11-01",
                 )
             )
             seals += 1
