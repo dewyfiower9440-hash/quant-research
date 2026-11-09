@@ -105,7 +105,18 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - **Phase 2 영향:** Phase 2 연구 작업도 고부하이므로 같은 thermal 게이트를 적용합니다. 등록 전에는 온도 보호가 없습니다.
 
 ### OPS-003 작업 스케줄러 등록과 재부팅 후 자동 복구 검증
-- **상태:** BLOCKED(사용자)
+- **결정(2026-11-10):** 등록을 진행합니다. 등록 명령은 사용자가 실행합니다.
+- **사전 확인(2026-11-10 01:3xZ)**
+
+  | 작업 | 동시 실행 제한 | 자원 영향 | 확인 |
+  |---|---|---|---|
+  | `qr-upbit-backfill` | 작업 `IgnoreNew`, 잠금 `run/upbit-backfill.lock`(두 번째 실행은 exit 2) | 초당 6회 이하(candle 그룹 한도 10회/IP), 페이지마다 자원·온도 게이트, Upbit 418이면 즉시 exit 5. 수집기는 candle 그룹을 쓰지 않습니다. 파일럿 실측 메모리 76MB | `-WhatIf` 정상, PSScriptAnalyzer 경고 0 |
+  | `qr-bulk-extras` | 작업 `IgnoreNew`, klines 다운로드와 같은 잠금 `run/bulk.lock`(klines가 끝날 때까지 exit 2로 대기) | 한 번에 파일 하나, 자원·온도 게이트. 파일럿 bookDepth 월 묶음의 메모리 530MB | `-WhatIf` 정상 |
+
+  - 두 작업 모두 일반 사용자 권한, 우선순위 7(BelowNormal)입니다.
+  - 수집기 supervisor와 잠금이 겹치지 않습니다(`supervisor.lock`, `rest.lock`, `ws.lock`과 별개).
+  - 2026-11-10 01:3xZ 확인 시 klines 벌크는 마지막 실행 주기의 재검사 단계였습니다(632개 중 66번째 심볼, 기존 파일은 건너뜀).
+- **상태:** BLOCKED(사용자 실행 대기)
   - `qr-upbit-backfill`, `qr-bulk-extras` 등록은 자동 모드 분류기가 거부했습니다(2회).
   - 재부팅 검증은 사용자 승인이 필요합니다.
   - `qr-collector-supervisor`와 `qr-bulk-download`는 등록돼 가동 중입니다.
