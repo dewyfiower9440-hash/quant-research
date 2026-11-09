@@ -85,7 +85,7 @@ tools/run_director.py   --llm fake|claude --cycles N --budget-usd X(claude는 �
   - 테스트: 전이표 전체(허용·금지 전이), 원인 코드별 전이, 사후분포 갱신과 우선, 쿨다운, uniform 스위치
 - [x] 5. 실패 분류기
   - 테스트: 원인 코드 8종의 합성 지표 사례, 근거 trial id 포함
-- [ ] 6. Director 사이클 실행기와 예산
+- [x] 6. Director 사이클 실행기와 예산
   - 테스트: 정상 사이클, 예산 초과 PAUSED, 데이터 요청 → outbox → REPLAN, VALIDATE 스텁, 중간 종료 후 재개 시 trial 중복이나 누락 0
 - [ ] 7. 가짜 LLM 무인 10사이클(실데이터 패널: 이미 받은 8심볼, 연구 구간) → 측정 보고서
 - [ ] 8. ClaudeLLM 어댑터: **새 의존성 `anthropic` 승인 후**

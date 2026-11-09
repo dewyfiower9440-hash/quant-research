@@ -14,18 +14,19 @@ import json
 import math
 import time
 import zlib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Literal
 
 import numpy as np
+import polars as pl
 
 from quant_research.backtest.costs import CostModel
 from quant_research.backtest.engines import EngineResult, EngineUnsupported, run_event, run_vector
 from quant_research.backtest.market import F64, Fidelity, FidelityUnavailable, prepare
 from quant_research.backtest.panel import Panel, select_top_liquidity
 from quant_research.catalog.store import Catalog
-from quant_research.research.ledger import Stage, TrialLedger, TrialOrigin
+from quant_research.research.ledger import Stage, TrialHandle, TrialLedger, TrialOrigin
 from quant_research.strategy.canonical import spec_hash
 from quant_research.strategy.compile import compile_spec
 from quant_research.strategy.ops import OPS
@@ -135,9 +136,19 @@ def run_backtest(
     fold: str | None = None,
     origin: TrialOrigin | None = None,
 ) -> RunOutcome:
+    h, run_config = experiment_config(spec, panel, catalog, config)
+    frame = panel.frame
+    key = ledger.register_experiment(h, spec.model_dump_json(), run_config)
+    with ledger.evaluate(key, h, stage, fold=fold, origin=origin) as trial:
+        return _evaluate(spec, panel, frame, catalog, ledger, config, trial, run_config)
+
+
+def experiment_config(
+    spec: StrategySpec, panel: Panel, catalog: Catalog, config: RunConfig
+) -> tuple[str, dict[str, object]]:
+    """(spec hash, configuration) that identify an experiment (design §10 experiment key)."""
     h = spec_hash(spec)
-    datasets = spec_datasets(spec)
-    lags, seals = policy_versions(catalog, datasets)
+    lags, seals = policy_versions(catalog, spec_datasets(spec))
     frame = panel.frame
     decisions = sorted(set(frame["decision_ns"].to_list()))
     run_config: dict[str, object] = {
@@ -156,68 +167,87 @@ def run_backtest(
         },
         "window": [decisions[0], decisions[-1]] if decisions else [],
         "symbols": sorted(set(frame["symbol"].to_list())),
+        "evaluate_from_ns": panel.evaluate_from_ns,
     }
-    key = ledger.register_experiment(h, spec.model_dump_json(), run_config)
-    with ledger.evaluate(key, h, stage, fold=fold, origin=origin) as trial:
-        violations = check(spec)
-        if violations:
-            trial.reject("S0: " + "; ".join(violations))
-            return RunOutcome(trial.trial_id, "rejected", trial.rejected_reason, {}, None)
-        if spec.universe.selector == "pit_top_liquidity":
-            frame = select_top_liquidity(frame, spec.universe.n)
-        stateless = spec.exit.time_stop_bars is None and spec.exit.stop_loss_atr is None
-        try:
-            compiled = compile_spec(spec, frame)
-            market, targets = prepare(
-                spec,
-                compiled,
-                frame,
-                panel.funding,
+    return h, run_config
+
+
+def _evaluate(
+    spec: StrategySpec,
+    panel: Panel,
+    frame: pl.DataFrame,
+    catalog: Catalog,
+    ledger: TrialLedger,
+    config: RunConfig,
+    trial: TrialHandle,
+    run_config: dict[str, object],
+) -> RunOutcome:
+    violations = check(spec)
+    if violations:
+        trial.reject("S0: " + "; ".join(violations))
+        return RunOutcome(trial.trial_id, "rejected", trial.rejected_reason, {}, None)
+    if spec.universe.selector == "pit_top_liquidity":
+        frame = select_top_liquidity(frame, spec.universe.n)
+    stateless = spec.exit.time_stop_bars is None and spec.exit.stop_loss_atr is None
+    try:
+        compiled = compile_spec(spec, frame)
+        market, targets = prepare(
+            spec,
+            compiled,
+            frame,
+            panel.funding,
+            fidelity=config.fidelity,
+            config_latency_ns=panel.config.latency_ns,
+        )
+        if config.engine == "vector":
+            res = run_vector(
+                market,
+                targets,
+                config.cost,
+                capital=config.capital,
                 fidelity=config.fidelity,
-                config_latency_ns=panel.config.latency_ns,
+                n_universe=spec.universe.n,
+                stateless=stateless,
             )
-            if config.engine == "vector":
-                res = run_vector(
-                    market,
-                    targets,
-                    config.cost,
-                    capital=config.capital,
-                    fidelity=config.fidelity,
-                    n_universe=spec.universe.n,
-                    stateless=stateless,
-                )
-            else:
-                res = run_event(
-                    market,
-                    targets,
-                    config.cost,
-                    capital=config.capital,
-                    fidelity=config.fidelity,
-                    n_universe=spec.universe.n,
-                    time_stop_bars=spec.exit.time_stop_bars,
-                    stop_loss_atr=spec.exit.stop_loss_atr,
-                )
-        except (FidelityUnavailable, EngineUnsupported) as e:
-            trial.reject(str(e))
-            return RunOutcome(trial.trial_id, "rejected", trial.rejected_reason, {}, None)
-        metrics = summary(market.decisions, res, config.capital, TIMEFRAME_NS[spec.timeframe])
-        flags: list[str] = []
-        if config.fidelity == "L1" and spec.market == "usdm_futures" and not market.funding_known:
-            flags.append("funding_not_modelled: no funding data loaded (OPS-003/006)")
-        if config.fidelity == "L0":
-            flags.append("L0: close fills without costs, research upper bound only")
-        flags += res.notes
-        metrics["flags"] = flags
-        trial.metrics = metrics
-        _record_run(ledger, trial.trial_id, config, run_config, res, market.decisions)
-        if res.liquidation_unmodelled:
-            trial.reject("vector engine: a liquidation was possible; evaluate with the event engine")
         else:
-            holding = metrics["avg_holding_hours"]
-            if isinstance(holding, float) and holding < 1.0:
-                trial.reject(f"average holding {holding:.2f} h < 1 h needs L2 fidelity (aggTrades not collected)")
-        status: Literal["done", "rejected"] = "rejected" if trial.rejected_reason else "done"
-        return RunOutcome(trial.trial_id, status, trial.rejected_reason, metrics, res)
+            res = run_event(
+                market,
+                targets,
+                config.cost,
+                capital=config.capital,
+                fidelity=config.fidelity,
+                n_universe=spec.universe.n,
+                time_stop_bars=spec.exit.time_stop_bars,
+                stop_loss_atr=spec.exit.stop_loss_atr,
+            )
+    except (FidelityUnavailable, EngineUnsupported) as e:
+        trial.reject(str(e))
+        return RunOutcome(trial.trial_id, "rejected", trial.rejected_reason, {}, None)
+    decisions = market.decisions
+    if panel.evaluate_from_ns is not None:  # warm-up rows: features only, no orders, not in the metrics
+        start = int(np.searchsorted(decisions, panel.evaluate_from_ns, side="left"))
+        res = replace(res, equity=res.equity[start:], gap_loss=res.gap_loss[start:])
+        decisions = decisions[start:]
+        if abs(float(res.equity[0]) - config.capital) > 1e-6:
+            raise RuntimeError(f"equity moved during warm-up ({float(res.equity[0])} != {config.capital})")
+    metrics = summary(decisions, res, config.capital, TIMEFRAME_NS[spec.timeframe])
+    flags: list[str] = []
+    if config.fidelity == "L1" and spec.market == "usdm_futures" and not market.funding_known:
+        flags.append("funding_not_modelled: no funding data loaded (OPS-003/006)")
+    if config.fidelity == "L0":
+        flags.append("L0: close fills without costs, research upper bound only")
+    flags += res.notes
+    metrics["flags"] = flags
+    trial.metrics = metrics
+    _record_run(ledger, trial.trial_id, config, run_config, res, decisions)
+    if res.liquidation_unmodelled:
+        trial.reject("vector engine: a liquidation was possible; evaluate with the event engine")
+    else:
+        holding = metrics["avg_holding_hours"]
+        if isinstance(holding, float) and holding < 1.0:
+            trial.reject(f"average holding {holding:.2f} h < 1 h needs L2 fidelity (aggTrades not collected)")
+    status: Literal["done", "rejected"] = "rejected" if trial.rejected_reason else "done"
+    return RunOutcome(trial.trial_id, status, trial.rejected_reason, metrics, res)
 
 
 def _record_run(

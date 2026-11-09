@@ -47,6 +47,7 @@ class Panel:
     funding: pl.DataFrame  # symbol, event_ns, rate, mark (settlement price)
     files: list[tuple[str, int]]  # lake files read (path, size): the data version
     config: PanelConfig
+    evaluate_from_ns: int | None = None  # rows before it are warm-up only (features, no trading, no metrics)
 
 
 def bars(minutes: pl.DataFrame, timeframe_ns: int, *, offset_ns: int = 0, prefix: str = "") -> pl.DataFrame:
@@ -291,3 +292,18 @@ def settlements(funding: pl.DataFrame | None, mark: pl.DataFrame | None) -> pl.D
         return events.with_columns(pl.lit(None, dtype=pl.Float64).alias("mark"))
     prices = mark.select("symbol", pl.col("event_ns").cast(pl.Int64), pl.col("open").alias("mark"))
     return events.join(prices, on=["symbol", "event_ns"], how="left").sort(["symbol", "event_ns"])
+
+
+def slice_panel(panel: Panel, first_decision_ns: int, last_decision_ns: int, *, warmup_ns: int = 0) -> Panel:
+    """The decisions in [first, last] (research splits: selection / confirmation, design §8), preceded by
+    `warmup_ns` of earlier decisions so features have their lookback. Warm-up rows are marked not complete
+    (no orders) and are excluded from the metrics (`evaluate_from_ns`). Funding settlements are kept up to
+    one bar after the last decision (the last interval's cash flows)."""
+    lo = first_decision_ns - warmup_ns
+    frame = panel.frame.filter(pl.col("decision_ns").is_between(lo, last_decision_ns)).with_columns(
+        (pl.col("complete") & (pl.col("decision_ns") >= first_decision_ns)).alias("complete")
+    )
+    funding = panel.funding.filter(
+        pl.col("event_ns").is_between(first_decision_ns, last_decision_ns + panel.config.timeframe_ns)
+    )
+    return Panel(frame, funding, panel.files, panel.config, evaluate_from_ns=first_decision_ns if warmup_ns else None)

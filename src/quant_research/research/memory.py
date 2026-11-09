@@ -157,17 +157,18 @@ class MemoryStore:
         ).fetchall()
         return [(int(r[0]), str(r[1]), str(r[2]), cast(list[str], json.loads(r[3]))) for r in rows]
 
-    def cooled_down(self, current_seq: int, run_id: str) -> set[str]:
-        """Struct keys of hypotheses that failed within the last `cooldown_cycles` cycles of this run."""
+    def cooled_down(self, current_seq: int, run_id: str, causes: Sequence[str] | None = None) -> set[str]:
+        """Struct keys of hypotheses that failed (optionally: with one of `causes`) within the last
+        `cooldown_cycles` cycles of this run."""
         if not self.enabled:
             return set()
         rows = self.store.conn.execute(
-            "select distinct h.struct_key from hypothesis h join cycle c using (cycle_id) "
+            "select distinct h.struct_key, f.cause_code from hypothesis h join cycle c using (cycle_id) "
             "join failure f on f.cycle_id = h.cycle_id "
             "where c.run_id = ? and c.seq >= ? and c.seq < ?",
             (run_id, current_seq - self.cooldown_cycles, current_seq),
         ).fetchall()
-        return {str(r[0]) for r in rows}
+        return {str(r[0]) for r in rows if causes is None or str(r[1]) in causes}
 
     def data_blocked(self) -> set[str]:
         rows = self.store.conn.execute(
