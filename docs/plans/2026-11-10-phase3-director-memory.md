@@ -94,7 +94,7 @@ tools/run_director.py   --llm fake|claude --cycles N --budget-usd X(claude는 �
 - [ ] 9. 실제 API 비용 측정: **키 설정과 유료 호출 승인 후**
   - 상한 $5로 3~10사이클을 실행하고, 사이클당 토큰과 비용을 실측합니다.
   - 승인이 없으면 이 단계는 PENDING으로 두고, Phase 3 상태를 `IMPLEMENTED / LLM_COST_MEASUREMENT_PENDING`으로 기록합니다.
-- [ ] 10. 문서(progress, ADR, failures, operations, test-results, 측정표)
+- [x] 10. 문서(progress, ADR, failures, operations, test-results, 측정표)
 
 ## 5. 검증 기준 (Phase 3 완료 판정)
 1. **가짜 LLM 무인 10사이클:** 사람 개입 없이 10사이클이 끝나거나, 정책상 PAUSED로 정상 종료합니다.

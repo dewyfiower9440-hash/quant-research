@@ -36,3 +36,11 @@
 | 2026-11-10 02:3x KST | Phase 2-8 | 7d89e8c | 선언 게이트(실행기, 템플릿) | 425 passed, 93.75% | run 42667971088 success |
 | 2026-11-10 02:5x KST | Phase 2-9 | 6f420ed | 선언 게이트(스모크, 심볼 단위 적재) | 425 passed, 93.72% | run 42669255810 success |
 | 2026-11-10 03:1x KST | Phase 2-10 | 1a2c533 | 선언 게이트(문서) | 425 passed, 93.72% | run 42670010290 success |
+| 2026-11-10 | Phase 2 문서 | b84efb7 | (재실행) | - | run 42671077766 1~3차 실패(Actions 장애, job 0개), 4차 success |
+| 2026-11-10 | Phase 3 계획 | 6de82d7 | 선언 게이트 | 425 passed, 93.72% | run 42673623592 1차 실패(Actions 장애), 2차 success |
+| 2026-11-10 | Phase 3-1·2 | 2485f96 | 선언 게이트(Memory, 익명화) | 445 passed, 93.89% | run 42675929109 success |
+| 2026-11-10 | Phase 3-3~5 | ccbb0ef | 선언 게이트(스키마, 가짜 LLM, 예산, 상태 기계, 실패 분류, 정책) | 468 passed, 93.97% | run 42677695690 success |
+| 2026-11-10 | Phase 3-6 | dd3a297 | 선언 게이트(Director, 재개, 중복, 격리) | 485 passed, 94.11% | run 42681391227 success |
+| 2026-11-10 | Phase 3-8 | 74f38e0 | 선언 게이트(Claude 어댑터, anthropic==2.7.0) | 491 passed, 94.09% | run 42682986823 success |
+| 2026-11-10 | Phase 3-7 | cda7ea2 | 선언 게이트(실행 도구, 정책 수정, 격자 확장) | 495 passed, 93.80% | run 42686111424 success |
+| 2026-11-10 | Phase 3-7 | ffa0916 | 선언 게이트(쿨다운 해제, 게이트 테스트, 문서) | 498 passed, 94.06% | run 42705051505 success |
