@@ -66,7 +66,17 @@ class LLMClient(Protocol):
     def complete(self, request: LLMRequest) -> LLMResponse: ...
 
 
-Behaviour = Literal["valid", "invalid_json", "wrong_schema", "refusal", "injection", "duplicate", "error"]
+Behaviour = Literal[
+    "valid",
+    "invalid_json",
+    "wrong_schema",
+    "too_long",  # F-016: a hypothesis statement over 600 characters (as the real model wrote)
+    "unknown_feature",  # F-016: free-form feature names that are not DSL features (as the real model wrote)
+    "refusal",
+    "injection",
+    "duplicate",
+    "error",
+]
 
 
 @dataclass
@@ -98,6 +108,13 @@ class FakeLLM:
             text = json.dumps({"family": "astrology", "statement": "x", "unexpected": True})
         elif request.purpose == "hypothesize" and behaviour == "duplicate" and self._last_hypothesis is not None:
             text = self._last_hypothesis
+        elif request.purpose == "hypothesize" and behaviour in ("too_long", "unknown_feature"):
+            body = self._answer(request, rng, inject=False)
+            if behaviour == "too_long":
+                body["statement"] = "The rule earns more than its costs. " * 20  # 720 characters
+            else:
+                body["required_features"] = ["ret_24h", "realized_vol_60d", "ema_50_close"]
+            text = json.dumps(body, sort_keys=True)
         else:
             text = json.dumps(self._answer(request, rng, inject=behaviour == "injection"), sort_keys=True)
         if request.purpose == "hypothesize":

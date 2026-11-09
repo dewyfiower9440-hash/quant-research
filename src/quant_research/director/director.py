@@ -31,7 +31,14 @@ from quant_research.director.budget import PRICED_AS, Budget, BudgetExceeded, co
 from quant_research.director.failures import Cause, RunView, classify
 from quant_research.director.llm import LLMClient, LLMRequest
 from quant_research.director.policy import PolicyMode, choose_family
-from quant_research.director.schemas import AnalysisDraft, HypothesisDraft, PlanDraft, Purpose
+from quant_research.director.schemas import (
+    AnalysisDraft,
+    HypothesisDraft,
+    PlanDraft,
+    Purpose,
+    constraint_notes,
+    validation_feedback,
+)
 from quant_research.director.states import State, check_transition
 from quant_research.research.anonymize import Anonymizer, forbidden_terms, leaks, redact
 from quant_research.research.features import evidence_ref
@@ -41,7 +48,7 @@ from quant_research.strategy.spec import StrategySpec
 from quant_research.strategy.templates import GRID, REQUIRED_DATA, build
 
 S = State
-PROMPT_VERSION = "phase3-v1"
+PROMPT_VERSION = "phase3-v2"  # v2 (F-016): constraint notes in the system prompt, field-level feedback
 SYSTEM: dict[str, str] = {
     "hypothesize": (
         "You are the research director of a systematic crypto research lab. Propose ONE falsifiable hypothesis "
@@ -222,12 +229,17 @@ class Director:
         model: type[BaseModel],
         rule: Callable[[BaseModel], str | None] = lambda _m: None,
     ) -> tuple[BaseModel | None, list[int]]:
-        """Two attempts at most (§4 A: one re-request after a schema violation, then discard and record)."""
+        """Two attempts at most (§4 A: one re-request after a schema violation, then discard and record).
+
+        F-016: the system prompt states every constraint of the answer (`constraint_notes`), and a rejected
+        answer is followed by field-by-field feedback (field + violated constraint, never the answer's own
+        text). Local validation stays the authority; nothing is truncated or replaced to make an answer pass."""
         calls: list[int] = []
-        feedback: str | None = None
+        feedback: list[dict[str, str]] | None = None
+        system = SYSTEM[purpose] + "\n\n" + constraint_notes(model)
         for attempt in (1, 2):
             body = dict(payload) if feedback is None else {**payload, "previous_answer_error": feedback}
-            req = LLMRequest(purpose, SYSTEM[purpose], body, model.model_json_schema(), self.budget.max_output_tokens)
+            req = LLMRequest(purpose, system, body, model.model_json_schema(), self.budget.max_output_tokens)
             text = req.text()
             found = leaks(text, self.terms)
             if found:
@@ -252,16 +264,21 @@ class Director:
                     self._log_call(cycle_id, purpose, attempt, req, resp, resp.status, resp.detail, estimate, usage)
                 )
                 return None, calls  # refusal / transport error: not retried here (the SDK retries transport)
+            problems: list[dict[str, str]] = []
             try:
                 parsed = model.model_validate_json(resp.text)
-                problem = rule(parsed)
+                broken = rule(parsed)
+                if broken is not None:
+                    problems = [{"field": "(lab rule)", "problem": broken}]
             except ValidationError as e:
-                parsed, problem = None, f"schema: {e.error_count()} error(s): {str(e)[:300]}"
-            status = "ok" if parsed is not None and problem is None else "schema_invalid"
-            calls.append(self._log_call(cycle_id, purpose, attempt, req, resp, status, problem, estimate, usage))
+                parsed, problems = None, validation_feedback(e)
+            problems = [{k: redact(v, self.terms) for k, v in p.items()} for p in problems]
+            status = "ok" if parsed is not None and not problems else "schema_invalid"
+            detail = json.dumps(problems, sort_keys=True) if problems else None
+            calls.append(self._log_call(cycle_id, purpose, attempt, req, resp, status, detail, estimate, usage))
             if status == "ok":
                 return parsed, calls
-            feedback = problem
+            feedback = problems
         return None, calls
 
     def _log_call(
