@@ -71,10 +71,32 @@ def write_rows(rows: list[Row], target: Path) -> None:
     os.replace(tmp, target)
 
 
+def write_frame(frame: pl.DataFrame, target: Path, *, symbol: str | None = None) -> None:
+    """Write a typed frame once (bulk files): temporary name, then rename to a fresh name."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    out = frame.with_columns(pl.lit(symbol).alias("symbol")) if symbol is not None else frame
+    tmp = target.with_name(target.name + ".tmp")
+    out.write_parquet(tmp, compression="zstd", statistics=True)
+    os.replace(tmp, target)
+
+
+def _latest_bulk_versions(files: list[Path]) -> list[Path]:
+    """Bulk files are named <symbol>-<YYYY-MM>-<lastmodified>.parquet; older versions stay on disk as
+    history (regenerated upstream files), the reader uses the newest per symbol and month."""
+    latest: dict[str, Path] = {}
+    for f in files:
+        key, _, version = f.stem.rpartition("-")
+        if key not in latest or version > latest[key].stem.rpartition("-")[2]:
+            latest[key] = f
+    return sorted(latest.values())
+
+
 def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:
     """All compacted rows of a dataset. Bitemporal datasets collapse identical repeats to their first
     receipt and keep changed values under the same key as later versions."""
     files = sorted((data_root / "lake" / dataset_id).glob("*/*.parquet"))
+    if dataset_id.startswith("binance.um.bulk."):
+        files = _latest_bulk_versions(files)
     if not files:
         return pl.DataFrame()
     frame = pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
