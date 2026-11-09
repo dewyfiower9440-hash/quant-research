@@ -129,6 +129,12 @@ def _latest_bulk_versions(files: list[Path]) -> list[Path]:
     return sorted(latest.values())
 
 
+def read_lake_file(path: Path) -> pl.DataFrame:
+    """One immutable lake file as written, for audits (bulk vs REST validation). Research code reads
+    through the point-in-time API instead."""
+    return pl.read_parquet(path)
+
+
 def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:
     """All compacted rows of a dataset. Bitemporal datasets collapse identical repeats to their first
     receipt and keep changed values under the same key as later versions."""
