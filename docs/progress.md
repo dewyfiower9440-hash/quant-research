@@ -353,3 +353,49 @@
 - **사용자 실행이 필요한 명령(일반 사용자 작업, 관리자 권한 불필요)**
   - `! powershell -NoProfile -File C:\dev\quant-research\tools\register_upbit_backfill_task.ps1`
   - `! powershell -NoProfile -File C:\dev\quant-research\tools\register_bulk_extras_task.ps1`
+
+---
+
+# Phase 2: DSL·백테스트 (계획 `docs/plans/2026-11-09-phase2-dsl-backtest.md`)
+
+## Phase 2 상태: **IMPLEMENTED / 완료 기준 충족(로컬 게이트·CI)**. 아래 미검증·승인 대기 항목은 PASS로 처리하지 않습니다.
+- **완료 기준(계획 §10)**
+  1. **기준 사례 100%:** `tests/backtest/test_engines.py`에 손계산 기준 사례 7개가 있습니다(수수료·스프레드·재조정, 펀딩 롱·숏, 결측 시 거래 금지와 최악 가정, L0, 시간 손절, ATR 손절, 청산). 모두 1e-12 안에서 일치합니다. 두 엔진이 모두 지원하는 사례는 두 엔진 모두 확인했습니다.
+  2. **엔진 교차 일치**
+     - hypothesis 무작위 시나리오 300개: 자산 곡선, 비용, 펀딩, 결측 손실이 1e-9 안에서 일치
+     - 템플릿 5종 × 합성 패널 전체 경로: 일치
+     - 실데이터 스모크 5종: 최대 상대 차이 1.4e-14
+  3. **시도 회계 누락 0:** `tests/research/test_ledger.py` 불변식 테스트. 실데이터 스모크는 평가 시도 20 = 새 trial 20 = backtest_run 20입니다.
+  4. **연산자 누수 테스트:** 연산자 36개 모두 미래 값 주입 테스트를 통과했습니다. 패널 단계 주입(형성 중인 봉)과 봉인 위반 거부도 확인했습니다. S0 거부 규칙 테스트를 통과했습니다.
+  5. **게이트 425 passed, 커버리지 93.72%**, CI 성공: run 42637257564(계획), 42638918593(1), 42641372698(2), 42642667952(3), 42643589847(4), 42644112134(5), 42646002172(6~7), 42667971088(8). 9단계(6f420ed)와 문서 커밋의 run id는 test-results에 적습니다.
+- **미검증·제한(PASS 아님)**
+  - **L2 체결:** aggTrades를 수집하지 않아 거부됩니다(trial `rejected`).
+  - **비용 모델:** 보정하지 않은 사전값입니다(ADR-021). 스프레드 실측 보정은 7일 검증(OPS-007)과 2024-03 이전 bookTicker 벌크(보류) 이후에 합니다. 충격 계수 k는 설계상 보정할 수 없습니다.
+  - **증거금·수수료:** 실제 구간을 쓰지 않았습니다(키 필요, Phase 6).
+  - **펀딩:** 벌크 funding이 등록되지 않아(OPS-003, OPS-006) 실데이터 결과는 `funding_not_modelled`로 표시됩니다. funding_basis 템플릿은 거래가 0건입니다.
+  - **패널 범위:** Binance USDⓈ-M만 지원합니다. 현물과 Upbit 패널은 미구현이며 S0가 거부합니다.
+  - **사전 등록 값(§16-8):** ADR-022에 제안만 했고, 사용자 승인을 기다립니다. Phase 5에서 씁니다.
+- **설계상 다른 Phase(이번 범위 밖, 구현하지 않음)**
+  - 특징 평가표: Phase 4 S1 제안, 사용자 확인 필요
+  - 탐색: S1~S3, TPE, TS, MAP-Elites는 Phase 4
+  - validator, 홀드아웃, DSR, N_eff, StepM, 귀무 파이프라인은 Phase 4~5
+  - Director, 메모리, 실패 원인 코드는 Phase 3
+
+## 구현 파일
+| 단계 | 파일 | 내용 |
+|---|---|---|
+| 1 | `adapters/sqlite.py`, `research/store.py`, `research/ledger.py`, `research/migrations/0001_trials.sql` | research.db(experiment, trial, backtest_run). 평가 전에 trial을 기록하고, 종료 상태를 불변으로 둡니다. 실험 키는 hash(정규 Spec + 데이터·lag·봉인·엔진·비용·시드)입니다 |
+| 2 | `strategy/spec.py`, `ops.py`, `canonical.py`, `s0.py` | StrategySpec v1, 연산자 36개(lookback·데이터셋 선언), 깊이 8, 노드 64, window 2000, 상수 1e6, 정규형 해시, S0(현물 숏, maker, L2 필요, 유니버스, 최소 명목가, 비용 상한) |
+| 3 | `backtest/panel.py`, `data/lake.py`(`load_bulk`), `data/access.py`(`check_decisions`) | 결정 격자, as-of 봉, 체결 구간(시가·고저·mark 고저), 구성원, 일별 유동성 상위 n 선택, 펀딩 정산 목록. 심볼 단위 적재 |
+| 4 | `strategy/compile.py` | 시계열은 심볼별, 횡단면은 시점별 구성원만, 국면은 확장 창 분위 |
+| 5 | `backtest/costs.py` | 수수료, Corwin-Schultz·Abdi-Ranaldo, 실측 스프레드, 제곱근 충격, 펀딩, 격리 청산가 |
+| 6~7 | `backtest/market.py`, `backtest/engines.py` | 공통 준비(가격·범위·펀딩 행렬, 목표 가중치), 이벤트 엔진(수량·현금, 손절·시간 손절·청산), 벡터화 엔진(가중치, 상태 없는 규칙만, 청산 가능 표시) |
+| 8 | `backtest/run.py`, `strategy/templates.py` | ledger 경유 실행, backtest_run 기록(일별 손익과 결측 최악 가정 손익 압축 저장), 거부 사유, 템플릿 5종 |
+| 9 | `tools/run_backtest.py` | 실데이터 스모크(연구 구간, 자원·온도 게이트, research 잠금) |
+
+## 실데이터 스모크 (2026-11-09 17:52Z, `docs/measurements/phase2-smoke.md`)
+- **조건:** 8심볼(BTC, ETH, BNB, SOL, XRP, ADA, DOGE, LINK), 2025-01~06, 1h, 템플릿 5종, 이벤트 엔진(비용 ×1, ×2, ×3), 벡터화 엔진(×1)
+- **처리량:** 결정 시점 4,344개, 패널 적재 3.7초, 최대 private 메모리 763MB
+  - 첫 실행은 메모리 게이트(2GB 초과)로 멈췄습니다(F-014). 심볼 단위 적재로 바꾼 뒤 통과했습니다.
+- **결과:** 모든 템플릿의 총수익이 0 이하입니다(비용 ×1에서 -1.2%~-13.4%). **성과 증거로 쓰지 않습니다**(고정 템플릿, 6개월, 비용 미보정, 펀딩 미모델).
+- **관찰한 모델 특성:** 매 봉 목표 가중치로 재조정하는 규칙(ADR-020) 때문에 거래 수와 비용이 큽니다(trend 20,882건, 비용 258.7). 재조정 허용 범위(no-trade band)를 두는 것은 Spec 확장에 해당하므로 Phase 4 계획에서 결정합니다.

@@ -73,6 +73,14 @@
 - **벌크와 REST 대조:** `uv run python tools/validate_bulk_klines.py [--seed N]`
 - **7일 검증 보고:** `uv run python tools/validate_week.py`
 
+## 12. Phase 2 연구 실행
+- **연구 DB:** `C:\dev\qr-data\meta\research.db`(experiment, trial, backtest_run). 쓰는 쪽은 research 프로세스 하나이며 `run/research.lock`으로 보장합니다. catalog.db에는 쓰지 않습니다.
+- **스모크:** `uv run python tools/run_backtest.py [--symbols ...] [--from 2025-01] [--to 2025-06]`
+  - 연구 구간만 쓸 수 있고, 봉인 경계에 닿으면 거부합니다.
+  - 자원·온도 게이트에 걸리면 exit 3으로 멈춥니다.
+- **조회:** `select stage, status, count(*) from trial group by 1, 2`
+- **원칙:** 모든 평가는 trial입니다(거부·실패 포함). 백테스트 수익률만으로 성공을 판단하지 않습니다(validator는 Phase 5).
+
 ## 11. 이월 운영 이슈 (Phase 1 → Phase 2, 2026-11-09)
 Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress 머리말). 아래 이슈는 해결 기준을 충족할 때만 닫습니다. 상태 값은 OPEN / IN_PROGRESS / BLOCKED(사용자) / CLOSED이며, 닫을 때는 증거(명령 출력, run id)를 적습니다.
 

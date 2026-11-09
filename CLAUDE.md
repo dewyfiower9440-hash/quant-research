@@ -20,6 +20,12 @@ Stack: Python (uv)
 ## Project map
 - Design (v2.1, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`
 - Execution plan (in progress, approved Phase 0-1 only): `docs/plans/2026-11-08-phase0-1-build.md`
+- Phase 2 plan (DSL, two engines, cost model, trial accounting): `docs/plans/2026-11-09-phase2-dsl-backtest.md`;
+  code in `strategy/` (spec, ops, canonical, s0, compile, templates), `backtest/` (panel, costs, market, engines,
+  run), `research/` (research.db, trial ledger); smoke `tools/run_backtest.py`. Every evaluation goes through
+  `TrialLedger.evaluate` (one trial per evaluation, refusals included).
+- Phase 1 status: IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING; carry-over issues OPS-001..007 in `docs/operations.md`
+- Environment versions (separate from the code version): `docs/environment.md`
 - Living records: `docs/progress.md` (per-task status), `docs/decisions.md` (ADR), `docs/failures.md`
   (errors, repro, root cause, attempts), `docs/test-results.md`, `docs/measurements/`
 - Data lives OUTSIDE the repo: `C:\dev\qr-data` (raw JSONL, lake, meta SQLite, backups). Never commit data.
@@ -45,4 +51,6 @@ Stack: Python (uv)
 - `python -I` ignores PYTHONIOENCODING, so printing a Polars frame (box-drawing chars) raises UnicodeEncodeError on the cp949 console → print `.rows()` / JSON in scripts (2026-11-09)
 - GNU sed turns `\n` in a replacement into a real newline, and `Ns/...` line addresses go stale once the format hook reflows a file (both corrupted test_extras.py) → use Edit for literal multi-char edits; sed only for single-line patterns without escapes (2026-11-09)
 - Registering a scheduled task (Register-ScheduledTask via a tools/*.ps1) is refused by the auto-mode classifier as persistence → write the script, dry-run it with `-WhatIf`, and hand the user the `! powershell -NoProfile -File ...` command (2026-11-09)
+- pyright strict reports `np.sum` / `np.where` results as Unknown → use `np.dot`, `np.count_nonzero` and wrap
+  `np.where` in `np.asarray(..., dtype=np.float64)` with an `F64` annotation (2026-11-10)
 - The gate's pyright only covers `src` and `tests` (`[tool.pyright] include`); `tools/*.py` are not type-checked by the gate → run `uv run pyright tools/<file>.py` for every tool you touch (2026-11-09)

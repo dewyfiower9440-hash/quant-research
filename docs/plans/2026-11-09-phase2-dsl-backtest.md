@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: qr-phase2
 ---
 
@@ -97,7 +97,7 @@ task: qr-phase2
   - 테스트: 기록 필드, L2·최소 요건 거부, 템플릿 5종 S0 통과, 실행 → trial·backtest_run 1:1
 - [x] 9. **실데이터 스모크(연구 구간만, 성능 주장 없음)**
   - 내용: `tools/run_backtest.py`(자원·온도 게이트, POLARS_MAX_THREADS=2). 이미 받은 심볼 몇 개 × 템플릿(펀딩 계열은 파일럿 funding이 있는 구간만)으로 두 엔진의 교차 일치와 trial 회계를 실측합니다. 결과는 기록만 하고 성공 판정에 쓰지 않습니다.
-- [ ] 10. **문서**
+- [x] 10. **문서**
   - 사전 등록 ADR 초안(§16-8, 사용자 승인 대기): k, FWER 목표, c, 귀무 반복 수, 기본 lag 확인
   - progress(Phase 2 절), decisions, failures, test-results, CLAUDE.md(명령·구조)
 
