@@ -73,7 +73,7 @@ task: qr-phase2
 - [x] 1. **ADR-020과 시도 회계**
   - 내용: `research/store.py`(research.db, 마이그레이션 0001: experiment, trial, backtest_run), `research/ledger.py`(evaluate 컨텍스트, 실험 키, 남은 running 정리)
   - 테스트(먼저): 평가마다 trial 1건, 예외는 `failed`이고 사유를 기록, 중단(running 잔존)은 다시 열 때 `aborted`, 종료 상태는 변경 불가(트리거), 같은 실험 키 재실행도 trial 1건 추가(재평가도 셈)
-- [ ] 2. **StrategySpec DSL**
+- [x] 2. **StrategySpec DSL**
   - 내용: `strategy/spec.py`(pydantic, 파싱 전 크기·중첩 검사), `strategy/ops.py`(연산자 레지스트리: 종류, 인자 수, window, lookback, 필요 데이터셋), `strategy/canonical.py`(정규형·sha256), `strategy/s0.py`(정적 검사)
   - 테스트: hypothesis 문법 property(유효 AST 생성 → 파싱 → 정규형 → 재파싱 동일), 교환 연산 정규형 동치, 상한(깊이 8, 노드 64, window, 상수) 경계값, 무효 거부 사유, S0 거부(현물 숏, 현물 롱숏 횡단면, 예상 비용 상한, 최소 명목가)
 - [ ] 3. **선택적 레이크 읽기와 패널 빌더**
