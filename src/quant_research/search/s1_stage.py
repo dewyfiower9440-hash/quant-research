@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from quant_research.backtest.panel import Panel
 from quant_research.backtest.run import data_version
 from quant_research.research.ledger import TrialLedger, TrialOrigin
+from quant_research.search.cost_model import spec_ops
 from quant_research.search.s0_stage import Accepted, point_json
 from quant_research.search.s1 import S1Config, S1Result, evaluate_s1
 from quant_research.strategy.canonical import canonical_tree, expanded_trees
@@ -47,7 +48,12 @@ def run_s1(
         feature = json.dumps(None if signal is None else canonical_tree(signal), sort_keys=True)
         with ledger.evaluate(key, cand.spec_hash, "S1", origin=origin) as trial:
             result = evaluate_s1(spec, panel, cfg)
-            trial.metrics = {**result.metrics(), "point": point_json(cand.point)}
+            trial.metrics = {
+                **result.metrics(),
+                "point": point_json(cand.point),
+                "rows": panel.frame.height,  # cost model inputs (search.cost_model)
+                "ops": spec_ops(spec),
+            }
             ledger.store.conn.execute(
                 "insert into feature_eval(trial_id, feature_json, horizon_bars, lag_versions_json, ic, ic_hac_t, "
                 "samples, data_version, created_ns) values (?,?,?,?,?,?,?,?,?)",

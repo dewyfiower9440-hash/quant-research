@@ -78,6 +78,7 @@ def test_every_s1_evaluation_is_one_trial_with_one_feature_eval_row(ledger: Tria
     assert json.loads(str(fe[0][4])) == {"klines": 1}
     m = json.loads(str(trials[0][2]))
     assert m["point"]["family"] == "mean_reversion" and "score" in m and m["horizon_bars"] == 4
+    assert m["rows"] == panel.frame.height and m["ops"] > 0
     assert [s.trial_id for s in scored] == [int(str(t[0])) for t in trials]
 
 
