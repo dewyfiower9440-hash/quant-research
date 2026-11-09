@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: qr-review-fixes
 ---
 
@@ -27,11 +27,11 @@ task: qr-review-fixes
   - 파일별 gap과 `bulk_file` 기록을 하나의 `begin immediate` 트랜잭션으로 묶습니다.
   - 테스트를 함께 작성합니다.
 - [x] 4. 게이트, 커밋, push, CI를 진행합니다.
-- [ ] 5. STOP 파일로 수집기를 정상 종료하고 작업 스케줄러로 재시작합니다(1분 주기). 이어서 다음을 확인합니다.
+- [x] 5. STOP 파일로 수집기를 정상 종료하고 작업 스케줄러로 재시작합니다(1분 주기). 이어서 다음을 확인합니다.
   - restart gap 기록
   - 하트비트 회복
   - 컴팩션 실행 뒤 rest worker의 private 메모리 실측
-- [ ] 6. 문서(progress, failures F-010)를 갱신하고 커밋합니다.
+- [x] 6. 문서(progress, failures F-010)를 갱신하고 커밋합니다.
 
 ## 보류 (나중 단계 또는 별도 승인)
 - **#7:** 카탈로그 DB 백업(`VACUUM INTO`)과 해시 검증 (4단계 미완 항목)
