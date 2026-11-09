@@ -9,6 +9,7 @@ import pytest
 
 from quant_research.catalog.store import Catalog, Dataset, LagPolicy, SealEpoch
 from quant_research.data.access import PointInTime, SealViolationError
+from quant_research.errors import AppError
 
 S = 10**9
 MIN5 = 300 * S
@@ -102,7 +103,8 @@ def test_pinned_lag_version_is_reproducible(catalog: Catalog) -> None:
     frame = pl.DataFrame({"event_ns": [0], "value": [1.0]})
     decisions = pl.Series("decision_ns", [2 * MIN5])
     assert PointInTime(catalog).join_asof(decisions, frame, "oi")["value"].to_list() == [None]  # latest: lag 10 min
-    pinned = PointInTime(catalog, lag_versions={"oi": 1}).join_asof(decisions, frame, "oi")
+    # replaying an archived run under its original (superseded) lag must be explicit (review #4)
+    pinned = PointInTime(catalog, lag_versions={"oi": 1}, reproduce_archived_run=True).join_asof(decisions, frame, "oi")
     assert pinned["value"].to_list() == [1.0]
 
 
@@ -154,3 +156,66 @@ def test_by_join_is_correct_for_shuffled_interleaved_inputs(catalog: Catalog) ->
     out = pit.join_asof(decisions, frame, "trades", by="instrument_id")
     got = {(r["instrument_id"], r["decision_ns"]): r["value"] for r in out.iter_rows(named=True)}
     assert got == {(3, 4 * S + 1): 304.0, (1, 9 * S): 109.0, (2, 0): 200.0, (1, 2 * S): 102.0}
+
+
+def test_revised_old_bucket_never_replaces_a_newer_bucket(catalog: Catalog) -> None:
+    """Review #3: a refetch that revises an old interval must not be returned as the latest value."""
+    pit = PointInTime(catalog)
+    frame = pl.DataFrame(
+        {
+            "event_ns": [0, 3000 * S, 0],
+            "received_ns": [700 * S, 3700 * S, 4000 * S],  # last row: revision of event 0 received later
+            "value": [1, 2, 9],
+        }
+    )
+    out = pit.join_asof(pl.Series("decision_ns", [800 * S, 3800 * S, 5000 * S]), frame, "oi_end")
+    assert out["value"].to_list() == [1, 2, 2]
+    assert out["event_ns"].to_list() == [0, 3000 * S, 3000 * S]
+
+
+def test_revision_of_the_newest_bucket_replaces_it_once_available(catalog: Catalog) -> None:
+    pit = PointInTime(catalog)
+    frame = pl.DataFrame({"event_ns": [0, 0], "received_ns": [10 * S, 20 * S], "value": [1, 5]})
+    out = pit.join_asof(pl.Series("decision_ns", [15 * S, 25 * S]), frame, "oi_end")
+    assert out["value"].to_list() == [1, 5]
+
+
+def test_rows_available_at_the_same_instant_resolve_to_the_newest_event(catalog: Catalog) -> None:
+    """A backfill receives many buckets at one instant: the answer must not depend on input order."""
+    pit = PointInTime(catalog)
+    for order in ([0, 1, 2], [2, 0, 1], [1, 2, 0]):
+        frame = pl.DataFrame({"event_ns": [t * MIN5 for t in order], "received_ns": [9000 * S] * 3, "value": order})
+        out = pit.join_asof(pl.Series("decision_ns", [9000 * S]), frame, "oi_end")
+        assert out["value"].to_list() == [2]
+
+
+def test_revisions_are_resolved_per_instrument(catalog: Catalog) -> None:
+    pit = PointInTime(catalog)
+    frame = pl.DataFrame(
+        {
+            "instrument_id": [1, 2, 1],
+            "event_ns": [3000 * S, 0, 0],
+            "received_ns": [3100 * S, 3200 * S, 4000 * S],  # instrument 2's old bucket is its newest
+            "value": [10, 20, 99],
+        }
+    )
+    decisions = pl.DataFrame({"instrument_id": [1, 2], "decision_ns": [5000 * S, 5000 * S]})
+    out = pit.join_asof(decisions, frame, "oi_end", by="instrument_id")
+    assert dict(zip(out["instrument_id"], out["value"], strict=True)) == {1: 10, 2: 20}
+
+
+def test_research_cannot_pin_a_superseded_smaller_lag(catalog: Catalog) -> None:
+    """Review #4: lag versions only grow; pinning an older one would make data visible earlier."""
+    catalog.add_lag_policy(LagPolicy("oi", 2 * MIN5, "observed p99 grew"))
+    frame = pl.DataFrame({"event_ns": [0], "value": [1.0]})
+    with pytest.raises(SealViolationError, match="superseded"):
+        PointInTime(catalog, lag_versions={"oi": 1}).join_asof(pl.Series("decision_ns", [2 * MIN5]), frame, "oi")
+
+
+@pytest.mark.parametrize("dtype", [pl.Float64, pl.Datetime("us")])
+def test_decision_times_must_be_integer_nanoseconds(catalog: Catalog, dtype: pl.DataType) -> None:
+    """Review #5: a float or Datetime column used to skip the seal check and mis-scale the join."""
+    frame = pl.DataFrame({"event_ns": [0], "value": [1.0]})
+    decisions = pl.Series("decision_ns", [20_000 * S]).cast(dtype)
+    with pytest.raises(AppError, match="integer nanoseconds"):
+        PointInTime(catalog).join_asof(decisions, frame, "oi")
