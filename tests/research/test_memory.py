@@ -142,3 +142,12 @@ def test_trials_carry_model_and_hypothesis_origin(store: ResearchStore) -> None:
     row = store.conn.execute("select model_id, llm_cutoff, status from trial").fetchone()
     assert tuple(row) == ("fake-llm-v1", "n/a", "done")
     assert json.loads(store.conn.execute("select json_array(1, 2)").fetchone()[0]) == [1, 2]  # JSON1 available
+
+
+def test_only_recorded_data_requests_block_a_family_not_modelling_caveats(store: ResearchStore) -> None:
+    mem = MemoryStore(store)
+    c = cycle(store, 1)
+    mem.record_failure(c, "trend", "missing_data", "funding not modelled", {"flags": ["x"]}, hypothesis_id=None)
+    assert mem.data_blocked() == set()  # a modelling caveat of a run does not block the family
+    mem.record_failure(c, "funding_basis", "missing_data", "needs funding", {"data_request": 3}, hypothesis_id=None)
+    assert mem.data_blocked() == {"funding_basis"}

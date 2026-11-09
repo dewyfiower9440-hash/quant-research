@@ -124,7 +124,7 @@ class FakeLLM:
             raw = request.payload.get("excluded_variants", [])
             excluded = {int(v) for v in cast(list[int], raw)} if isinstance(raw, list) else set[int]()
             choices = [i for i in range(len(GRID[family])) if i not in excluded] or list(range(len(GRID[family])))
-            k = int(rng.integers(1, min(3, len(choices)) + 1))
+            k = int(rng.integers(1, min(2, len(choices)) + 1))
             variants = sorted(int(v) for v in rng.choice(choices, size=k, replace=False))
             return {"template": family, "variants": variants, "rationale": f"Spread across the grid.{injection}"}
         causes = request.payload.get("rule_based_causes", [])

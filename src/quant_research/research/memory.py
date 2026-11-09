@@ -171,11 +171,25 @@ class MemoryStore:
         return {str(r[0]) for r in rows if causes is None or str(r[1]) in causes}
 
     def data_blocked(self) -> set[str]:
+        """Families waiting for data a plan required (a recorded data request, ACQUIRE_DATA). A run's caveat
+        such as "funding not modelled" is evidence for analysis, not a reason to stop researching a family."""
         rows = self.store.conn.execute(
             "select distinct family from failure where cause_code = 'missing_data' "
+            "and json_extract(evidence_json, '$.data_request') is not null "
             "and family not in (select family from finding where statement like 'data available:%')"
         ).fetchall()
         return {str(r[0]) for r in rows}
+
+    def cooled_families(self, current_seq: int, run_id: str, causes: Sequence[str]) -> set[str]:
+        """Families whose recent hypothesis structure is in cooldown (the policy skips them, §10)."""
+        keys = self.cooled_down(current_seq, run_id, causes)
+        if not keys:
+            return set()
+        rows = self.store.conn.execute(
+            "select distinct h.family, h.struct_key from hypothesis h join cycle c using (cycle_id) where c.run_id = ?",
+            (run_id,),
+        ).fetchall()
+        return {str(f) for f, k in rows if str(k) in keys}
 
     def family_stats(self, run_id: str) -> list[FamilyStats]:
         cycles = self.store.conn.execute(

@@ -345,10 +345,25 @@ class Director:
             return S.DONE, "no novel hypothesis this cycle (cooldown, §10)", cooled
         last_family, last_causes, streak = self._last(seq) if self.cfg.memory else (None, [], 0)
         blocked = sorted(self.memory.data_blocked()) if self.cfg.memory else []
+        cooled = sorted(self.memory.cooled_families(seq, self.cfg.run_id, LEAVE_COOLDOWN)) if self.cfg.memory else []
+        # every grid point already has a finished selection trial: nothing new to test (Phase 4 widens the space)
+        exhausted = [f for f in GRID if all(self._evaluated(k, "S2") is not None for k in self.grid_keys(f))]
+        unavailable = set(blocked) | set(cooled) | set(exhausted)
+        if set(GRID) <= unavailable:  # quality guard (§10 PAUSED): idle cycles would only spend LLM calls
+            return (
+                S.PAUSED,
+                "nothing left to research with the fixed grid and the available data",
+                {
+                    "blocked": blocked,
+                    "cooled_down": cooled,
+                    "exhausted": exhausted,
+                    "next": "Phase 4 search space or new data (OPS-003/006)",
+                },
+            )
         choice = choose_family(
             mode=self.cfg.policy,
             outcomes=self._outcomes() if self.cfg.memory else {},
-            blocked=blocked,
+            blocked=sorted(set(blocked) | set(cooled) | set(exhausted)),
             last_family=last_family,  # memory=off (ablation): the policy sees no history at all
             last_causes=last_causes,
             consecutive_in_family=streak,
@@ -362,6 +377,8 @@ class Director:
                 "family": choice.family,
                 "posterior": choice.posterior,
                 "blocked": blocked,
+                "cooled_down": cooled,
+                "exhausted": exhausted,
                 "last_family": last_family,
                 "last_causes": list(last_causes),
                 "memory": self.cfg.memory,
@@ -444,6 +461,12 @@ class Director:
 
         h, conf = experiment_config(spec, panel, self.catalog, config)
         return experiment_key(h, conf)
+
+    def grid_keys(self, family: str) -> list[str]:
+        """Selection-split experiment keys of every point of the family's fixed grid."""
+        return [
+            self._key(self._spec(family, i), self.selection, self._selection_config()) for i in range(len(GRID[family]))
+        ]
 
     def _selection_config(self) -> RunConfig:
         return RunConfig(engine="vector", capital=self.cfg.capital, seed=self.cfg.seed)

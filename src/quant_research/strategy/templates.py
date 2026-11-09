@@ -13,35 +13,44 @@ Json = dict[str, object]
 Params = Mapping[str, float]
 FAMILIES: tuple[str, ...] = ("trend", "mean_reversion", "momentum", "funding_basis", "volatility")
 
-# Pre-registered grids (initial priors); index 0 is the Phase 2 default of each family.
+# Pre-registered grids (initial priors; widened 2026-11-10, ADR-024); index 0 is the Phase 2 default.
 GRID: dict[str, list[dict[str, float]]] = {
     "trend": [
         {"fast": 24, "slow": 96},
         {"fast": 12, "slow": 96},
         {"fast": 48, "slow": 168},
         {"fast": 24, "slow": 336},
+        {"fast": 12, "slow": 48},
+        {"fast": 48, "slow": 336},
     ],
     "mean_reversion": [
         {"window": 48, "threshold": 1.5},
         {"window": 24, "threshold": 2.0},
         {"window": 96, "threshold": 1.5},
         {"window": 48, "threshold": 2.5},
+        {"window": 24, "threshold": 1.5},
+        {"window": 96, "threshold": 2.0},
     ],
     "momentum": [
         {"lookback": 168, "quantile": 0.8},
         {"lookback": 72, "quantile": 0.8},
         {"lookback": 336, "quantile": 0.8},
         {"lookback": 168, "quantile": 0.9},
+        {"lookback": 72, "quantile": 0.9},
+        {"lookback": 336, "quantile": 0.9},
     ],
     "funding_basis": [
         {"window": 90, "quantile": 0.8},
         {"window": 30, "quantile": 0.8},
         {"window": 90, "quantile": 0.9},
+        {"window": 30, "quantile": 0.9},
     ],
     "volatility": [
         {"short": 24, "long": 168, "ratio": 0.7},
         {"short": 12, "long": 168, "ratio": 0.6},
         {"short": 24, "long": 336, "ratio": 0.8},
+        {"short": 12, "long": 336, "ratio": 0.7},
+        {"short": 48, "long": 336, "ratio": 0.6},
     ],
 }
 REQUIRED_DATA: dict[str, tuple[str, ...]] = {

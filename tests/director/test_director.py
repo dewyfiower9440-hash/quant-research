@@ -17,7 +17,7 @@ from quant_research.director.llm import FakeLLM, LLMResponse, ReplayLLM
 from quant_research.director.policy import Choice, PolicyMode
 from quant_research.director.schemas import HypothesisDraft
 from quant_research.director.states import State, check_transition
-from quant_research.research.memory import CauseCode
+from quant_research.research.memory import CauseCode, struct_key
 from quant_research.strategy.compile import Compiled
 from quant_research.strategy.spec import StrategySpec
 
@@ -250,3 +250,70 @@ def test_replaying_stored_answers_reproduces_the_decisions(env: Env, tmp_path_fa
     finally:
         store.close()
         cat.close()
+
+
+def test_the_policy_skips_families_in_cooldown_so_cycles_stay_productive(env: Env) -> None:
+    """Real-data run 2026-11-10: cycles 6, 8-10 picked a family in cooldown and ended idle."""
+    for seed in range(8):
+        run = f"cool-{seed}"
+        cur = env.store.conn.execute(
+            "insert into cycle(run_id, seq, state, status, config_json, started_ns, updated_ns) "
+            "values (?, 1, 'DONE', 'done', '{}', 1, 1)",
+            (run,),
+        )
+        prev = int(cur.lastrowid or 0)
+        hid = env.store.conn.execute(
+            "insert into hypothesis(cycle_id, family, statement, falsification_test, required_data_json, "
+            "required_features_json, prior, struct_key, created_ns) values (?,?,?,?,?,?,?,?,1)",
+            (prev, "trend", "s", "f", '["klines"]', "[]", 0.3, struct_key("trend", "trend", ["klines"], [])),
+        ).lastrowid
+        env.store.conn.execute(
+            "insert into failure(cycle_id, hypothesis_id, family, cause_code, detail, evidence_json, created_ns) "
+            "values (?, ?, 'trend', 'weak_signal', 'd', '{}', 1)",
+            (prev, hid),
+        )
+        res = env.director(config=DirectorConfig(run_id=run, seed=seed, universe_n=2)).run_cycle(2)
+        chain = transitions(env, res.cycle_id)
+        observe = next(ev for _f, to, _r, ev in chain if to == "HYPOTHESIZE" and "family" in ev)
+        assert observe["family"] != "trend" and "trend" in cast(list[str], observe["cooled_down"])
+        assert not any("no novel hypothesis" in r for _f, _t, r, _e in chain)
+
+
+def test_a_family_whose_fixed_grid_is_fully_evaluated_is_skipped_as_exhausted(env: Env) -> None:
+    """Real-data rerun 2026-11-10: the trend grid was exhausted across runs and cycles 5, 7-9 idled."""
+    d = env.director()
+    for key in d.grid_keys("trend"):
+        env.store.conn.execute(
+            "insert into experiment(experiment_key, spec_hash, spec_json, config_json, created_ns) "
+            "values (?, 'h', '{}', '{}', 1)",
+            (key,),
+        )
+        env.store.conn.execute(
+            "insert into trial(experiment_key, spec_hash, stage, status, env_id, code_sha, started_ns, finished_ns) "
+            "values (?, 'h', 'S2', 'done', 'E', 's', 1, 2)",
+            (key,),
+        )
+    res = d.run_cycle(1)
+    observe = next(ev for _f, to, _r, ev in transitions(env, res.cycle_id) if to == "HYPOTHESIZE" and "family" in ev)
+    assert observe["family"] != "trend" and observe["exhausted"] == ["trend"]
+
+
+def test_when_every_family_is_exhausted_or_blocked_the_run_pauses_instead_of_spending_llm_calls(env: Env) -> None:
+    d = env.director()
+    for family in ("trend", "mean_reversion", "momentum", "funding_basis", "volatility"):
+        for key in d.grid_keys(family):
+            env.store.conn.execute(
+                "insert into experiment(experiment_key, spec_hash, spec_json, config_json, created_ns) "
+                "values (?, 'h', '{}', '{}', 1)",
+                (key,),
+            )
+            env.store.conn.execute(
+                "insert into trial(experiment_key, spec_hash, stage, status, env_id, code_sha, started_ns, "
+                "finished_ns) values (?, 'h', 'S2', 'done', 'E', 's', 1, 2)",
+                (key,),
+            )
+    results = d.run(5)
+    assert [r.status for r in results] == ["paused"]  # the run stops at the first idle cycle
+    assert env.store.conn.execute("select count(*) from llm_call").fetchone()[0] == 0
+    reason = transitions(env)[-1][2]
+    assert "nothing left to research" in reason
