@@ -317,3 +317,35 @@ def test_when_every_family_is_exhausted_or_blocked_the_run_pauses_instead_of_spe
     assert env.store.conn.execute("select count(*) from llm_call").fetchone()[0] == 0
     reason = transitions(env)[-1][2]
     assert "nothing left to research" in reason
+
+
+def test_when_only_cooldowns_block_every_family_the_oldest_cooldown_is_released(env: Env) -> None:
+    """Real-data run 2026-11-10: cycle 7 paused because all remaining families were in cooldown."""
+    run = "release"
+    families = ["trend", "mean_reversion", "momentum", "funding_basis", "volatility"]
+    for seq, family in enumerate(families, 1):
+        cid = int(
+            env.store.conn.execute(
+                "insert into cycle(run_id, seq, state, status, config_json, started_ns, updated_ns) "
+                "values (?, ?, 'DONE', 'done', '{}', 1, 1)",
+                (run, seq),
+            ).lastrowid
+            or 0
+        )
+        data = '["funding", "klines"]' if family == "funding_basis" else '["klines"]'
+        hid = env.store.conn.execute(
+            "insert into hypothesis(cycle_id, family, statement, falsification_test, required_data_json, "
+            "required_features_json, prior, struct_key, created_ns) values (?,?,?,?,?,?,?,?,1)",
+            (cid, family, "s", "f", data, "[]", 0.3, struct_key(family, family, json.loads(data), [])),
+        ).lastrowid
+        env.store.conn.execute(
+            "insert into failure(cycle_id, hypothesis_id, family, cause_code, detail, evidence_json, created_ns) "
+            "values (?, ?, ?, 'weak_signal', 'd', '{}', 1)",
+            (cid, hid, family),
+        )
+    res = env.director(config=DirectorConfig(run_id=run, seed=3, universe_n=2)).run_cycle(6)
+    assert res.status == "done"
+    observe = next(ev for _f, to, _r, ev in transitions(env, res.cycle_id) if to == "HYPOTHESIZE" and "family" in ev)
+    assert observe["family"] == "trend" and observe["cooldown_released"] == "trend"  # failed longest ago
+    states = [to for _f, to, _r, _e in transitions(env, res.cycle_id)]
+    assert "PLAN" in states and states.count("OBSERVE") == 1  # the released family is really researched

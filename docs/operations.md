@@ -73,6 +73,15 @@
 - **벌크와 REST 대조:** `uv run python tools/validate_bulk_klines.py [--seed N]`
 - **7일 검증 보고:** `uv run python tools/validate_week.py`
 
+## 13. Phase 3 Director 실행
+- **무료 실행(가짜 LLM):** `uv run python tools/run_director.py --cycles 10 [--seed N] [--universe-n N] [--memory off] [--policy uniform]`
+- **유료 실행(승인 후에만):** `--llm claude --approve-paid-calls --max-total-usd 5`
+  - 누적 청구 가능 비용은 research.db `llm_call.usage_cost_usd`(billed=1)의 합입니다.
+- **조회**
+  - 전이: `select c.seq, t.from_state, t.to_state, t.reason from transition t join cycle c using (cycle_id) where c.run_id = ?`
+  - 비용: `select purpose, count(*), sum(estimate_usd), sum(usage_cost_usd) from llm_call group by 1`
+- **잠금과 게이트:** `run/research.lock`으로 하나만 실행합니다. 자원·온도 게이트에 걸리면 PAUSED로 멈추고, 다음 실행이 그 사이클을 이어 갑니다.
+
 ## 12. Phase 2 연구 실행
 - **연구 DB:** `C:\dev\qr-data\meta\research.db`(experiment, trial, backtest_run). 쓰는 쪽은 research 프로세스 하나이며 `run/research.lock`으로 보장합니다. catalog.db에는 쓰지 않습니다.
 - **스모크:** `uv run python tools/run_backtest.py [--symbols ...] [--from 2025-01] [--to 2025-06]`

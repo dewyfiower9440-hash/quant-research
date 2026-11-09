@@ -405,3 +405,55 @@
   - 첫 실행은 메모리 게이트(2GB 초과)로 멈췄습니다(F-014). 심볼 단위 적재로 바꾼 뒤 통과했습니다.
 - **결과:** 모든 템플릿의 총수익이 0 이하입니다(비용 ×1에서 -1.2%~-13.4%). **성과 증거로 쓰지 않습니다**(고정 템플릿, 6개월, 비용 미보정, 펀딩 미모델).
 - **관찰한 모델 특성:** 매 봉 목표 가중치로 재조정하는 규칙(ADR-020) 때문에 거래 수와 비용이 큽니다(trend 20,882건, 비용 258.7). 재조정 허용 범위(no-trade band)를 두는 것은 Spec 확장에 해당하므로 Phase 4 계획에서 결정합니다.
+
+---
+
+# Phase 3: Research Director, 상태 기계, Memory, LLM 연동 (계획 `docs/plans/2026-11-10-phase3-director-memory.md`, 2026-11-10 승인)
+
+## 상태: **IN_PROGRESS — 구현과 무료 검증 진행 중, 실제 API 비용 측정은 사용자 확인 대기(LLM_COST_MEASUREMENT_PENDING)**
+- **범위 밖(구현 완료로 선언하지 않음):** Phase 4 대규모 탐색, Phase 5 독립 통계 검증. VALIDATE 상태는 기록만 하는 스텁이며, 홀드아웃에는 접근하지 않습니다.
+- **주장 금지:** 10사이클 실행은 자율 연구 능력의 증명이 아닙니다. 전략 성과의 증거도 아닙니다.
+
+## 구현 모듈 (커밋 2485f96, ccbb0ef, dd3a297, 74f38e0, cda7ea2, 그리고 이후 커밋)
+| 모듈 | 파일 | 내용 |
+|---|---|---|
+| Memory | `research/memory.py`, `research/migrations/0002_memory.sql` | 근거 필수 발견(supersede 1회), 원인 코드 8종 실패, 쿨다운, 데이터 대기 차단(데이터 요청이 기록된 경우만), 익명 요약, 재시작 복원 |
+| 익명화 | `research/anonymize.py` | 심볼 별칭(S01..), 날짜·epoch·실명 누출 탐지, 신뢰할 수 없는 텍스트 가림 |
+| Phase 4 인터페이스 | `research/features.py` | `FeatureEvaluator` Protocol, `feature_eval` 스키마(ADR-023), 근거 참조 형식 |
+| 스키마 | `director/schemas.py` | 가설·계획·해석의 닫힌 어휘, 길이 상한, 추가 필드 금지 |
+| LLM | `director/llm.py`, `director/claude.py` | `LLMClient` Protocol, `FakeLLM`(결정적, 오작동 시나리오), `ReplayLLM`(재현), `ClaudeLLM`(공식 SDK `anthropic==2.7.0`, 승인 필요, 도구 없음, 구조화 출력, refusal fallback) |
+| 예산 | `director/budget.py` | 공식 가격표(2026-11-10 확인), 사전 추정(fallback을 고려해 가장 비싼 모델 기준)과 사후 사용량 비용을 구분, 누적 $5·사이클 $2.5·호출당 토큰 상한, 초과 예상 시 호출 차단 |
+| 상태 기계 | `director/states.py` | §10 전이표와 검사 |
+| 실패 분석 | `director/failures.py` | 규칙 기반 원인 8종과 근거 trial |
+| 정책 | `director/policy.py` | 계열 Beta 사후분포 Thompson, uniform 스위치, 원인 코드별 머묾·이탈 |
+| Director | `director/director.py` | 사이클 실행기: 전이마다 이유와 근거를 트랜잭션으로 기록, 멱등 처리기, 재개, 중복 실험 생략, 예산·자원·온도 PAUSED, 누출 차단, 쿨다운·소진·데이터 대기 계열 제외, 모두 막히면 PAUSED |
+| 공통 | `research/guard.py`, `backtest/run.py`(`experiment_config`, 워밍업 평가 창), `backtest/panel.py`(`slice_panel` 워밍업) | |
+| 도구 | `tools/run_director.py` | 실데이터 무인 사이클, CPU·메모리·토큰·비용 측정 보고서 |
+
+## 실데이터 실행 기록 (가짜 LLM, 8심볼, 선별 2025-01~04, 확인 2025-05~06, 워밍업 30일)
+- **실행 6회, 사이클 57개, trial: S2 46 · S3 31(모두 done), 실행 중 잔류 0, 같은 실험을 두 번 끝까지 평가한 경우 0.** LLM 호출 136건은 모두 가짜이며 청구 0입니다.
+- 앞선 실행에서 결함 4건을 발견해 고쳤습니다(F-015). 테스트를 먼저 만들었습니다.
+- **최종 실행 `fake-s7-on-posterior-20261109T194855` (universe n=3), `docs/measurements/phase3-fake-10cycles.md`**
+  - 10/10 사이클 done, 10사이클 모두 GENERATE → SEARCH → BACKTEST까지 진행
+  - trial 24건, 중복 0
+  - VALIDATE 스텁 도달 3회(Phase 3 확인 구간 기준이며 검증이 아님)
+  - 시간 38.0초, CPU 40.2초, 최대 private 메모리 813MB
+- **Memory 재사용 증거(전이 근거)**
+  - 2번째 사이클부터 직전 원인 코드를 읽었습니다(`last_causes`).
+  - weak_signal·regime_dependent 뒤에는 그 계열을 쿨다운했습니다(예: 3번 사이클 `cooled_down=['volatility']`).
+  - cost_erosion 뒤에는 한 번 머물렀습니다(6번 사이클 "stay in mean_reversion once").
+  - funding_basis는 데이터 요청을 기록한 뒤 차단됐습니다.
+  - 이미 평가한 격자 점은 계획 단계에서 제외됐습니다(`excluded_variants`).
+- **관찰:** 계열 5개에 쿨다운 5사이클이면, 남은 계열이 하나뿐인 경우가 자주 생깁니다(5~7번 사이클). 고정 격자 27점은 몇 번의 실행으로 소진됩니다. 탐색 공간 확장과 쿨다운 길이 조정은 Phase 4 계획에서 실측으로 정합니다.
+- **사이클별 LLM 비용**
+  - 사전 최악 추정: 평가 사이클 약 $0.48, 쿨다운 사이클 약 $0.16
+  - 가짜 응답 토큰을 Opus 5.5 정가로 환산하면 약 $0.007입니다. 가짜 응답이 짧아 대표성이 없습니다.
+  - 실제 비용은 유료 측정 전까지 미확인입니다.
+
+## API 비용 측정 준비 상태 (실행하지 않음: 사용자 확인 대기)
+- **명령:** `uv run python tools/run_director.py --llm claude --approve-paid-calls --cycles 3 --max-total-usd 5`
+  - `--approve-paid-calls`가 없으면 어댑터 생성이 거부됩니다.
+- **키:** SDK가 환경 변수 또는 `ant auth login` 프로필에서 읽습니다. 코드·Git·로그·DB에는 기록하지 않습니다. 키 설정은 사용자가 합니다.
+- **차단:** 호출 전 최악 추정(가장 비싼 모델 가격 × 최대 출력 8,000토큰)이 누적 상한 $5나 사이클 상한 $2.5를 넘으면 그 호출을 막고 PAUSED로 갑니다.
+- **기록:** 호출마다 `estimate_usd`(사전 추정)와 `usage_cost_usd`(응답 사용량 × 정가, 청구 가능 비용)를 저장합니다. 실제 청구서는 Console·Admin API가 필요해 확인하지 않습니다.
+- **미확인:** 구조화 출력 스키마(값 제약 제거본)를 API가 받아들이는지, 사고 토큰 과금 방식(공식 페이지 미명시. 출력 토큰에 포함된 것으로 보수적으로 계산), 모델 학습 기준일(`llm_cutoff` 비어 있음)

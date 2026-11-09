@@ -215,3 +215,20 @@
 - **수정:** 심볼 단위로 읽고 조립해 메모리에는 한 심볼의 1분봉만 둡니다. 쓰지 않는 데이터셋을 빼는 `datasets` 인자를 추가했습니다. 자원 게이트(연구 작업자 2GB, 계획 §8)는 그대로 둡니다.
 - **결과:** 최대 private 메모리 763MB로 통과했습니다. 기존 패널 테스트는 회귀 없이 통과합니다.
 - **상태:** 해결
+
+## F-015 (2026-11-10, Phase 3) 실데이터 Director 실행에서 발견한 정책·가짜 LLM 결함
+1. **가짜 LLM 계획 계열 오류**
+   - 증상: 계획 요청이 `template` 필드로 계열을 보내는데, 가짜 LLM은 `required_family`만 읽어 trend를 반환했습니다. 그래서 trend가 아닌 계열의 계획이 폐기됐습니다.
+   - 10사이클 테스트가 이를 잡지 못했습니다(계획 수와 스키마 실패 수를 검사하지 않음).
+   - 수정: 가짜 LLM을 고치고, 테스트에 "계획 ≥ 7, 실패 응답 0"을 추가했습니다.
+2. **실행 단서를 계열 차단으로 처리**
+   - 증상: funding 미모델 표시만으로 거의 모든 계열이 데이터 대기로 차단됐습니다. 모두 차단되자 정책이 전체 허용으로 되돌아가 funding_basis를 다시 골랐습니다.
+   - 수정: 데이터 요청이 기록된 실패만 차단하도록 바꿨습니다.
+3. **쿨다운·소진 계열을 정책이 계속 선택**
+   - 증상: 첫 실행의 6, 8~10번 사이클이 "새 가설 없음"으로 끝났습니다. 재실행에서는 소진된 trend를 계속 골랐습니다.
+   - 수정: 쿨다운·소진 계열을 제외하고, 모두 막히면 PAUSED로 갑니다.
+4. **쿨다운 해제가 전달되지 않음**
+   - 증상: OBSERVE에서 해제한 쿨다운을 HYPOTHESIZE 검사가 모른 채 다시 막았습니다.
+   - 수정: 해제 근거를 HYPOTHESIZE에서 확인합니다.
+- **테스트(먼저 실패를 확인함):** `test_only_recorded_data_requests_block_a_family_not_modelling_caveats`, `test_the_policy_skips_families_in_cooldown_so_cycles_stay_productive`, `test_a_family_whose_fixed_grid_is_fully_evaluated_is_skipped_as_exhausted`, `test_when_every_family_is_exhausted_or_blocked_the_run_pauses_instead_of_spending_llm_calls`, `test_when_only_cooldowns_block_every_family_the_oldest_cooldown_is_released`
+- **상태:** 해결. 최종 실데이터 실행에서 10/10 사이클이 평가까지 진행됐습니다.

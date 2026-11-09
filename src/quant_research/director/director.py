@@ -348,6 +348,13 @@ class Director:
         cooled = sorted(self.memory.cooled_families(seq, self.cfg.run_id, LEAVE_COOLDOWN)) if self.cfg.memory else []
         # every grid point already has a finished selection trial: nothing new to test (Phase 4 widens the space)
         exhausted = [f for f in GRID if all(self._evaluated(k, "S2") is not None for k in self.grid_keys(f))]
+        released: str | None = None
+        open_families = set(GRID) - set(blocked) - set(exhausted)
+        if open_families and open_families <= set(cooled):
+            # only cooldowns block: release the family that failed longest ago (a cooldown delays repeats, it is
+            # not a verdict); the experiments differ anyway because evaluated grid points are excluded
+            released = self._oldest_failure(sorted(open_families))
+            cooled = [f for f in cooled if f != released]
         unavailable = set(blocked) | set(cooled) | set(exhausted)
         if set(GRID) <= unavailable:  # quality guard (§10 PAUSED): idle cycles would only spend LLM calls
             return (
@@ -379,6 +386,7 @@ class Director:
                 "blocked": blocked,
                 "cooled_down": cooled,
                 "exhausted": exhausted,
+                "cooldown_released": released,
                 "last_family": last_family,
                 "last_causes": list(last_causes),
                 "memory": self.cfg.memory,
@@ -433,7 +441,8 @@ class Director:
             hid, skey, llm_calls = int(cur.lastrowid or 0), key, calls
         else:
             hid, skey, llm_calls = int(row[0]), str(row[1]), []
-        if skey in self.memory.cooled_down(seq, self.cfg.run_id, LEAVE_COOLDOWN):
+        released = self._evidence(cycle_id, S.HYPOTHESIZE).get("cooldown_released") == family
+        if not released and skey in self.memory.cooled_down(seq, self.cfg.run_id, LEAVE_COOLDOWN):
             return (
                 S.OBSERVE,
                 "hypothesis structure failed recently (cooldown, §10)",
@@ -461,6 +470,15 @@ class Director:
 
         h, conf = experiment_config(spec, panel, self.catalog, config)
         return experiment_key(h, conf)
+
+    def _oldest_failure(self, families: Sequence[str]) -> str:
+        rows = self.store.conn.execute(
+            "select f.family, max(c.seq) from failure f join cycle c using (cycle_id) where c.run_id = ? "
+            "group by f.family",
+            (self.cfg.run_id,),
+        ).fetchall()
+        last = {str(f): int(s) for f, s in rows}
+        return min(families, key=lambda f: (last.get(f, 0), f))
 
     def grid_keys(self, family: str) -> list[str]:
         """Selection-split experiment keys of every point of the family's fixed grid."""
