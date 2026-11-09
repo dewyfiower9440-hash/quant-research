@@ -92,7 +92,7 @@ task: qr-phase2
 - [x] 7. **벡터화 엔진과 교차 일치**
   - 내용: `backtest/vector.py`(상태 없는 규칙)
   - 테스트: 같은 기준 사례 100%, hypothesis로 만든 상태 없는 Spec × 합성 패널에서 두 엔진의 일별 손익이 1e-9 안에서 일치, 미래 값 주입 시 두 엔진 모두 과거 손익 불변
-- [ ] 8. **실행기, backtest_run, fidelity, 템플릿**
+- [x] 8. **실행기, backtest_run, fidelity, 템플릿**
   - 내용: `backtest/run.py`(ledger 경유 실행, backtest_run에 fidelity·데이터 버전 해시·lag 버전·봉인 epoch·env_id·git SHA·비용 설정 기록, 일별 손익 벡터 압축 저장, 지표: 기간 SR, 회전율, MDD, 거래 수, 손익분기 비용 배수), `strategy/templates.py`(5계열)
   - 테스트: 기록 필드, L2·최소 요건 거부, 템플릿 5종 S0 통과, 실행 → trial·backtest_run 1:1
 - [ ] 9. **실데이터 스모크(연구 구간만, 성능 주장 없음)**

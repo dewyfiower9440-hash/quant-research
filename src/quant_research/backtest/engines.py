@@ -41,6 +41,19 @@ class EngineResult:
     stops: int = 0
     liquidation_unmodelled: bool = False
     notes: list[str] = field(default_factory=lambda: list[str]())
+    # §9 worst case for missing data: per interval, the adverse range of positions held where no order was
+    # possible (interval high-low over the fill price, or GAP_PRIOR when the interval has no data at all)
+    gap_loss: F64 = field(default_factory=lambda: np.zeros(0))
+
+
+GAP_PRIOR = 0.10  # adverse move assumed for a held position over an interval without any data
+
+
+def _gap_fraction(market: Market, t: int, i: int) -> float:
+    hi, lo, p = float(market.high[t, i]), float(market.low[t, i]), float(market.price[t, i])
+    if math.isnan(hi) or math.isnan(lo) or not p > 0:
+        return GAP_PRIOR
+    return (hi - lo) / p
 
 
 def _rate(cost: CostModel, market: Market, t: int, i: int, notional: float, fidelity: Fidelity) -> float:
@@ -65,7 +78,7 @@ def run_vector(
     if not stateless:
         raise EngineUnsupported("vector engine: time stop / ATR stop are path dependent (use the event engine)")
     T, N = market.price.shape
-    out = EngineResult(np.zeros(T))
+    out = EngineResult(np.zeros(T), gap_loss=np.zeros(T))
     e = capital
     drift = np.zeros(N)  # weights after the previous interval's price move (what we hold now)
     held = np.zeros(N)
@@ -97,6 +110,8 @@ def run_vector(
         fund = -float(np.dot(w, market.funding[t])) * e if fidelity == "L1" else 0.0
         out.funding += fund
         out.position_bars += int(np.count_nonzero(w))
+        for i in np.nonzero((w != 0) & ~market.tradable[t])[0]:
+            out.gap_loss[t] += abs(float(w[i])) * e * _gap_fraction(market, t, int(i))
         if fidelity == "L1" and not out.liquidation_unmodelled:
             for i in np.nonzero(w)[0]:
                 side_i = 1 if w[i] > 0 else -1
@@ -134,7 +149,7 @@ def run_event(
     stop_loss_atr: float | None = None,
 ) -> EngineResult:
     T, N = market.price.shape
-    out = EngineResult(np.zeros(T))
+    out = EngineResult(np.zeros(T), gap_loss=np.zeros(T))
     cash = capital
     pos = [_Position() for _ in range(N)]
 
@@ -202,6 +217,8 @@ def run_event(
             if p.q == 0:
                 continue
             out.position_bars += 1
+            if not market.tradable[t, i]:
+                out.gap_loss[t] += abs(p.q) * float(price[i]) * _gap_fraction(market, t, i)
             if fidelity == "L1":
                 for rate, mark in market.funding_events.get((t, i), []):
                     flow = funding_payment(p.q, mark, rate)

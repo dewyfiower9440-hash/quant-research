@@ -111,6 +111,8 @@ def test_reference_no_orders_on_missing_data_the_position_is_held() -> None:
     final = e1 - R * q * 120.0  # exit at t=2
     assert ev.tolist() == pytest.approx([C0, e1, final], rel=1e-12)
     assert vec.tolist() == pytest.approx([C0, e1, final], rel=1e-12)
+    worst = run_event(m, t, COST, capital=C0, fidelity="L1", n_universe=1).gap_loss
+    assert worst.tolist() == pytest.approx([0.0, q * 120.0 * 0.002, 0.0])  # held 100 units at 120, range 0.2%
 
 
 def test_reference_l0_has_no_costs_or_funding() -> None:
@@ -194,3 +196,4 @@ def test_engines_agree_on_every_stateless_scenario(case: tuple[Market, Targets])
     np.testing.assert_allclose(ev.equity, vec.equity, rtol=1e-9, atol=1e-9)
     assert ev.costs == pytest.approx(vec.costs, rel=1e-9, abs=1e-9)
     assert ev.funding == pytest.approx(vec.funding, rel=1e-9, abs=1e-9)
+    np.testing.assert_allclose(ev.gap_loss, vec.gap_loss, rtol=1e-9, atol=1e-9)
