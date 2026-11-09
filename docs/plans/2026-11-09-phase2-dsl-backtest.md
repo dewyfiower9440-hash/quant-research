@@ -70,7 +70,7 @@ task: qr-phase2
   - 스트레스 배수는 ×1, ×2, ×3입니다.
 
 ## 5. 모듈별 구현 순서 (단계)
-- [ ] 1. **ADR-020과 시도 회계**
+- [x] 1. **ADR-020과 시도 회계**
   - 내용: `research/store.py`(research.db, 마이그레이션 0001: experiment, trial, backtest_run), `research/ledger.py`(evaluate 컨텍스트, 실험 키, 남은 running 정리)
   - 테스트(먼저): 평가마다 trial 1건, 예외는 `failed`이고 사유를 기록, 중단(running 잔존)은 다시 열 때 `aborted`, 종료 상태는 변경 불가(트리거), 같은 실험 키 재실행도 trial 1건 추가(재평가도 셈)
 - [ ] 2. **StrategySpec DSL**

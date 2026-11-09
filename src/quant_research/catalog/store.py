@@ -13,10 +13,10 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from importlib import resources
 from pathlib import Path
 from typing import Literal, cast
 
+from quant_research.adapters.sqlite import connect, migrate
 from quant_research.errors import AppError
 
 # Literal per-table row counts for backup snapshots and restore drills (no dynamic SQL); a test keeps
@@ -99,30 +99,15 @@ class GapImport:
     skipped_lines: int
 
 
-def _migrations() -> list[tuple[int, str]]:
-    folder = resources.files("quant_research.catalog") / "migrations"
-    found: list[tuple[int, str]] = []
-    for entry in folder.iterdir():
-        if entry.name.endswith(".sql"):
-            found.append((int(entry.name.split("_", 1)[0]), entry.read_text(encoding="utf-8")))
-    return sorted(found)
-
-
 class Catalog:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
     @classmethod
     def open(cls, path: Path) -> Catalog:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, isolation_level=None)  # explicit transactions below
-        conn.execute("pragma journal_mode=wal")
-        conn.execute("pragma foreign_keys=on")
-        conn.execute("pragma busy_timeout=10000")
-        conn.execute("pragma synchronous=full")
-        catalog = cls(conn)
-        catalog._migrate()
-        return catalog
+        conn = connect(path)
+        migrate(conn, "quant_research.catalog")
+        return cls(conn)
 
     def close(self) -> None:
         self.conn.close()
@@ -142,21 +127,6 @@ class Catalog:
 
     def schema_version(self) -> int:
         return int(self.conn.execute("pragma user_version").fetchone()[0])
-
-    def _migrate(self) -> None:
-        current = self.schema_version()
-        for number, sql in _migrations():
-            if number <= current:
-                continue
-            self.conn.execute("begin immediate")
-            try:
-                for statement in _split_sql(sql):
-                    self.conn.execute(statement)
-                self.conn.execute(f"pragma user_version = {number}")
-                self.conn.execute("commit")
-            except sqlite3.Error:
-                self.conn.execute("rollback")
-                raise
 
     # ------------------------------------------------------------------ instruments
     def add_instrument(self, i: Instrument) -> int:
@@ -294,24 +264,3 @@ class Catalog:
                 )
                 imported += cur.rowcount
         return GapImport(imported, skipped)
-
-
-def _split_sql(sql: str) -> list[str]:
-    """Split a migration into statements; trigger bodies (begin ... end;) stay whole."""
-    statements: list[str] = []
-    buf: list[str] = []
-    in_trigger = False
-    for line in sql.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("--"):
-            continue
-        buf.append(line)
-        lowered = stripped.lower()
-        if lowered.startswith("create trigger"):
-            in_trigger = True
-        if (in_trigger and lowered.endswith("end;")) or (not in_trigger and stripped.endswith(";")):
-            statements.append("\n".join(buf))
-            buf, in_trigger = [], False
-    if buf:
-        statements.append("\n".join(buf))
-    return statements
