@@ -222,24 +222,51 @@ def load_panel(
     last_bar_ns: int,
     config: PanelConfig,
     rule: str | None = "binance.um.pit_top100.v1",
+    datasets: Sequence[str] = (KLINES, MARK, PREMIUM, FUNDING),
 ) -> Panel:
     """Read only the needed lake files, apply the point-in-time rules, assemble. Research role: every
-    decision must be before the seal boundary of every dataset read."""
+    decision must be before the seal boundary of every dataset read. Symbols are processed one at a time
+    (1m frames of one symbol in memory, then its panel rows), which bounds the peak memory."""
+    if KLINES not in datasets:
+        raise ValueError(f"{KLINES} is required (prices)")
     decisions = decision_grid(first_bar_ns, last_bar_ns, config)
     months = months_between(first_bar_ns, last_bar_ns + config.timeframe_ns + DAY_NS)
-    files: list[tuple[str, int]] = []
-    frames: dict[str, pl.DataFrame] = {}
     if decisions.is_empty():
         raise ValueError(f"no decisions between {first_bar_ns} and {last_bar_ns}")
     latest = int(cast(int, decisions.max()))
-    for dataset_id in (KLINES, MARK, PREMIUM, FUNDING):
-        read = load_bulk(data_root, dataset_id, symbols, months)
-        files += read.files
-        if read.frame.height:
-            pit.check_decisions(dataset_id, latest)
-            frames[dataset_id] = pit.rows_visible(read.frame, dataset_id)
-    if KLINES not in frames:
-        raise FileNotFoundError(f"no {KLINES} lake files for {list(symbols)} in {months[0]}..{months[-1]}")
+    members = _members(pit, rule)
+    files: list[tuple[str, int]] = []
+    parts: list[pl.DataFrame] = []
+    funding_parts: list[pl.DataFrame] = []
+    for symbol in symbols:
+        frames: dict[str, pl.DataFrame] = {}
+        for dataset_id in datasets:
+            read = load_bulk(data_root, dataset_id, [symbol], months)
+            files += read.files
+            if read.frame.height:
+                pit.check_decisions(dataset_id, latest)
+                frames[dataset_id] = pit.rows_visible(read.frame, dataset_id)
+        if KLINES not in frames:
+            raise FileNotFoundError(f"no {KLINES} lake files for {symbol} in {months[0]}..{months[-1]}")
+        parts.append(
+            assemble(
+                decisions,
+                [symbol],
+                frames[KLINES],
+                config,
+                mark=frames.get(MARK),
+                premium=frames.get(PREMIUM),
+                funding=frames.get(FUNDING),
+                members=members,
+            )
+        )
+        funding_parts.append(settlements(frames.get(FUNDING), frames.get(MARK)))
+        del frames
+    frame = pl.concat(parts, how="diagonal_relaxed").sort(["decision_ns", "symbol"])
+    return Panel(frame, pl.concat(funding_parts, how="diagonal_relaxed"), files, config)
+
+
+def _members(pit: PointInTime, rule: str | None) -> pl.DataFrame | None:
     members = None
     if rule is not None:
         rows = pit.catalog.conn.execute(
@@ -251,18 +278,7 @@ def load_panel(
             {"symbol": [r[0] for r in rows], "from_ns": [r[1] for r in rows], "to_ns": [r[2] for r in rows]},
             schema={"symbol": pl.String, "from_ns": pl.Int64, "to_ns": pl.Int64},
         )
-    frame = assemble(
-        decisions,
-        symbols,
-        frames[KLINES],
-        config,
-        mark=frames.get(MARK),
-        premium=frames.get(PREMIUM),
-        funding=frames.get(FUNDING),
-        members=members,
-    )
-    funding = settlements(frames.get(FUNDING), frames.get(MARK))
-    return Panel(frame, funding, files, config)
+    return members
 
 
 def settlements(funding: pl.DataFrame | None, mark: pl.DataFrame | None) -> pl.DataFrame:
