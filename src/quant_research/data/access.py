@@ -80,6 +80,17 @@ class PointInTime:
             available = pl.max_horizontal(modelled, received) if has_received else modelled
         return frame.with_columns(available.alias("available_ns"))
 
+    def check_decisions(self, dataset_id: str, latest_decision_ns: int) -> None:
+        """Research may only decide strictly before the dataset's seal boundary (sealed holdout)."""
+        if self.role != "research":
+            return
+        boundary = self.catalog.seal(dataset_id).research_until_ns
+        if latest_decision_ns >= boundary:
+            raise SealViolationError(
+                f"decision at {latest_decision_ns} is not before research_until {boundary} for {dataset_id} "
+                "(sealed holdout)"
+            )
+
     def rows_visible(self, frame: pl.DataFrame, dataset_id: str) -> pl.DataFrame:
         """Rows this role may see at all (research: available strictly before the seal boundary)."""
         out = self.with_available(frame, dataset_id)
@@ -101,13 +112,9 @@ class PointInTime:
             raise AppError("decisions need a 'decision_ns' column")
         if not left.schema["decision_ns"].is_integer():
             raise AppError(f"decision_ns must be integer nanoseconds, got {left.schema['decision_ns']}")
-        if self.role == "research":
-            boundary = self.catalog.seal(dataset_id).research_until_ns
-            latest = left["decision_ns"].cast(pl.Int64).max()  # integer dtype checked above
-            if isinstance(latest, int) and latest >= boundary:
-                raise SealViolationError(
-                    f"decision at {latest} is not before research_until {boundary} for {dataset_id} (sealed holdout)"
-                )
+        latest = left["decision_ns"].cast(pl.Int64).max()  # integer dtype checked above
+        if isinstance(latest, int):
+            self.check_decisions(dataset_id, latest)
         # Stable sort on (available, event); then drop rows whose event is older than one already
         # available (revisions of old buckets), so the backward as-of match is the newest event.
         right = self.rows_visible(frame, dataset_id).sort(["available_ns", "event_ns"], maintain_order=True)

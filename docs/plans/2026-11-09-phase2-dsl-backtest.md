@@ -76,7 +76,7 @@ task: qr-phase2
 - [x] 2. **StrategySpec DSL**
   - 내용: `strategy/spec.py`(pydantic, 파싱 전 크기·중첩 검사), `strategy/ops.py`(연산자 레지스트리: 종류, 인자 수, window, lookback, 필요 데이터셋), `strategy/canonical.py`(정규형·sha256), `strategy/s0.py`(정적 검사)
   - 테스트: hypothesis 문법 property(유효 AST 생성 → 파싱 → 정규형 → 재파싱 동일), 교환 연산 정규형 동치, 상한(깊이 8, 노드 64, window, 상수) 경계값, 무효 거부 사유, S0 거부(현물 숏, 현물 롱숏 횡단면, 예상 비용 상한, 최소 명목가)
-- [ ] 3. **선택적 레이크 읽기와 패널 빌더**
+- [x] 3. **선택적 레이크 읽기와 패널 빌더**
   - 내용: `data/lake.py` `load_bulk(dataset, symbols, months)`(필요한 파일만, 최신 버전), `backtest/panel.py`(1m → timeframe 봉, 봉 available = 구성 1m 행의 available 최대값, 결정 격자 as-of, PIT 유니버스 구성원 마스크, 결측 마스크)
   - 봉인 검사는 PIT API의 공개 메서드로 합니다(access.py에 결정 시점 검사 메서드를 분리하고 join_asof도 이를 사용).
   - 테스트: 봉 available, 봉인 위반 거부, 구성원 마스크, 결측 봉, 읽은 파일 수(필요한 파일만)

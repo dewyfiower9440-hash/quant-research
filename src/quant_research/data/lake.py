@@ -10,7 +10,7 @@ import gzip
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -127,6 +127,32 @@ def _latest_bulk_versions(files: list[Path]) -> list[Path]:
         if key not in latest or version > latest[key].stem.rpartition("-")[2]:
             latest[key] = f
     return sorted(latest.values())
+
+
+def bulk_files(data_root: Path, dataset_id: str, symbols: Iterable[str], months: Iterable[str]) -> list[Path]:
+    """Newest version of each requested (symbol, month) bulk lake file that exists; nothing else is read."""
+    wanted: list[Path] = []
+    for month in sorted(set(months)):
+        folder = data_root / "lake" / dataset_id / month
+        for symbol in sorted(set(symbols)):
+            wanted += sorted(folder.glob(f"{symbol}-{month}-*.parquet"))
+    return _latest_bulk_versions(wanted)
+
+
+def load_bulk(data_root: Path, dataset_id: str, symbols: Iterable[str], months: Iterable[str]) -> BulkRead:
+    """Selected bulk files (research panels): rows plus the identity of what was read (path, size) so a
+    backtest records exactly which file versions it used."""
+    files = bulk_files(data_root, dataset_id, symbols, months)
+    parts = [(f.relative_to(data_root).as_posix(), f.stat().st_size) for f in files]
+    if not files:
+        return BulkRead(pl.DataFrame(), parts)
+    return BulkRead(pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed"), parts)
+
+
+@dataclass(frozen=True, slots=True)
+class BulkRead:
+    frame: pl.DataFrame
+    files: list[tuple[str, int]]
 
 
 def read_lake_file(path: Path) -> pl.DataFrame:
