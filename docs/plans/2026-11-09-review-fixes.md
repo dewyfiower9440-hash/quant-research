@@ -26,7 +26,7 @@ task: qr-review-fixes
 - [x] 3. **(C) 벌크 카탈로그 쓰기** (`bulk/download.py`)
   - 파일별 gap과 `bulk_file` 기록을 하나의 `begin immediate` 트랜잭션으로 묶습니다.
   - 테스트를 함께 작성합니다.
-- [ ] 4. 게이트, 커밋, push, CI를 진행합니다.
+- [x] 4. 게이트, 커밋, push, CI를 진행합니다.
 - [ ] 5. STOP 파일로 수집기를 정상 종료하고 작업 스케줄러로 재시작합니다(1분 주기). 이어서 다음을 확인합니다.
   - restart gap 기록
   - 하트비트 회복
