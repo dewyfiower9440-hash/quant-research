@@ -26,18 +26,18 @@ COLUMNS = [
     "taker_buy_quote_volume",
     "ignore",
 ]
+SCHEMA = pl.Schema(
+    {name: (pl.Int64 if name in ("open_time", "close_time", "count", "ignore") else pl.Float64) for name in COLUMNS}
+)
 _TO_NS = {"s": 1_000_000_000, "ms": 1_000_000, "us": 1_000, "ns": 1}
 MINUTE_NS = 60 * 1_000_000_000
 
 
 def parse_kline_csv(text: str) -> pl.DataFrame:
     body = text.split("\n", 1)[1] if text[:1].isalpha() else text
-    raw = pl.read_csv(
-        io.StringIO(body),
-        has_header=False,
-        new_columns=COLUMNS,
-        schema_overrides={"open_time": pl.Int64, "close_time": pl.Int64},
-    )
+    # Explicit schema: inference from the first rows read `0` as an integer and then failed on
+    # `0.00000000` further down (F-008).
+    raw = pl.read_csv(io.StringIO(body), has_header=False, schema=SCHEMA)
     if raw.height == 0:
         return raw
     scale = _TO_NS[detect_epoch_unit(int(raw["open_time"][0]))]

@@ -164,3 +164,32 @@ def test_reader_returns_only_the_latest_version_of_a_regenerated_file(tmp_path: 
     assert load_dataset(tmp_path, "binance.um.bulk.klines_1m")["close"].to_list() == [7182.45]
     assert len(list((tmp_path / "lake").rglob("*.parquet"))) == 2  # history kept on disk
     cat.close()
+
+
+def test_parse_does_not_infer_integer_columns_from_early_rows() -> None:
+    """F-008: mark/index files start with quote_volume `0` and later contain `0.00000000`."""
+    t = 1_790_812_800_000
+    # Polars infers types from the first 100 rows by default: keep the decimal after that window.
+    rows = "".join(f"{t + i * MIN_MS},1,1,1,1,0,{t + i * MIN_MS + 59999},0,1,0,0,0\n" for i in range(150))
+    rows += f"{t + 150 * MIN_MS},1,1,1,1,0,{t + 150 * MIN_MS + 59999},0.00000000,1,0,0,0\n"
+    frame = parse_kline_csv(rows)
+    assert frame["quote_volume"].to_list() == [0.0] * 151
+
+
+def test_a_corrupt_csv_fails_only_its_own_file(tmp_path: Path) -> None:
+    cat = Catalog.open(tmp_path / "meta" / "catalog.db")
+    files = {
+        **_files(HEADER + "1577836800000,not,a,number\n", month="2020-01"),  # malformed data row
+        **_files(HEADER, month="2020-03"),  # header only: an empty monthly file must not count as done
+        **_files(NO_HEADER, month="2020-02"),
+    }
+    done = download_targets(
+        [_target("2020-01"), _target("2020-03"), _target("2020-02")],
+        data_root=tmp_path,
+        catalog=cat,
+        client=httpx.Client(transport=_server(files)),
+        pause_s=0,
+    )
+    assert done.downloaded == 1 and len(done.failed) == 2
+    assert any("no rows" in why for _url, why in done.failed)
+    cat.close()

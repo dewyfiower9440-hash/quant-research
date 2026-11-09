@@ -13,7 +13,7 @@
 | 5 | 카탈로그 스키마 | DONE (CI run 42531815458) | 2026-11-09 |
 | 6 | as_of / join_asof API | DONE (CI run 42536249442, F-007로 재확정) | 2026-11-09 |
 | 7 | 컴팩션과 정규화 | DONE (CI run 42536249442) | 2026-11-09 |
-| 8 | Binance 벌크 T1 | TODO | |
+| 8 | Binance 벌크 T1 | IN_PROGRESS (전체 다운로드 실행 중) | 2026-11-09 |
 | 9 | Upbit 분봉 백필 | TODO | |
 | 10 | 모니터와 작업 스케줄러 | 스케줄러 부분 완료(재부팅 검증 대기), 모니터 TODO | 2026-11-08 |
 | 11 | 7일 연속 운영 검증 | TODO | |
@@ -191,3 +191,22 @@
   - OI 456,285행. 재수정 버전은 아직 0건(ADR-007 가정은 추후 재평가)
 - **배포:** 운영 문서의 정지 절차로 수집기를 재배포했습니다(정상 종료 19초, 이후 정상).
 - **다음 작업:** 8. Binance 벌크 T1
+
+## 8. Binance 벌크 T1 (IN_PROGRESS)
+- **완료 조건:** 체크섬 100%, 대조 샘플이 REST와 일치
+- **구현 파일**
+  - `bulk/universe.py`(시점별 상위 K, 순수 함수)
+  - `tools/bulk_universe.py`(유니버스와 정확한 용량 산출)
+  - `bulk/klines.py`(CSV 파싱, 1분 격자 QA)
+  - `bulk/download.py`(메모리 안에서 체크섬 검증, 불변 Parquet, `bulk_file` 기록, 재생성 버전)
+  - migration `0003_bulk.sql`
+  - `tools/bulk_download.py`(재개 가능, 온도 차단 적용)
+  - catalog bootstrap(ADR-013)
+- **테스트:** `tests/bulk/`(18개)
+- **결과**
+  - 유니버스: 632개 심볼(253초)
+  - 파일럿: BTCUSDT 4종 × 3개월, 12개 파일, 519,840행, 12초, 실패 0, gap 4(2026-10 파일 불완전)
+- **실행 중:** `uv run python tools/bulk_download.py --universe C:/dev/qr-data/bulk/universe-20261109.json --pause 0.2`
+  - 로그: `C:/dev/qr-data/logs/bulk-download-*.log`
+  - 중단되면 같은 명령으로 재개합니다(`bulk_file` 기준으로 받은 파일은 건너뜀).
+- **남은 일:** 전체 완료 후 체크섬 실패 0 확인, REST 대조 샘플 검증, 용량 실측

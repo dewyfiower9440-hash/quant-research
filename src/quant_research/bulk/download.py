@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import polars as pl
 
 from quant_research.bulk.klines import missing_minutes, parse_kline_csv
 from quant_research.catalog.store import Catalog
@@ -87,7 +88,10 @@ def download_targets(
                 raise ValueError(f"checksum mismatch: {digest} != {expected}")
             with zipfile.ZipFile(io.BytesIO(blob.content)) as z:
                 frame = parse_kline_csv(z.read(z.namelist()[0]).decode("utf-8"))
-        except (httpx.HTTPError, ValueError, zipfile.BadZipFile) as e:
+            if frame.height == 0:
+                raise ValueError("no rows in bulk file (empty month is not accepted as done)")
+        except (httpx.HTTPError, ValueError, zipfile.BadZipFile, pl.exceptions.PolarsError) as e:
+            # one bad file must not stop a multi-hour run (F-008); it is reported and retried next run
             result.failed.append((t.url, f"{type(e).__name__}: {e}"))
             continue
         version = t.last_modified.replace(":", "").replace("-", "").replace(".", "")

@@ -93,3 +93,20 @@
   - 다음부터 단계를 완료할 때 `git status --porcelain --ignored`로 무시된 소스 파일이 있는지 확인합니다.
 - **재검증:** 수정 커밋의 CI run(아래 test-results)
 - **상태:** 해결(CI run 42536249442, 169 passed)
+
+## F-008 (2026-11-09, 작업 8) 벌크 CSV 타입 추론 실패로 전체 다운로드 중단
+- **증상:** 전체 다운로드가 14초 만에 중단됐습니다(파일 25개 처리 후). 오류: `polars.exceptions.ComputeError: could not parse '0.00000000' as dtype 'i64' at column 'quote_volume'`
+- **원인**
+  - (1) Polars가 앞쪽 100행만 보고 열 타입을 추론합니다. mark·index 파일은 `quote_volume` 열이 앞쪽에서 `0`이라 정수로 추론됐고, 뒤에서 `0.00000000`이 나와 실패했습니다.
+  - (2) `PolarsError`가 파일 단위 예외 처리(`httpx.HTTPError`, `ValueError`, `BadZipFile`) 범위 밖이라, 파일 하나의 실패가 실행 전체를 멈췄습니다.
+- **재현 과정**
+  - 처음 쓴 테스트는 4행짜리라 추론 범위 안에 실수 값이 있었고, 그래서 재현되지 않았습니다.
+  - 150행으로 바꾼 테스트에서 운영 환경과 같은 오류를 재현했습니다.
+- **추가로 발견한 결함:** 헤더만 있고 행이 0개인 월간 파일이 "다운로드 성공 + 한 달 전체 gap"으로 기록됐습니다.
+- **수정**
+  - 12개 열에 명시적 스키마를 적용합니다.
+  - `PolarsError`는 파일 단위로 격리해 실패로 기록하고, 다음 실행에서 다시 시도합니다.
+  - 행이 0개인 파일은 실패로 처리합니다.
+- **회귀 테스트:** `test_parse_does_not_infer_integer_columns_from_early_rows`, `test_a_corrupt_csv_fails_only_its_own_file`(잘못된 행, 헤더만 있는 파일, 정상 파일)
+- **재검증:** 게이트 통과(189 passed). 다운로드를 다시 실행해 이어서 받습니다.
+- **상태:** 해결(전체 실행 결과는 progress에 기록)
