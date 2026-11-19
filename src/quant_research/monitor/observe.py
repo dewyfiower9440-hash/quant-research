@@ -24,6 +24,7 @@ from quant_research.monitor.incidents import reconcile
 
 Notifier = Callable[[list[Finding]], None]
 WATCHED_HEARTBEATS = ("ws",)
+OPTIONAL_HEARTBEATS = ("paper",)  # watched only once the process has ever written a heartbeat (Phase 6)
 
 
 def _heartbeat_ns(path: Path) -> int | None:
@@ -55,7 +56,14 @@ def observe(data_root: Path, catalog: Catalog, clock: ClockReference, *, since_n
     ]
     return Observation(
         now_ns=now_ns,
-        heartbeats={name: _heartbeat_ns(run / f"{name}.heartbeat.json") for name in WATCHED_HEARTBEATS},
+        heartbeats={
+            **{name: _heartbeat_ns(run / f"{name}.heartbeat.json") for name in WATCHED_HEARTBEATS},
+            **{
+                name: _heartbeat_ns(run / f"{name}.heartbeat.json")
+                for name in OPTIONAL_HEARTBEATS
+                if (run / f"{name}.heartbeat.json").exists()
+            },
+        },
         free_disk=shutil.disk_usage(data_root).free,
         available_ram=ram,
         clock_offset_ms=clock.offset_ms,
