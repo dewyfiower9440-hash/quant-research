@@ -18,7 +18,8 @@ Stack: Python (uv)
 - ci: required
 
 ## Project map
-- Design (v2.1, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`
+- Design (v2.1 base + v2.2 delta, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`, `docs/plans/2026-11-20-autonomous-quant-research-v2.2.md` (ADR-040..048)
+- Current execution plan: `docs/plans/2026-11-20-v22-rebuild.md`
 - Execution plan (in progress, approved Phase 0-1 only): `docs/plans/2026-11-08-phase0-1-build.md`
 - Phase 2 plan (DSL, two engines, cost model, trial accounting): `docs/plans/2026-11-09-phase2-dsl-backtest.md`;
   code in `strategy/` (spec, ops, canonical, s0, compile, templates), `backtest/` (panel, costs, market, engines,
