@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: qr-phase4-search
 ---
 
@@ -113,3 +113,4 @@ task: qr-phase4-search
 - 2026-11-10 단계 4: `search/cost_model.py`(단계별 OLS `a + b·rows·ops`, 메모리 `c + d·rows`, 실행 전 메모리 거부, 시간 예산에 맞춘 행 수 축소, 0.5~1.5 대역 비율), 테스트 7개. 합성(로그정규 잡음 σ=0.2) 보류 배치 200개 중 90% 이상이 대역 안. S1 trial metrics에 `rows`, `ops`를 기록해 실측 적합 입력으로 씁니다. **실데이터 완료 기준 측정은 단계 10**입니다(이 단계의 합성 검증은 완료 판정이 아님).
 - 2026-11-19 단계 5(2026-11-11 착수분을 이어서 마무리): `search/promotion.py`(순수: `select_for_s2` 상위 k + 나머지에서 시드 고정 `promote_rate` 무작위 승격, `rank_corr` Spearman, `Selection.kind`), `search/s2_stage.py`(`run_s2`: 승격 후보 1개 = S2 trial 1건, metrics에 `promotion`(top_k/promoted_random)·`promotion_seed`·`promotion_rate`·`s1_trial_id`·`s1_score` 태그; `fidelity_by_family`: spec_hash별 최신 S1·S3 done trial을 짝지어 계열별 순위상관), `backtest/run.py`의 `run_backtest(tags=...)`(trial metrics에 병합, 거부된 trial에도 남음). 테스트 9개(승격률 5% 이항 95% 구간, 시드 결정성, 회계 1:1, 거부 trial 태그, S3 재평가 시 최신 trial 짝). 계획과의 차이: 순위상관은 테이블에 저장하지 않고 `fidelity_by_family`가 trial에서 계산해 단계 10 측정표에 적습니다(저장 위치가 계획에 없었음). 사이에 F-017(WS 수집기 heartbeat) 수정이 끼어 커밋 b453600으로 먼저 나갔습니다.
 - 2026-11-19 단계 6: 사용자 승인으로 `optuna==5.1.0` 고정 추가(uv.lock; 함께 들어온 alembic·sqlalchemy·colorlog·pyyaml·tqdm). `search/optimizers.py`: `Searcher` 프로토콜(ask/tell), `RandomSearcher`(축별 균등, 시드), `TpeSearcher`(Optuna `ask(fixed_distributions)`·`tell`, 축을 Int/Float(step)/Categorical 분포로, 거부는 PRUNED, 두 번 tell은 KeyError), `propose`(ask → `generate`와 같은 Candidate 검사). Optuna 내부 평가 수 = S0 trial 수(테스트: 25 ask → S0 trial 25 → tell 25 → internal_evaluations 25). `search/compare.py`: 합성 지형(정규화 좌표의 가우시안 범프 + 시드 잡음, 제약 위반은 None), 비용 모델 `a+b·rows·ops`로 같은 `budget_s`에서 ask/tell, 회수율(최적치−tolerance 이상) 보고. 테스트 10개. 계획과의 차이: FWER·N_eff 증가량 비교는 단계 7의 다중검정 모듈이 있어야 하므로 그때 compare에 붙입니다. 어느 쪽이 낫다는 주장은 하지 않고 두 값을 보고만 합니다(실측은 단계 10).
+- 2026-11-19 마감: 단계 7~11은 저장소 이동으로 승인이 끊겨 `docs/plans/2026-11-19-phase4-7-build.md`(단계 1~6)가 흡수해 완료했다(N_eff·DSR 0bcd293, TS 7822f6e, MAP-Elites ff8709a, 드라이버·Director space 3bd0651, 실데이터 측정·문서 6c2b24c). 완료 기준 2개는 r4 배치에서 충족(회계 누락 0, 비용 대역 비율 0.9 경계) — `docs/measurements/phase4-search-batch.md`. 이 계획의 7~11 체크박스는 그 계획의 기록으로 대신하고 여기서는 status만 done으로 닫는다.

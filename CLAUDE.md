@@ -66,3 +66,8 @@ Stack: Python (uv)
 - pyright strict reports `np.sum` / `np.where` results as Unknown → use `np.dot`, `np.count_nonzero` and wrap
   `np.where` in `np.asarray(..., dtype=np.float64)` with an `F64` annotation (2026-11-10)
 - The gate's pyright only covers `src` and `tests` (`[tool.pyright] include`); `tools/*.py` are not type-checked by the gate → run `uv run pyright tools/<file>.py` for every tool you touch (2026-11-09)
+- `! powershell -File C:\dev\...` typed by the user runs in Git Bash, which eats the backslashes (`C:devauto...`) → hand the user forward-slash paths (`C:/dev/auto/code/tools/x.ps1`) (2026-11-19)
+- `Stop-ScheduledTask qr-collector-supervisor` alone is undone within seconds by the task's restart settings → `Disable-ScheduledTask` first; re-registering with `-Force` re-enables it (2026-11-19)
+- A 0-byte `run/ws.heartbeat.json` left by a crash made every ws restart die for 7 days with only one toast (F-017) → after any collector redeploy check `logs/supervisor.log` for repeating `child_exited` (2026-11-19)
+- Piping the gate's pytest through `| tail` hides its exit status from the verification hook ("다른 테스트 명령만 실행됨") → run the declared gate verbatim, unpiped, before every commit (2026-11-19)
+- ONC clustering (`search.multiplicity.onc_clusters`) over ~300 trials took tens of minutes with the python-loop silhouette → it is vectorised and capped at k <= 30; pass `max_k=None` only for small groups (2026-11-19)

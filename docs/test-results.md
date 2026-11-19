@@ -51,3 +51,4 @@
 | 2026-11-19 | Phase 4-7~9 | 0bcd293, 7822f6e, ff8709a | 선언 게이트(N_eff·DSR / TS bandit / MAP-Elites) | 638·644·651 passed | run 44491967830 / 44493023622 / (ff8709a: 측정표 §이력) success |
 | 2026-11-19 | Phase 4-10a | 3bd0651 | 선언 게이트(드라이버·Director space 모드) | 655 passed, 94.15% | success (push 후 확인) |
 | 2026-11-19 | Phase 5·6·7 | bd2efd8, 17050a4, 9da1aab | 선언 게이트(validator / paper·risk / live) | 705 passed, 92.91% | run 44512866500 success (head 9da1aab) |
+| 2026-11-19 | Phase 4 마감 + 문서 | 6c2b24c | 선언 게이트(F-018, ONC 벡터화, run_search, 측정표) | 705 passed, 92.91% | run 44514181103 success |
