@@ -318,6 +318,25 @@ def test_health_file_is_written(tmp_path: Path) -> None:
     assert body["name"] == "ws" and body["ok"] == {"x": 1}
 
 
+@pytest.mark.parametrize("stale", ["", '{"at_ns": 17', "[]", '{"at_ns": "x"}'])
+def test_previous_beat_tolerates_an_empty_or_corrupt_heartbeat_file(tmp_path: Path, stale: str) -> None:
+    # F-017: a 0-byte ws.heartbeat.json left by a crash made every restart die in previous_beat_ns (7 days).
+    h = Health("ws", tmp_path / "run" / "ws.heartbeat.json")
+    h.path.parent.mkdir(parents=True)
+    h.path.write_text(stale, encoding="utf-8")
+    assert h.previous_beat_ns() is None
+    h.write()  # the next run then starts normally and overwrites the stale file
+    assert h.previous_beat_ns() == json.loads(h.path.read_text(encoding="utf-8"))["at_ns"]
+
+
+def test_health_write_goes_through_a_temp_file_and_leaves_none_behind(tmp_path: Path) -> None:
+    h = Health("ws", tmp_path / "run" / "ws.heartbeat.json")
+    h.write()
+    h.write()
+    assert [p.name for p in h.path.parent.iterdir()] == ["ws.heartbeat.json"]
+    assert json.loads(h.path.read_text(encoding="utf-8"))["name"] == "ws"
+
+
 def test_next_backoff_doubles_to_cap_and_resets_after_healthy_run() -> None:
     assert next_backoff(5.0, 10) == 10.0
     assert next_backoff(200.0, 10) == 300.0

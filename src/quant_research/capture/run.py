@@ -89,11 +89,20 @@ class Health:
         """`at_ns` of the heartbeat left by the previous run of this process, if any."""
         if not self.path.exists():
             return None
-        body = cast(dict[str, Any], json.loads(self.path.read_text(encoding="utf-8")))
-        at = body.get("at_ns")
+        try:
+            body = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # F-017: a crash mid-write left a 0-byte file and every restart died here for 7 days.
+            log.warning("heartbeat.unreadable", path=str(self.path), error=str(e))
+            return None
+        if not isinstance(body, dict):
+            log.warning("heartbeat.unreadable", path=str(self.path), error="not a JSON object")
+            return None
+        at = cast(dict[str, Any], body).get("at_ns")
         return at if isinstance(at, int) else None
 
     def write(self) -> None:
+        """Write through a temp file and rename, so a crash never leaves a truncated heartbeat (F-017)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         body = {
             "name": self.name,
@@ -104,7 +113,13 @@ class Health:
             "errors": self.errors,
             "last_error": self.last_error,
         }
-        self.path.write_text(json.dumps(body), encoding="utf-8")
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(body), encoding="utf-8")
+        try:
+            os.replace(tmp, self.path)
+        except PermissionError:  # Windows: a reader (monitor) holds the file open for a moment
+            self.path.write_text(json.dumps(body), encoding="utf-8")
+            tmp.unlink(missing_ok=True)
 
     def fail(self, job: str, error: Exception) -> str:
         self.errors[job] = self.errors.get(job, 0) + 1

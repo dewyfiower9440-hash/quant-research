@@ -252,3 +252,15 @@
   - 로컬 pydantic 검증이 최종 권위입니다. 자르거나 값을 바꿔 통과시키는 처리는 없습니다.
 - **테스트(먼저 실패를 확인함):** 실제 응답 6건 회귀, 600/601자 경계, 숫자가 든 DSL 이름 수락, 존재하지 않는 이름과 패턴 위반 거부, 전송 스키마의 제약 설명, 제약 안내 내용, 피드백 후 재생성 성공(가짜 LLM `too_long`, `unknown_feature` 시나리오).
 - **상태:** 해결(2026-11-10). 실제 LLM 재검증 run `cli-s7-on-posterior-20261110-r2`에서 LLM 호출 9/9가 1차 시도에 스키마를 통과했고, 3/3 사이클이 BACKTEST까지 진행했습니다(trial 9건, 중복 0). `docs/measurements/phase3-cli-3cycles-r2.md`.
+
+## F-017 (2026-11-19, 운영) WS 수집기가 7일 동안 크래시 루프: 0바이트 heartbeat 파일을 시작 시 파싱 실패
+- **증상:** `supervisor.log`에 `ws` child_exited code=1이 2026-11-12 173회, 11-13~11-18 매일 283회(약 5분 주기 재시작), 11-19 85회. `ws.log` 마지막 traceback: `run.py:92 previous_beat_ns` → `json.loads("")` → `JSONDecodeError: Expecting value`. catalog `incident`에 `heartbeat:ws` critical이 2026-11-12 09:42Z부터 열려 있고, 모니터 토스트는 그때 1회만 갔습니다(`run/alerts.log`).
+- **발견:** 2026-11-19 세션 시작 점검(`ws.heartbeat.json` 수정 시각 11-12 18:30 KST, 크기 0바이트).
+- **재현:** `tests/capture/test_collectors.py::test_previous_beat_tolerates_an_empty_or_corrupt_heartbeat_file`(빈 파일, 잘린 JSON, 객체가 아닌 JSON, 정수가 아닌 at_ns). 수정 전 코드로 3/4 실패(JSONDecodeError 2, AttributeError 1)를 확인했습니다.
+- **근본 원인**
+  1. `Health.write`가 `write_text`로 제자리 덮어쓰기를 했습니다. 11-12 그 순간 프로세스가 죽거나 전원이 끊겨 0바이트 파일이 남았습니다(같은 시각에 book_ticker 3,407분 공백·clock offset 642ms 경보가 있어 PC 정지로 추정, **미확인**). 설계 §3.1의 "임시 파일에 쓴 뒤 교체" 원칙이 heartbeat에는 적용되지 않았습니다.
+  2. `Health.previous_beat_ns`가 손상 파일을 예외로 두어, supervisor가 재시작할 때마다 같은 자리에서 다시 죽었습니다. 모니터(`monitor/checks.py`)는 잘린 heartbeat를 허용하지만 수집기 쪽은 허용하지 않았습니다.
+  3. 모니터는 열린 critical incident를 재경보하지 않아 7일 동안 사람이 알지 못했습니다(OPS-004와 같은 부류, 별도 결정).
+- **수정(이 커밋):** `previous_beat_ns`는 빈·손상·비객체 파일을 `heartbeat.unreadable` 경고와 함께 `None`으로 처리합니다(첫 실행과 같이 시작 미상 restart gap 기록). `write`는 `.tmp`에 쓰고 `os.replace`로 교체하며, Windows에서 읽는 쪽(모니터)이 잠깐 열어 PermissionError가 나면 그 1회만 제자리 쓰기로 대체합니다.
+- **영향:** 강제청산 WS(`binance.um.force_order`, 공개 이력 없음)는 2026-11-12 09:42Z부터 재가동 시각까지 **영구 손실**입니다. REST 수집기(bookTicker, Upbit 호가·체결, 지표)는 같은 기간 동작했습니다(heartbeat `ok` 카운터 기준, 커버리지 수치 대조는 미실시).
+- **상태:** 코드 수정 완료(테스트 먼저). 운영 재가동은 저장소 이동 계획 단계 5(예약 작업 재등록, 사용자 실행) 뒤에 확인합니다. 재경보 주기는 OPS-004 해결 계획에 묶어 별도 결정합니다.
