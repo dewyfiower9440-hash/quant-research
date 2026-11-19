@@ -23,7 +23,7 @@ from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger, TrialOrigin, experiment_key
 from quant_research.search.archive import Archive, Descriptor, Elite
 from quant_research.search.bandit import FamilyBandit, cost_normalised_reward, deflated_performance
-from quant_research.search.cost_model import LinearCost, LinearMemory, guard_memory, plan_rows
+from quant_research.search.cost_model import LinearCost, LinearMemory, guard_memory, plan_rows, spec_ops
 from quant_research.search.multiplicity import expected_max_sr, sr_variance
 from quant_research.search.optimizers import Searcher, propose
 from quant_research.search.promotion import Selection, select_for_s2
@@ -204,7 +204,12 @@ def run_family_search(
             if prior is not None:
                 s3.append(outcome_from_trial(ledger, prior))
                 continue
-            tags = {"point": point_json(s.source.candidate.point), "s2_trial_id": s.outcome.trial_id}
+            tags: dict[str, object] = {
+                "point": point_json(s.source.candidate.point),
+                "s2_trial_id": s.outcome.trial_id,
+                "rows": confirmation.frame.height,
+                "ops": spec_ops(spec),
+            }
             s3.append(
                 run_backtest(
                     spec, confirmation, catalog, ledger, s3cfg, stage="S3", fold=fold, origin=origin, tags=tags

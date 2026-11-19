@@ -201,3 +201,25 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - **해결 계획:** 사용자가 `claude auth logout`, `claude auth login`으로 다시 로그인한 뒤 `claude auth status`로 확인합니다.
   - 인증 토큰은 읽거나 추출하지 않습니다.
 - **완료 판정 기준:** CLI가 보고하는 플랜이 사용자 계정 플랜과 같습니다. 그렇지 않으면 공식 지원 채널에 문의한 결과를 기록합니다.
+
+### OPS-009 WS 수집기 7일 크래시 루프를 모니터가 1회만 알림 (2026-11-19, F-017)
+- **상태:** 코드 수정 완료(F-017), 재경보 정책은 OPEN
+- **증상:** 2026-11-12 09:42Z `heartbeat:ws` critical incident가 열리고 토스트 1회 뒤 재경보가 없어 7일간 아무도 몰랐습니다. supervisor는 5분마다 재시작했고 ws는 빈 heartbeat 파일 때문에 시작 직후 죽었습니다.
+- **해결 계획:** (1) 열린 critical incident는 N시간(초깃값 6시간)마다 다시 알린다(`monitor/incidents.py`), (2) supervisor가 같은 자식의 연속 재시작 횟수(초깃값 10회)를 넘으면 별도 incident를 연다. OPS-004(hang 감지)와 함께 작은 계획으로 구현합니다.
+- **회피책(지금):** 수집기 재배포 뒤 `C:\dev\qr-data\run\*.heartbeat.json`의 갱신 시각과 `logs\supervisor.log`의 `child_exited` 빈도를 하루 1회 눈으로 확인합니다.
+
+## 14. Phase 4 탐색 배치 (2026-11-19)
+- 실행: `uv run python tools/run_search.py --s1-count 200 --top-k 10 --promote-rate 0.05 --searchers tpe,random --seed 7 --run-id <id>` (저장소 루트, 작업자 1, BelowNormal, `POLARS_MAX_THREADS=2`). 수집기 rest heartbeat가 120초보다 오래되면 배치를 거부합니다. research.lock을 잡으므로 Director 실행과 동시에 돌리지 않습니다.
+- 산출: `docs/measurements/phase4-search-batch.md`(비용 예측/실측 비율, 회계, N_eff·DSR, 순위상관, Random 대 TPE). trial은 운영 research.db에 기록되며 fold `<run-id>:<family>:<searcher>`로 구분합니다.
+- 주의: 합성 비교(`--compare-budget-s`)는 TPE ask 비용 때문에 예산보다 훨씬 오래 걸릴 수 있습니다(20초 예산이 30분 이상). 기본값 3초, 0이면 생략.
+
+## 15. Phase 5 validator와 귀무 파이프라인 (2026-11-19)
+- validator.db(`C:\dev\qr-data\meta\validator.db`)는 validator 프로세스만 씁니다. 아직 상시 프로세스는 없고 라이브러리·도구만 있습니다. research는 `validation_request`(research.db)에 제출하고 `ack`를 읽기 전용으로 폴링합니다.
+- 귀무 검증: `uv run python tools/run_null_pipeline.py --reps 100` → `docs/measurements/phase5-null-pipeline.md`. 반복마다 임시 폴더의 DB를 쓰고 지우므로 운영 DB에 trial이 남지 않습니다. research.lock을 잡지 않지만 CPU를 오래 쓰므로 탐색 배치와 동시에 돌리지 않습니다.
+
+## 16. Phase 6 모의매매 프로세스 (2026-11-19)
+- 등록(**사용자 실행**, 자동 모드 분류기가 거부): `! powershell -NoProfile -File C:/dev/auto/code/tools/register_paper_task.ps1` (Git Bash의 `!`는 백슬래시를 지우므로 슬래시로 적습니다). 작업 `qr-paper`, 10분 간격 tick, 로그 `C:\dev\qr-data\logs\paper.log`, heartbeat `run\paper.heartbeat.json`, 잠금 `run\paper.lock`.
+- 정지: `C:\dev\qr-data\run\STOP` 파일(수집기와 공유). 수집기 rest heartbeat가 120초보다 오래되면 그 tick은 건너뜁니다.
+- 정책: `C:\dev\qr-data\paper\policy.json`(`risk.policy.policy_bytes` 형식) + `policy.sig`(hex) + `policy.key`(HMAC 비밀, 모의매매 전용). 정책이 없거나 만료되면 모든 주문을 거부하고 tick 요약에 `policy` 사유를 남깁니다.
+- 대상 전략: validator.db에서 verdict 통과 + 수명주기 `Validated`/`Paper`인 spec만. 현재 그런 전략은 **0개**이므로 프로세스는 heartbeat만 쓰며 주문을 내지 않습니다.
+- 30일 운영 판정은 `ledger.db`의 `verify_chain`·`reconcile`과 `paper/divergence.py`의 분해 보고로 하며, 시작 시점은 사용자가 작업을 등록한 날입니다.

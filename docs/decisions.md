@@ -340,3 +340,61 @@
 - **결정:** (1). 이력·원격·미커밋 변경을 그대로 보존하고, 게이트와 hook 규약(`docs/plans`)이 그대로 동작하며, 원본이 하나다. (2)는 게이트 경로·CLAUDE.md 위치·hook 규약을 함께 바꾸는 큰 작업이고, (3)은 두 벌이 생겨 어느 쪽이 진짜인지 흐려진다.
 - **영향:** 예약 작업 2개(`qr-collector-supervisor`, `qr-bulk-download`)를 새 경로로 재등록(사용자 실행). `tools/register_*.ps1`의 `$Project`·`$Script` 기본값과 `docs/operations.md`의 명령 경로가 `C:\dev\auto\code`로 바뀜. 데이터 경로 `C:\dev\qr-data`는 그대로. 새 세션은 `C:\dev\auto\code`에서 시작. 계획: `docs/plans/2026-11-19-move-to-auto.md`.
 - **주의:** `C:\dev\auto\plan`·`report`는 junction이라 `rm -rf`로 지우면 원본 `docs`가 지워진다. 링크만 지울 때는 `rmdir`.
+
+## ADR-027 (2026-11-19, 채택, 초깃값) Phase 4 탐색 공간: 사전 등록 이산 범위 + 구조 축
+- **맥락:** Phase 3의 27점 고정 격자는 1~2사이클에 소진됐다(`docs/plans/2026-11-10-phase4-search.md` 한계 분석).
+- **결정:** `strategy/space.py`에 계열별 파라미터 축(`IntAxis`/`FloatAxis`, 사전 등록 범위·간격)과 공통 구조 축(`side`, `smooth`, `universe_n`, `sizing`, `time_stop`)을 둔다. 제약(fast<slow 등)과 S0 위반은 버리지 않고 거부 후보로 돌려 trial로 기록한다. 공간 크기(제약 후): trend 200,160 · mean_reversion 120,960 · momentum 115,200 · funding_basis 69,120 · volatility 1,344,720.
+- **근거:** 사전 등록 성질(다중성 회계)을 유지하면서 해상도·구조 다양성을 확보한다. 범위·간격은 초깃값이며 실측(소진 속도, S1 통과율)으로만 바꾼다.
+
+## ADR-028 (2026-11-19, 채택) S1 대리 지표·S2 승격·충실도 편향 측정
+- **S1:** 횡단면 Spearman IC(HAC t)와 이벤트 조건 수익률(`event_mean_net`: 포지션당 왕복 비용 1회 차감). S2 승격 순위는 `event_hac_t`(순수익 기준). 펀딩 포함판은 펀딩 미적재(OPS-006)라 미구현(`funding_not_modelled` 표시).
+- **승격:** 상위 k + 나머지에서 시드 고정 5% 무작위(`promoted_random`). 승격 종류·시드·S1 trial을 S2 trial metrics에 태그. S1 대 S3 순위상관은 `fidelity_by_family`가 trial에서 계산해 측정표에 적는다(별도 테이블 없음).
+- **S2 엔진:** 시간 손절·ATR 손절이 있는 spec은 벡터 엔진이 거부하므로(ADR-020) S2에서 이벤트 엔진으로 자동 전환한다(`engine_used` 태그). 1차 실데이터 배치에서 S2 178건 중 127건이 이 거부였다(F-018).
+
+## ADR-029 (2026-11-19, 사용자 승인) Random 기준선과 TPE(optuna==5.1.0)
+- **결정:** `search/optimizers.py`의 `Searcher` 프로토콜(ask/tell) 아래 `RandomSearcher`와 `TpeSearcher`(Optuna ask-and-tell, 축을 Int/Float(step)/Categorical 분포로). 모든 제안은 `propose`→S0→S1을 거쳐 trial이 되고 정확히 1회 tell된다(거부·중복은 PRUNED). Optuna 내부 평가 수 = 제안 수 = S0 trial 수를 테스트로 고정.
+- **근거:** 설계 §7의 TPE. 사용자가 2026-11-19 승인. 버전은 uv.lock에 고정.
+- **비교:** 합성 지형(`search/compare.py`)에서 같은 비용 예산으로 회수율과 distinct 후보 수를 보고만 한다. 어느 쪽이 낫다는 주장은 하지 않는다(실측은 Phase 5 귀무 파이프라인의 3단 비교에서).
+
+## ADR-030 (2026-11-19, 채택) N_eff는 ONC 하나, DSR은 두 번
+- **결정:** `search/multiplicity.py`. N_eff = S2+ `pnl_daily` 상관의 ONC(k-means + 실루엣 품질, numpy 구현) 군집 수. 고유값 기반 추정은 쓰지 않는다. DSR은 N_eff 기준과 N_total(S1 포함) 기준으로 두 번 보고하고 승인은 보수적인 쪽. 모든 Sharpe 수치는 기간 단위(V[SR]은 Mertens 식, E[max]는 Bailey-LdP+오일러 보정, 95% 분위는 정확식; MC ±1% 테스트).
+- **scipy 없음:** Φ⁻¹은 stdlib `statistics.NormalDist`로 충분해 scipy를 추가하지 않았다.
+- **`min_sr`:** 참조 표(N_eff × T_split)를 보고용으로 둔다. 채택 기준은 고정 숫자가 아니라 사례별 DSR이다(§8).
+
+## ADR-031 (2026-11-19, 채택, 초깃값) 계열별 Thompson Sampling: 할인·비용 정규화·최소 예산
+- **결정:** `search/bandit.py`. 정규-정규 사후분포(사전 mu0=0, k0=1, sigma=1), 매 갱신 모든 팔 gamma=0.95 할인, 최소 예산 `min_pulls`. 보상 = (검증 분할 SR − 귀무 E[max|배치 S2 수]) 바닥 0 / 배치 실측 cost_s. 표본 내 통과율은 보상이 아니다. `director/policy.py`는 bandit이 주어지면 원인 코드 규칙(stay/leave) 뒤에 bandit이 고르고, `uniform` 스위치는 유지.
+- **한계:** Director 통합에서 "검증 분할"은 확인 구간(2025-05~06)이다. 선별 구간을 더 나누기엔 데이터가 6개월이라 짧다. 데이터가 늘면 선별 구간 안 분할로 바꾼다.
+
+## ADR-032 (2026-11-19, 채택, 초깃값) MAP-Elites 아카이브
+- **결정:** `search/archive.py`. 행동 기술자 = 회전율(bin 2,10,30,100), 평균 보유시간 h(2,8,24,72,168), 순노출(−0.5,−0.1,0.1,0.5) → 150셀. 셀당 elite 1, 수축 점수 n/(n+k0)(k0=30, 아카이브 평균 사전)로 결정적 교체(동점은 trial id 작은 쪽). 탐침 = 목표 가중치 순합을 64개 고정 결정 시점에서 표본; 상관 > 0.9면 의미상 중복으로 거부하거나 더 좋으면 교체.
+- **근거:** §7 "의미상 중복은 고정 탐침 세트 신호 상관", §8 "elite 수축 추정", §10 "다양성".
+
+## ADR-033 (2026-11-19, 채택) 탐색 파이프라인 드라이버와 Director "space" 모드
+- **결정:** `search/pipeline.py`(`run_family_search`)가 S0→S1→승격→S2→S3를 ledger 경유로 실행하고, 메모리 모델 거부는 trial 이전, 재개는 같은 fold의 done S2/S3를 재사용. Director는 `search="space"`에서 PLAN의 LLM 변형 호출을 생략하고(계열·가설만 LLM), SEARCH에서 드라이버를 호출하며, BACKTEST 뒤 bandit에 보상한다. 기본값은 `"grid"`로 두어 Phase 3 동작·테스트를 보존한다.
+- **영향:** 실데이터 측정 도구 `tools/run_search.py`(계열 × 탐색기 배치, 비용 예측/실측, 회계, N_eff, DSR, 순위상관, Random 대 TPE). Phase 4 완료 기준 측정은 `docs/measurements/phase4-search-batch.md`.
+
+## ADR-034 (2026-11-19, 채택) validator 권한 분리: validator.db, outbox/ack, 해시 체인 접근 로그
+- **결정:** `validator/store.py`(validator.db: `submission`(spec_hash+rule_hash 사전 등록), `query_budget`(epoch별 k, 재질의도 1회 차감), `verdict`(1비트, 불변) + `verdict_detail`(내부 보고서, 반환 안 함), `ack`, `holdout_access_log`(SHA-256 체인, append only)). research는 `research.db`의 `validation_request`(outbox, 마이그레이션 0003)에 제출만 하고 `ack`를 `mode=ro`로 읽는다. holdout은 `PointInTime(role="validator")`만 읽는다.
+- **근거:** §3.1 소유자별 DB·outbox/ack, §9-2 전역 예산 k·1비트·해시 체인. 같은 계정의 프로세스가 의도적으로 읽는 것은 탐지만 가능하다는 한계(§9 "남는 한계")는 그대로다.
+
+## ADR-035 (2026-11-19, 채택, 사전 등록) holdout 판정 규칙과 Romano-Wolf StepM
+- **판정(`validator/verdict.py`):** 통과 = (1) H0: SR≤0을 α/k=0.0025(ADR-022)로 기각(stationary 블록 부트스트랩 SE, 평균 블록 10일, 2,000회, 시드 고정) ∧ (2) 점추정 ≥ c·SR_in(c=0.5) ∧ (3) 스트레스 유지: 비용 ×2·×3, lag +1봉·×2에서 SR>0. 손익분기 비용 배수는 내부 보고서에만. 규칙 파라미터의 해시(`DecisionRule.hash`)를 제출과 함께 사전 등록한다.
+- **StepM(`validator/stepm.py`):** 같은 창의 S2+ 전체에 스튜던트화 평균의 step-down, 공동 stationary 부트스트랩(상관 보존). 규모가 크면 ONC 군집의 medoid를 대표로(성과로 고르지 않음). 귀무 시뮬레이션 60회 FWER ≤ α+2.5SE 테스트.
+- **근거:** §8, §9-2, §9-3, §9-5. Thresholdout/Ladder/RC/SPA는 쓰지 않는다(v2.1 기각 목록).
+
+## ADR-036 (2026-11-19, 채택) 파이프라인 귀무 검증 하네스
+- **결정:** `validator/null_pipeline.py`: 실데이터 1h 패널의 수익률을 stationary 블록 부트스트랩(블록 24h)으로 재표본해 같은 결정 격자의 합성 패널을 만들고(귀무), `random`(시간의 1/5에 드리프트)·`mechanism`(lag-1 평균회귀) 알파를 심는다. 반복마다 임시 research.db·catalog·validator.db에서 축소 탐색(S0~S3) → holdout 판정(스트레스 재실행 포함)을 돌리고, `none`의 통과율이 종단 FWER, Wilson 95% 구간과 함께 보고(`tools/run_null_pipeline.py`, `docs/measurements/phase5-null-pipeline.md`).
+- **한계:** 합성 패널은 1시간 1봉이라 분 단위 체결 구조가 없다(exec 구간은 완전으로 표시). Director(가짜 LLM) 비교 arm은 이 도구에서 미구현으로 표시하고 별도 측정한다.
+
+## ADR-037 (2026-11-19, 채택, 사전 등록) 전략 수명주기와 저하 규칙
+- **결정:** `validator/lifecycle.py`: 상태 8종과 전이표(서명자 역할 포함: Validated로 가는 길은 validator만, Active는 사용자만, Degraded/Suspended→Validated는 validator 재경유 = 새 trial). validator.db `strategy_state`·`strategy_transition`(append only). 저하 규칙 `DegradationRule`(CUSUM k=0.5·h=5, 슬리피지 비율 ≤2.0, gap 비율 ≤0.10, 창 30일)은 해시로 사전 등록하고 `paper/monitor.py`가 Paper/Active→Degraded만 실행한다.
+- **LLM 사전지식:** `validator/prior_knowledge.py`: 최종 판정 구간은 trial의 `llm_cutoff` 중 가장 늦은 날의 다음 날부터(미상이면 주장 불가), 익명화 on/off 성과 차이는 `DirectorConfig.anonymize=False`(가짜 LLM 측정 arm)로 만든 trial과 비교해 기록만 한다.
+
+## ADR-038 (2026-11-19, 채택) 모의매매: 1초 호가 표본 체결 모델, 해시 체인 원장, 서명 정책
+- **체결(`paper/engine.py`):** 수집 중인 bookTicker 1초 표본에 대해 taker는 도착(결정+지연 1분) 이후 첫 호가의 반대편에서 표시 수량까지, 나머지는 다음 호가로 부분 체결(최대 대기 10분 뒤 취소). maker는 호가가 지정가를 **관통**해야 체결(대기열 미지). 피드(`paper/feed.py`)는 lake의 bookTicker를 1분 mid 봉으로 묶어 백테스트와 같은 패널을 만든다(compaction 지연 ≤10분을 그대로 둠).
+- **원장(`paper/ledger.py`, ledger.db):** `journal` 해시 체인이 원천, order_/fill/position은 투영. client_id가 PK라 재제출은 no-op, `UNCERTAIN`은 조회만. `reconcile`이 투영과 체결을 대조해 불일치면 새 주문 중단(§11).
+- **정책(`risk/policy.py`, `risk/limits.py`):** 한도 8종과 kill switch, `policy(version 단조, limits, expires, sig)`. 모의매매는 HMAC `FakeVerifier`(자금 통제가 아님), 실거래는 `live/signing.py`의 ed25519 공개키 검증기. 연구 출력 스키마에 정책 필드가 없다.
+- **운영:** `paper/run.py`(잠금·heartbeat·STOP, 수집기 heartbeat 120초 이내일 때만 동작), `tools/register_paper_task.ps1`(사용자 실행), 모니터는 paper heartbeat 파일이 생긴 뒤부터 감시(`OPTIONAL_HEARTBEATS`).
+
+## ADR-039 (2026-11-19, 채택) Phase 7 준비는 노트북 쪽 코드까지만
+- **결정:** `live/`에 ed25519 서명·검증(`cryptography==50.0.2`, 사용자 승인된 계획의 유일한 새 의존성), 거래소별 결정적 client id와 `UNCERTAIN→조회만` 규칙, 보호 STOP 동반 규칙, 데드맨 요청(Binance countdown 계열 **미확인** 표시, Upbit 2초 1회), 테스트넷·`/v1/orders/test` 요청 형식(`unverified=True`). 키·실거래 호스트·법률 확인·실주문은 `docs/live-rehearsal.md`의 사용자 결정 항목으로 두고 코드에서 다루지 않는다.

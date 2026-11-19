@@ -48,3 +48,6 @@
 | 2026-11-10 | Phase 3-12 | 94c5c5f | 실제 LLM 3사이클 r2(구독 CLI) | LLM 9/9 ok, trial 9, 중복 0 | — |
 | 2026-11-19 | F-017 수집기 heartbeat | b453600 | 선언 게이트(새 위치 C:/dev/auto/code) | 612 passed, 94.21% | run 44482809126: 1차 GitHub 결제 문제로 job 미시작 → 저장소 public 전환 후 재실행 success |
 | 2026-11-19 | Phase 4-5 + 문서 | 5198c12, 9411169 | 선언 게이트(S2 승격 단계) | 615 passed, 94.21% | run 44486379011 success (두 커밋을 한 번에 push, head 9411169) |
+| 2026-11-19 | Phase 4-7~9 | 0bcd293, 7822f6e, ff8709a | 선언 게이트(N_eff·DSR / TS bandit / MAP-Elites) | 638·644·651 passed | run 44491967830 / 44493023622 / (ff8709a: 측정표 §이력) success |
+| 2026-11-19 | Phase 4-10a | 3bd0651 | 선언 게이트(드라이버·Director space 모드) | 655 passed, 94.15% | success (push 후 확인) |
+| 2026-11-19 | Phase 5·6·7 | bd2efd8, 17050a4, 9da1aab | 선언 게이트(validator / paper·risk / live) | 705 passed, 92.91% | run 44512866500 success (head 9da1aab) |

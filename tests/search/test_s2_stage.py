@@ -155,3 +155,31 @@ def test_s2_metrics_carry_the_map_elites_descriptors_and_probe(env: tuple[Catalo
     probe = m["probe"]
     assert isinstance(probe, list) and len(cast(list[object], probe)) == 64
     assert abs(float(str(m["net_exposure"]))) <= float(str(m["gross_exposure"])) + 1e-12
+
+
+def test_stateful_specs_are_evaluated_by_the_event_engine_at_s2(env: tuple[Catalog, TrialLedger], panel: Panel) -> None:
+    """A time stop makes the spec path dependent: the vector engine would refuse it, so S2 switches to event."""
+    from quant_research.strategy.space import Point
+
+    catalog, ledger = env
+    stateful = Point.of(
+        "trend",
+        {"fast": 24, "slow": 96},
+        {"side": "long_short", "smooth": 0, "universe_n": 3, "sizing": "equal", "time_stop": 24},
+    )
+    stateless = Point.of(
+        "trend",
+        {"fast": 24, "slow": 96},
+        {"side": "long_short", "smooth": 0, "universe_n": 3, "sizing": "equal", "time_stop": 0},
+    )
+    from quant_research.strategy.space import Candidate
+    from quant_research.strategy.space import build_point as bp
+
+    s0 = run_s0(ledger, [Candidate(p, bp(SPACES["trend"], p), ()) for p in (stateful, stateless)], CONFIG)
+    scored = run_s1(ledger, s0.accepted, panel, CONFIG, S1Config(horizon_bars=2))
+    out = run_s2(
+        ledger, select_for_s2(scored, top_k=2, promote_rate=0.0, seed=0), panel, catalog, RunConfig(engine="vector")
+    )
+    used = {o.source.candidate.point.struct_dict()["time_stop"]: o.outcome.metrics["engine_used"] for o in out}
+    assert used == {24: "event", 0: "vector"}
+    assert all("path dependent" not in (o.outcome.reason or "") for o in out)

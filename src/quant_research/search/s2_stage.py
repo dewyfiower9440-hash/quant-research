@@ -8,13 +8,14 @@ to measure the S1 filter's bias (Spearman rank correlation per family)."""
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from quant_research.backtest.panel import Panel
 from quant_research.backtest.run import RunConfig, RunOutcome, run_backtest
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger, TrialOrigin
+from quant_research.search.cost_model import spec_ops
 from quant_research.search.promotion import Selection, rank_corr
 from quant_research.search.s0_stage import point_json
 from quant_research.search.s1_stage import S1Scored
@@ -56,15 +57,22 @@ def run_s2(
     for s in promoted(selection):
         kind = selection.kind(s.trial_id)
         spec = build_point(SPACES[s.candidate.point.family], s.candidate.point)
+        # the vector engine refuses path-dependent exits (time stop / ATR stop); such specs go to the event
+        # engine at S2 so the search space's `time_stop` axis is evaluated instead of rejected (ADR-020 rule)
+        stateful = spec.exit.time_stop_bars is not None or spec.exit.stop_loss_atr is not None
+        cfg = replace(config, engine="event") if stateful and config.engine == "vector" else config
         tags: dict[str, object] = {
+            "engine_used": cfg.engine,
             "point": point_json(s.candidate.point),
             "promotion": kind,
             "promotion_seed": selection.seed,
             "promotion_rate": selection.promote_rate,
             "s1_trial_id": s.trial_id,
             "s1_score": s.result.score(),
+            "rows": panel.frame.height,  # cost model inputs (search.cost_model)
+            "ops": spec_ops(spec),
         }
-        result = run_backtest(spec, panel, catalog, ledger, config, stage="S2", fold=fold, origin=origin, tags=tags)
+        result = run_backtest(spec, panel, catalog, ledger, cfg, stage="S2", fold=fold, origin=origin, tags=tags)
         out.append(S2Scored(s, kind, result))
     return out
 

@@ -215,17 +215,28 @@ def _kmeans(x: F64, k: int, rng: np.random.Generator, *, iters: int = 100) -> ND
 
 
 def silhouette(dist: F64, labels: NDArray[np.int64]) -> F64:
+    """Vectorised silhouette: mean distance to the own cluster (excluding self) vs the nearest other cluster.
+    Singletons score 0 (no own-cluster neighbours)."""
     n = dist.shape[0]
-    s = np.zeros(n)
-    for i in range(n):
-        lab = [int(v) for v in labels]
-        same = np.array([lab[j] == lab[i] and j != i for j in range(n)], dtype=np.bool_)
-        if int(np.count_nonzero(same)) == 0:
-            continue  # singleton: 0
-        a = float(dist[i, same].mean())
-        b = min(float(dist[i, labels == c].mean()) for c in np.unique(labels) if c != labels[i])
-        s[i] = (b - a) / max(a, b) if max(a, b) > 0 else 0.0
-    return s
+    lab = [int(v) for v in labels]
+    clusters = sorted(set(lab))
+    k = len(clusters)
+    index = {c: j for j, c in enumerate(clusters)}
+    member = np.zeros((n, k))
+    for i, c in enumerate(lab):
+        member[i, index[c]] = 1.0
+    sums = dist @ member  # (n, k): total distance from i to every member of cluster j
+    counts = member.sum(axis=0)  # (k,)
+    own = np.asarray([index[c] for c in lab], dtype=np.int64)
+    own_counts = counts[own] - 1.0  # excluding self
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a = np.where(own_counts > 0, sums[np.arange(n), own] / np.where(own_counts > 0, own_counts, 1.0), np.nan)
+        means = sums / np.where(counts > 0, counts, 1.0)
+    means[np.arange(n), own] = np.inf  # exclude the own cluster from "nearest other"
+    b = means.min(axis=1)
+    denom = np.maximum(a, b)
+    s = np.where(np.isnan(a) | ~np.isfinite(b) | (denom <= 0), 0.0, (b - a) / np.where(denom > 0, denom, 1.0))
+    return np.asarray(s, dtype=np.float64)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,9 +250,13 @@ class Clustering:
         return self.k
 
 
-def onc_clusters(corr: F64, *, seed: int = 0, max_k: int | None = None, n_init: int = 10) -> Clustering:
+MAX_K_DEFAULT = 30  # ONC search cap: k-means x silhouette for k = 2..min(n-1, 30); raised only by measurement
+
+
+def onc_clusters(corr: F64, *, seed: int = 0, max_k: int | None = MAX_K_DEFAULT, n_init: int = 10) -> Clustering:
     """ONC: k-means on the correlation distance sqrt(0.5·(1-rho)) for k = 2..max_k, pick the k (and init)
-    with the highest silhouette quality mean/std. Fewer than 3 trials form one cluster (N_eff = N)."""
+    with the highest silhouette quality mean/std. Fewer than 3 trials form one cluster (N_eff = N).
+    `max_k=None` searches every k (slow beyond ~100 trials)."""
     n = corr.shape[0]
     if corr.shape != (n, n):
         raise ValueError(f"corr must be square, got {corr.shape}")

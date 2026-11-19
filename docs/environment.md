@@ -13,6 +13,8 @@
 | duckdb | 2.0.0 | `uv.lock` |
 | numba | ≥ 0.68.1 (`uv.lock` 고정) | `uv.lock` |
 | hypothesis | 6.170.15 | `uv.lock` |
+| optuna | 5.1.0 (고정, 2026-11-19 사용자 승인; alembic·sqlalchemy·colorlog·pyyaml·tqdm 동반) | `pyproject.toml`, `uv.lock` |
+| cryptography | 50.0.2 (고정, 2026-11-19 승인된 계획의 Phase 7 의존성; pycparser 동반) | `pyproject.toml`, `uv.lock` |
 | CI 런너 | GitHub Actions `ubuntu-latest`(SHA 고정 actions) | `.github/workflows/ci.yml` |
 | 하드웨어 | RAM 16GB, SSD KLEVV C710(과열 이력) | - |
 

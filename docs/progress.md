@@ -500,3 +500,42 @@
   - CLI가 보고한 `input_tokens`는 호출당 2이고 나머지는 `cache_read_tokens`(최대 1,638)입니다. 첫 사이클은 캐시 0입니다. CLI의 입력 토큰 집계 방식은 **미확인**이라 입력 토큰 실측값으로 쓰지 않습니다.
   - 측정표 헤더의 비용 문구는 `tools/run_director.py` 문구 수정 전 코드로 생성돼 "가짜 LLM" 문구가 남아 있었습니다. 수치는 그대로 두고 헤더에 정정 메모를 달았습니다.
 - **Phase 4 반영:** 탐색 자체는 LLM 없이 돕니다. Director 호출은 사이클당 3회, 지연 약 10~45초/사이클을 예산 초깃값으로 씁니다.
+
+---
+
+# Phase 4: 대규모 탐색 (계획 `docs/plans/2026-11-10-phase4-search.md` 1~6단계, `docs/plans/2026-11-19-phase4-7-build.md` 1~6단계)
+
+## 상태: **IMPLEMENTED / 완료 기준 2개 충족(회계 누락 0, 비용 예측 대역 비율 0.9 = 기준 경계)** (2026-11-19, 최종 배치 r4)
+- **구현 파일:** `strategy/space.py`(사전 등록 공간, ADR-027), `search/`: `s0_stage`, `s1`·`s1_stage`(ADR-028), `promotion`·`s2_stage`(5% 무작위 승격, 이벤트 엔진 자동 전환 F-018), `cost_model`, `optimizers`(Random·TPE, ADR-029), `compare`, `multiplicity`·`neff_stage`(ONC·DSR, ADR-030), `bandit`(ADR-031), `archive`(MAP-Elites, ADR-032), `pipeline`(드라이버, ADR-033); `director/director.py` `search="space"` 모드; `tools/run_search.py`.
+- **실데이터 배치(8심볼 1h, 선별 2025-01~04, 확인 05~06, 계열 5 × 탐색기 2 × S1 200):** `docs/measurements/phase4-search-batch.md`. 1차(`search-s7-20261119`, S2 벡터 엔진): trial 4,173 = 단계 합(누락 0), 비용 비율 대역 안 0.8, S2 178건 중 127건이 경로 의존 거부(F-018). 최종 `search-s7-20261119-r4`(S2 이벤트 자동 전환, ONC 벡터화 뒤): 10배치 604초, 최대 private 838MB, trial 4,173 = 단계 합(누락 0, running 잔류 0), S2 178/178 done, 비용 예측/실측 비율 20개 중 18개가 [0.5, 1.5] 안(**0.9**, 밖은 funding_basis 배치의 S1 1.73·S2 2.53), 수집기 gap 수 전후 동일(9,336), heartbeat 정상.
+- **판정:** 두 기준 **충족**(비용 대역 비율은 정확히 0.9로 경계값. funding_basis는 S1 점수가 전부 미정의라 승격이 무작위 7~16건으로 다른 계열과 달라 예측이 어긋났다). 비용 모델은 배치마다 재적합하며 표본이 늘면 다시 측정합니다. **성과 주장은 없습니다**(모든 S3 보상 0 = 확인 구간 SR이 귀무 E[max] 이하, 창별 최고 S3의 DSR 보수값 0.04).
+- **관찰:** funding_basis는 펀딩 미적재(OPS-006)라 S1 점수가 전부 미정의 → 무작위 승격만 S2로 갔습니다. N_eff는 선별 창 14(S2+ 639), 확인 창 2(S2+ 75)이고 N_total(S1 포함)은 약 8,000~8,600이라 DSR_total이 지배합니다. S1 대 S3 순위상관은 쌍이 2~4개뿐이라 판단 불가(trend −0.4, mean_reversion −1). 합성 Random 대 TPE는 3초 예산(약 36~40 평가)에서 둘 다 회수율 0 — 예산이 너무 작아 비교가 아니라 보고일 뿐입니다.
+- **결함 기록:** F-018(S2 벡터 엔진 경로 의존 거부), ONC 성능(trial 300에서 수십 분 → 벡터화·k 상한 30, 18초).
+
+---
+
+# Phase 5: 독립 검증 (계획 `docs/plans/2026-11-19-phase4-7-build.md` 7~12단계)
+
+## 상태: **IMPLEMENTED(라이브러리·도구) / 귀무 파이프라인 측정 진행 중 / 상시 validator 프로세스 없음** (2026-11-19)
+- **구현 파일:** `validator/store.py`+`migrations/0001`(ADR-034), `validator/verdict.py`(ADR-035), `validator/stepm.py`(ADR-035), `validator/null_pipeline.py`+`tools/run_null_pipeline.py`(ADR-036), `validator/lifecycle.py`+`migrations/0002`·`validator/prior_knowledge.py`(ADR-037), `research/migrations/0003_validation.sql`(outbox), `DirectorConfig.anonymize`.
+- **테스트:** store 5(예산 k·재질의 차감·1비트 ack·해시 체인 변조 탐지·research 역할 holdout 거부), verdict 6(손계산·귀무 기각률·부트스트랩 결정성·손익분기), stepm 4(귀무 FWER ≤ α, 알파 검출, medoid), null_pipeline 4, lifecycle 6.
+- **측정:** `docs/measurements/phase5-null-pipeline.md`(100회 반복, Random·TPE arm). Director(가짜 LLM) arm은 별도.
+- **범위 밖:** 실제 holdout(2026-07-01~11-01 벌크)에 대한 질의는 아직 0건입니다(k=20 예산 미사용). 사전 등록 값 ADR-022는 그대로이며 확정 제안은 Phase 5 문서 단계에서 합니다.
+
+---
+
+# Phase 6: 모의매매 (계획 13~17단계)
+
+## 상태: **IMPLEMENTED / 30일 운영은 사용자 작업 등록 대기 / 대상 전략 0개** (2026-11-19)
+- **구현 파일:** `paper/ledger.py`+`migrations/0001_ledger.sql`(해시 체인 원장, 멱등 client_id, UNCERTAIN 조회만), `paper/engine.py`(호가 표본 체결·부분 체결·관통 규칙), `paper/feed.py`(bookTicker → 1분 mid 봉 → 패널), `paper/divergence.py`(신호·지연·스프레드·부분 체결 분해, 봉인 전 요약), `paper/monitor.py`(CUSUM·슬리피지·gap 저하 → Degraded), `paper/run.py`(프로세스), `risk/limits.py`·`risk/policy.py`(ADR-038), `tools/register_paper_task.ps1`, 모니터 `OPTIONAL_HEARTBEATS`.
+- **테스트:** ledger·engine 7, divergence·monitor 3, feed·tick 2, risk 4.
+- **미완료:** 30일 운영(사용자가 `register_paper_task.ps1` 실행 후 시작), 읽기 키 기반 수수료·증거금(보수값 유지, 미확인), 대상 전략이 생기려면 Phase 5 validator가 실제 holdout 판정을 내려야 합니다(현재 0건).
+
+---
+
+# Phase 7 준비: 노트북 쪽 코드 (계획 18~21단계)
+
+## 상태: **코드 준비 완료 / 실행은 사용자 결정 대기** (2026-11-19)
+- **구현 파일:** `live/signing.py`(ed25519, `cryptography==50.0.2`), `live/orders.py`, `live/deadman.py`, `live/testnet.py`(요청 형식, `unverified`), `docs/live-rehearsal.md`(사용자 결정 7개와 리허설 7단계). ADR-039.
+- **테스트:** signing 2, orders·deadman·testnet 5.
+- **하지 않은 것(설계대로):** 키·실거래 호스트·법률 확인·실주문·테스트넷 호출.

@@ -24,7 +24,19 @@ Stack: Python (uv)
   code in `strategy/` (spec, ops, canonical, s0, compile, templates), `backtest/` (panel, costs, market, engines,
   run), `research/` (research.db, trial ledger); smoke `tools/run_backtest.py`. Every evaluation goes through
   `TrialLedger.evaluate` (one trial per evaluation, refusals included).
-- Phase 1 status: IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING; carry-over issues OPS-001..007 in `docs/operations.md`
+- Phase 3 (Director, memory, LLM): `docs/plans/2026-11-10-phase3-director-memory.md`; code in `director/`, `research/memory.py`
+- Phase 4 (search): `docs/plans/2026-11-10-phase4-search.md` (steps 1-6) and `docs/plans/2026-11-19-phase4-7-build.md`
+  (steps 7-11 and Phases 5-7); code in `strategy/space.py` (pre-registered space), `search/` (s0/s1/s2 stages,
+  promotion, cost model, optimizers = Random/TPE on optuna, multiplicity = ONC/DSR, bandit, archive = MAP-Elites,
+  pipeline driver); Director `search="space"` mode; real-data batches via `tools/run_search.py`
+- Phase 5 (validator): `validator/` (store = validator.db with budget k / 1-bit verdicts / hash-chained access log,
+  verdict rule, Romano-Wolf StepM, null pipeline harness, lifecycle + degradation rules, prior-knowledge checks);
+  `tools/run_null_pipeline.py`; research outbox `research/migrations/0003_validation.sql`
+- Phase 6 (paper): `paper/` (ledger.db hash-chained journal, quote-sample fill engine, feed, divergence, monitor,
+  `paper/run.py` process), `risk/` (limits, signed policy); `tools/register_paper_task.ps1` (user-run)
+- Phase 7 (live preparation, laptop side only): `live/` (ed25519 signing, order rules, dead-man, testnet request
+  formats); `docs/live-rehearsal.md` lists the user-only decisions. No keys, no orders from this machine.
+- Phase 1 status: IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING; carry-over issues OPS-001..008 in `docs/operations.md`
 - Environment versions (separate from the code version): `docs/environment.md`
 - Living records: `docs/progress.md` (per-task status), `docs/decisions.md` (ADR), `docs/failures.md`
   (errors, repro, root cause, attempts), `docs/test-results.md`, `docs/measurements/`

@@ -264,3 +264,11 @@
 - **수정(이 커밋):** `previous_beat_ns`는 빈·손상·비객체 파일을 `heartbeat.unreadable` 경고와 함께 `None`으로 처리합니다(첫 실행과 같이 시작 미상 restart gap 기록). `write`는 `.tmp`에 쓰고 `os.replace`로 교체하며, Windows에서 읽는 쪽(모니터)이 잠깐 열어 PermissionError가 나면 그 1회만 제자리 쓰기로 대체합니다.
 - **영향:** 강제청산 WS(`binance.um.force_order`, 공개 이력 없음)는 2026-11-12 09:42Z부터 재가동 시각까지 **영구 손실**입니다. REST 수집기(bookTicker, Upbit 호가·체결, 지표)는 같은 기간 동작했습니다(heartbeat `ok` 카운터 기준, 커버리지 수치 대조는 미실시).
 - **상태:** 코드 수정 완료(테스트 먼저). 운영 재가동은 저장소 이동 계획 단계 5(예약 작업 재등록, 사용자 실행) 뒤에 확인합니다. 재경보 주기는 OPS-004 해결 계획에 묶어 별도 결정합니다.
+- **재가동(2026-11-19 17:05 KST):** 사용자가 `register_collector_task.ps1`을 실행해 새 경로로 등록, Start 후 ws가 `heartbeat.unreadable` 경고 1회 뒤 정상 기동(PID 6724, `force_order` 수신). 해결.
+
+## F-018 (2026-11-19, Phase 4 단계 10) 실데이터 S2의 71%가 "벡터 엔진은 경로 의존 손절을 지원하지 않음"으로 거부
+- **증상:** 1차 실데이터 배치(`search-s7-20261119`, 계열 5 × 탐색기 2, S1 200씩)에서 S2 trial 178건 중 127건이 `rejected`, 사유 "vector engine: time stop / ATR stop are path dependent (use the event engine)". 회계는 정확했지만(trial 4,173 = 단계 합) S2 통과율이 의미를 잃었다.
+- **원인:** 탐색 공간의 구조 축 `time_stop`(0/24/72/168)이 후보 3/4를 경로 의존 spec으로 만드는데, S2 단계는 선별 구간용으로 벡터 엔진을 고정했다(ADR-020의 벡터 엔진 규칙은 상태 없는 규칙만 지원).
+- **수정:** `search/s2_stage.run_s2`가 spec에 시간 손절·ATR 손절이 있으면 이벤트 엔진으로 자동 전환하고 `engine_used`를 metrics에 남긴다. 테스트 `test_stateful_specs_are_evaluated_by_the_event_engine_at_s2`(수정 전 코드로는 거부 사유에 "path dependent"가 남아 실패).
+- **영향:** S2 비용이 늘었다(이벤트 엔진). 2차 배치(`search-s7-20261119-r2`)로 측정표를 다시 만들었다. 1차 배치의 trial은 그대로 남아 N_total에 포함된다(재평가는 새 trial, §9-2).
+- **상태:** 해결(2026-11-19).
