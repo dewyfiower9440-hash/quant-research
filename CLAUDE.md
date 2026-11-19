@@ -54,5 +54,3 @@ Stack: Python (uv)
 - pyright strict reports `np.sum` / `np.where` results as Unknown → use `np.dot`, `np.count_nonzero` and wrap
   `np.where` in `np.asarray(..., dtype=np.float64)` with an `F64` annotation (2026-11-10)
 - The gate's pyright only covers `src` and `tests` (`[tool.pyright] include`); `tools/*.py` are not type-checked by the gate → run `uv run pyright tools/<file>.py` for every tool you touch (2026-11-09)
-- `Stop-ScheduledTask qr-collector-supervisor` alone does not stop the collector: the task's restart setting brings the supervisor back within seconds → `Disable-ScheduledTask` first, then stop; re-registering with the tools script (`-Force`) enables it again (2026-11-19)
-- Moving the repository folder failed with "used by another process" until (a) an orphaned multiprocessing child (parent long dead) that still held `.venv` .pyd files was ended and (b) every shell's current folder was moved out of the repo; after the move `uv sync` reinstalls the project but leaves console-script trampolines (pyright, ruff) pointing at the old path ("uv trampoline failed to canonicalize script path") → delete `.venv` and `uv sync` again (2026-11-19)
