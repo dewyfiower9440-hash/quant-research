@@ -71,6 +71,7 @@ class SearchRun:
     seed: int
     evaluations: int  # asked and told (refusals included: they are trials too)
     refused: int
+    distinct_points: int  # feasible, distinct candidates explored (how much of the space the budget bought)
     cost_s: float
     best: float | None
     best_point: Point | None
@@ -85,6 +86,7 @@ def run_search(
     """Ask/tell until the predicted cumulative cost would exceed the budget. Every ask is told once."""
     spent = 0.0
     n = refused = 0
+    seen: set[Point] = set()
     best: float | None = None
     best_point: Point | None = None
     while True:
@@ -101,9 +103,11 @@ def run_search(
         n += 1
         if score is None:
             refused += 1
-        elif best is None or score > best:
-            best, best_point = score, point
-    return SearchRun(searcher.name, getattr(searcher, "seed", -1), n, refused, spent, best, best_point)
+        else:
+            seen.add(point)
+            if best is None or score > best:
+                best, best_point = score, point
+    return SearchRun(searcher.name, getattr(searcher, "seed", -1), n, refused, len(seen), spent, best, best_point)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,11 +130,13 @@ class Comparison:
             "random": {
                 "recovery": self.recovery(self.random),
                 "evaluations": [r.evaluations for r in self.random],
+                "distinct_points": [r.distinct_points for r in self.random],
                 "best": [r.best for r in self.random],
             },
             "tpe": {
                 "recovery": self.recovery(self.tpe),
                 "evaluations": [r.evaluations for r in self.tpe],
+                "distinct_points": [r.distinct_points for r in self.tpe],
                 "best": [r.best for r in self.tpe],
             },
         }
