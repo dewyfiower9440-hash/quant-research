@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from collections.abc import Generator
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import polars as pl
@@ -140,3 +141,17 @@ def test_s1_vs_s3_rank_correlation_is_reported_per_family(env: tuple[Catalog, Tr
         stage="S3",
     )
     assert fidelity_by_family(ledger)[0].pairs == fam.pairs
+
+
+def test_s2_metrics_carry_the_map_elites_descriptors_and_probe(env: tuple[Catalog, TrialLedger], panel: Panel) -> None:
+    catalog, ledger = env
+    s0 = run_s0(ledger, generate(SPACES["mean_reversion"], seed=11, count=8), CONFIG)
+    scored = run_s1(ledger, s0.accepted, panel, CONFIG, S1Config(horizon_bars=4))
+    out = run_s2(
+        ledger, select_for_s2(scored, top_k=1, promote_rate=0.0, seed=0), panel, catalog, RunConfig(engine="vector")
+    )
+    m = next(o for o in out if o.outcome.status == "done").outcome.metrics
+    assert {"net_exposure", "gross_exposure", "turnover", "avg_holding_hours"} <= set(m)
+    probe = m["probe"]
+    assert isinstance(probe, list) and len(cast(list[object], probe)) == 64
+    assert abs(float(str(m["net_exposure"]))) <= float(str(m["gross_exposure"])) + 1e-12

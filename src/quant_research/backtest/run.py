@@ -24,10 +24,11 @@ import polars as pl
 
 from quant_research.backtest.costs import CostModel
 from quant_research.backtest.engines import EngineResult, EngineUnsupported, run_event, run_vector
-from quant_research.backtest.market import F64, Fidelity, FidelityUnavailable, prepare
+from quant_research.backtest.market import F64, Fidelity, FidelityUnavailable, Targets, prepare
 from quant_research.backtest.panel import Panel, select_top_liquidity
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import Stage, TrialHandle, TrialLedger, TrialOrigin
+from quant_research.search.archive import exposure_metrics, probe_vector
 from quant_research.strategy.canonical import spec_hash
 from quant_research.strategy.compile import compile_spec
 from quant_research.strategy.ops import OPS
@@ -235,9 +236,12 @@ def _evaluate(
         start = int(np.searchsorted(decisions, panel.evaluate_from_ns, side="left"))
         res = replace(res, equity=res.equity[start:], gap_loss=res.gap_loss[start:])
         decisions = decisions[start:]
+        targets = Targets(targets.weight[start:], targets.desire[start:])
         if abs(float(res.equity[0]) - config.capital) > 1e-6:
             raise RuntimeError(f"equity moved during warm-up ({float(res.equity[0])} != {config.capital})")
     metrics = summary(decisions, res, config.capital, TIMEFRAME_NS[spec.timeframe])
+    metrics.update(exposure_metrics(targets.weight))  # MAP-Elites descriptors (search.archive)
+    metrics["probe"] = probe_vector(targets.weight)
     flags: list[str] = []
     if config.fidelity == "L1" and spec.market == "usdm_futures" and not market.funding_known:
         flags.append("funding_not_modelled: no funding data loaded (OPS-003/006)")
