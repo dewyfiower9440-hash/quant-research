@@ -99,6 +99,9 @@ class DirectorConfig:
     s1_count: int = 40
     top_k: int = 3
     promote_rate: float = 0.05
+    # §9-6 prior-knowledge check: anonymize=False sends real symbols (ablation harness with the fake LLM only;
+    # the difference between the two settings is a leak measurement, never a production mode)
+    anonymize: bool = True
 
     def as_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -141,8 +144,12 @@ class Director:
         self.memory = MemoryStore(self.store, enabled=config.memory)
         self.anonymizer = Anonymizer(self.store)
         symbols = sorted(set(selection.frame["symbol"].to_list()))
-        self.terms = forbidden_terms(symbols)
-        self.aliases = [self.anonymizer.alias("symbol", s) for s in symbols]
+        if config.anonymize:
+            self.terms = forbidden_terms(symbols)
+            self.aliases = [self.anonymizer.alias("symbol", s) for s in symbols]
+        else:  # §9-6 measurement arm: real names go out, no leak check, hypotheses recorded as anonymized=0
+            self.terms = ()
+            self.aliases = list(symbols)
         # Phase 4: the discounted, cost-normalised family bandit (rewards arrive after each cycle's S3)
         self.bandit = FamilyBandit(tuple(FAMILIES), BanditPrior(min_pulls=0.0)) if config.search == "space" else None
 
@@ -463,7 +470,7 @@ class Director:
             cur = self.store.conn.execute(
                 "insert into hypothesis(cycle_id, family, statement, falsification_test, required_data_json, "
                 "required_features_json, prior, anonymized, struct_key, llm_call_id, created_ns) "
-                "values (?,?,?,?,?,?,?,1,?,?,?)",
+                "values (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     cycle_id,
                     draft.family,
@@ -472,6 +479,7 @@ class Director:
                     json.dumps(sorted(draft.required_data)),
                     json.dumps(sorted(draft.required_features)),
                     draft.prior,
+                    int(self.cfg.anonymize),
                     key,
                     calls[-1],
                     time.time_ns(),
