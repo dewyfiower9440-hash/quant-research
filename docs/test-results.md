@@ -52,3 +52,6 @@
 | 2026-11-19 | Phase 4-10a | 3bd0651 | 선언 게이트(드라이버·Director space 모드) | 655 passed, 94.15% | success (push 후 확인) |
 | 2026-11-19 | Phase 5·6·7 | bd2efd8, 17050a4, 9da1aab | 선언 게이트(validator / paper·risk / live) | 705 passed, 92.91% | run 44512866500 success (head 9da1aab) |
 | 2026-11-19 | Phase 4 마감 + 문서 | 6c2b24c | 선언 게이트(F-018, ONC 벡터화, run_search, 측정표) | 705 passed, 92.91% | run 44514181103 success |
+| 2026-11-19 | 문서(계획 마감·Gotchas) | 3cf7d11 | 선언 게이트 | 705 passed, 92.91% | run 44517570761 success |
+| 2026-11-19 | Phase 5 귀무 측정 | — | tools/run_null_pipeline.py none/random 100회, none/tpe 100회 | 통과 3/100, 5/100 (FWER 0.04, Wilson [0.020, 0.077]) | 측정표 docs/measurements/phase5-null-pipeline.md |
+| 2026-11-19 | Phase 5 검정력 | — | tools/run_null_pipeline.py random·mechanism 알파, arm당 30회 | 회수율 0.067/0.033/0.000/0.033 (검정력 ≈ 0) | 측정표 docs/measurements/phase5-null-pipeline-alpha.md |

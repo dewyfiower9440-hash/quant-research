@@ -516,7 +516,9 @@
 
 # Phase 5: 독립 검증 (계획 `docs/plans/2026-11-19-phase4-7-build.md` 7~12단계)
 
-## 상태: **IMPLEMENTED(라이브러리·도구) / 귀무 파이프라인 측정 진행 중 / 상시 validator 프로세스 없음** (2026-11-19)
+## 상태: **IMPLEMENTED(라이브러리·도구) / 종단 FWER 점추정 0.04(200회) ≤ 0.05이나 95% 상한 0.077로 미확정 / 상시 validator 프로세스 없음** (2026-11-19)
+- **귀무 검증(`docs/measurements/phase5-null-pipeline.md`):** random arm 3/100(0.03, Wilson [0.010, 0.085]), tpe arm 5/100(0.05, [0.022, 0.112]), 합계 8/200(0.04, [0.020, 0.077]). 사전 등록 목표 0.05를 점추정은 넘지 않지만 반복 수가 적어 확정 불가(ADR-022 예고). α/k=0.0025 기대치보다 통과율이 한 자릿수 높은 점은 **미확인 원인**(합성 귀무가 24h 블록 내부 자기상관을 보존 → 완전 귀무 아님 가능성 / 부트스트랩 SE 과소 / 스트레스 조건 상관)으로 기록했고, 규칙을 완화하지 않고 최종 검증 단계에서 shuffle 귀무로 재측정합니다.
+- **검정력(알파 주입, arm당 30회):** random 드리프트 0.0015/h → 2/30·1/30, mechanism 평균회귀 0.015 → 0/30·1/30. 귀무 통과율과 구별되지 않아 **검정력 ≈ 0**(심은 알파가 α/k 기준에 비해 너무 약함). 강도·구간을 키운 재측정이 다음 항목이며 기준값은 바꾸지 않습니다.
 - **구현 파일:** `validator/store.py`+`migrations/0001`(ADR-034), `validator/verdict.py`(ADR-035), `validator/stepm.py`(ADR-035), `validator/null_pipeline.py`+`tools/run_null_pipeline.py`(ADR-036), `validator/lifecycle.py`+`migrations/0002`·`validator/prior_knowledge.py`(ADR-037), `research/migrations/0003_validation.sql`(outbox), `DirectorConfig.anonymize`.
 - **테스트:** store 5(예산 k·재질의 차감·1비트 ack·해시 체인 변조 탐지·research 역할 holdout 거부), verdict 6(손계산·귀무 기각률·부트스트랩 결정성·손익분기), stepm 4(귀무 FWER ≤ α, 알파 검출, medoid), null_pipeline 4, lifecycle 6.
 - **측정:** `docs/measurements/phase5-null-pipeline.md`(100회 반복, Random·TPE arm). Director(가짜 LLM) arm은 별도.

@@ -891,3 +891,18 @@ stateDiagram-v2
 | `docs/measurements/phase0.md` | Phase 0 측정표 |
 
 **DONE 기준:** 완료 조건을 충족하고, 선언된 게이트(`CLAUDE.md`의 `## Verification`)와 관련 회귀 테스트를 통과한 작업만 DONE으로 기록합니다. 테스트를 삭제하거나 기준을 완화하지 않습니다.
+
+## 20. 2026-11-19 구현 상태 주석 (§17 점검표 대조; 설계 본문은 바꾸지 않음)
+| §17 항목 | 상태 |
+|---|---|
+| 계획 v2 승인(Phase 0~1) | 완료(2026-11-08) |
+| GitHub private 저장소 | 생성됨 → 2026-11-19 사용자 결정으로 **public** 전환(Actions 결제 문제) |
+| 패키지 설치 | 완료 + optuna 5.1.0(Phase 4), cryptography 50.0.2(Phase 7 준비) 고정 |
+| 데이터 디렉터리·디스크 상한 | `C:\dev\qr-data`, lake 62.9GB(2026-11-19), 상한 200GB 벌크 가드 |
+| 관리자 예약 작업 2개(SSD SMART, 시계) + supervisor 등록 | supervisor·bulk는 등록(사용자 실행). SSD·시계 작업은 **미등록**(OPS-002) |
+| T0 백업 대상 | 로컬 `C:\dev\qr-backup`만, 외부 대상 **보류**(OPS-005) |
+| Phase 3 전: Claude API 키·예산 | 유료 API 미승인, 구독 CLI 경로만(ADR-025) |
+| Phase 6 전: 읽기 키 보관 위치 | **사용자 결정 대기**(모의매매는 키 없이 보수값으로 동작) |
+| Phase 7 전: 법률 확인·실거래 호스트·서명 키·계정 보안·별도 승인 | **사용자 결정 대기**(`docs/live-rehearsal.md` §0) |
+
+Phase별 구현 상태는 `docs/progress.md`에, 결정은 `docs/decisions.md` ADR-027~039에 있다. Phase 4 완료 기준 2개 충족(r4 배치), Phase 5 종단 FWER 점추정 0.04(200회, 95% 상한 0.077로 미확정), Phase 6·7은 코드·절차서까지.
