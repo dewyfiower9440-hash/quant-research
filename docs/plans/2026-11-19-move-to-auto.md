@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: move-to-auto
 ---
 
@@ -55,9 +55,9 @@ task: move-to-auto
 - [x] 2. 수집기 정지: `Stop-ScheduledTask qr-collector-supervisor` → `Get-ScheduledTask`가 Ready, `Get-Process pythonw`에 저장소 경로의 프로세스 없음. 정지 시각 기록. (이 저장소 Gotchas: 예약 작업 등록·조작은 auto 모드 분류기가 거부할 수 있다 → 거부되면 사용자에게 `! powershell -NoProfile -Command "Stop-ScheduledTask qr-collector-supervisor"`를 건네고 확인 뒤 진행.)
 - [x] 3. 이동: `Move-Item C:\dev\quant-research C:\dev\auto\code` → `C:\dev\auto\code`에서 `git status`(미커밋 5개 그대로)·`git remote -v`·`git log -1` 확인 → `uv sync`(venv shim 복구). — 검증: `C:\dev\quant-research` 없음, `C:\dev\auto\code\.git` 있음.
 - [x] 4. junction·README: `cmd /c mklink /J C:\dev\auto\plan C:\dev\auto\code\docs\plans`, `cmd /c mklink /J C:\dev\auto\report C:\dev\auto\code\docs`; `C:\dev\auto\README.md`(배치·원본 위치·junction 설명, 10줄 안). — 검증: `dir C:\dev\auto`에 `<JUNCTION>` 2개, `ls C:\dev\auto\plan`이 계획 10개를 보임.
-- [ ] 5. 예약 작업 재등록(**사용자 실행**, 이 저장소 Gotchas 2026-11-09: `Register-ScheduledTask`는 auto 모드 분류기가 persistence로 거부): 먼저 `-WhatIf`로 dry-run해 보이고, 사용자에게 다음 두 줄을 건넨다 — `! powershell -NoProfile -File C:\dev\auto\code\tools\register_collector_task.ps1` 와 `! powershell -NoProfile -File C:\dev\auto\code\tools\register_bulk_task.ps1`(시작은 등록 스크립트 또는 `! powershell -NoProfile -Command "Start-ScheduledTask qr-collector-supervisor"`). — 검증(사용자 실행 뒤): `Get-ScheduledTask` 2개의 Action 경로가 `C:\dev\auto\code\.venv\…`, 수집기 State Running, `C:\dev\qr-data\logs`의 supervisor 로그가 1분 안에 갱신됨.
+- [x] 5. 예약 작업 재등록(**사용자 실행**, 이 저장소 Gotchas 2026-11-09: `Register-ScheduledTask`는 auto 모드 분류기가 persistence로 거부): 먼저 `-WhatIf`로 dry-run해 보이고, 사용자에게 다음 두 줄을 건넨다 — `! powershell -NoProfile -File C:\dev\auto\code\tools\register_collector_task.ps1` 와 `! powershell -NoProfile -File C:\dev\auto\code\tools\register_bulk_task.ps1`(시작은 등록 스크립트 또는 `! powershell -NoProfile -Command "Start-ScheduledTask qr-collector-supervisor"`). — 검증(사용자 실행 뒤): `Get-ScheduledTask` 2개의 Action 경로가 `C:\dev\auto\code\.venv\…`, 수집기 State Running, `C:\dev\qr-data\logs`의 supervisor 로그가 1분 안에 갱신됨.
 - [x] 6. 새 위치 검증: `cd C:\dev\auto\code`에서 선언된 게이트를 그대로 실행 → exit 0. — 검증: 게이트 exit 0.
-- [ ] 7. 마감: 이 계획 `## 진행 기록`과 `status: done`(이동된 저장소 안, 편집 1파일) → 커밋(push 없음). 사용자 안내: `ack-missing C:\dev\quant-research`, 새 세션은 `C:\dev\auto\code`에서 시작, claude-config 가이드·백로그의 경로 1줄 갱신은 별도.
+- [x] 7. 마감: 이 계획 `## 진행 기록`과 `status: done`(이동된 저장소 안, 편집 1파일) → 커밋(push 없음). 사용자 안내: `ack-missing C:\dev\quant-research`, 새 세션은 `C:\dev\auto\code`에서 시작, claude-config 가이드·백로그의 경로 1줄 갱신은 별도.
 
 ## 리스크와 대응
 - 이동 중 파일 잠김(수집기·에디터·Defender) → 수집기를 먼저 멈추고, `Move-Item` 실패 시 원인 프로세스를 보고하고 중단(강제 종료는 사용자 결정).
@@ -77,3 +77,5 @@ task: move-to-auto
 - 2026-11-19 단계 3: 첫 `Move-Item`은 "다른 프로세스가 사용 중"으로 실패 — 원인 둘: (a) 고아 pythonw(PID 10648, 2026-11-12 시작, 부모 5800 죽음)가 `.venv`의 pydantic_core·websockets·polars .pyd를 잡고 있었다 → 사용자 확인을 거쳐 `Stop-Process`로 종료; (b) 셸의 현재 폴더가 저장소 안이었다 → `C:\dev`로 옮긴 뒤 두 번째 시도에 이동 성공(15:57 폴더 시각). 새 위치에서 `git status`(Phase 4 미커밋 5개 그대로)·`origin` 동일·HEAD `0209661`. `uv sync`는 프로젝트만 재설치했고 콘솔 스크립트 trampoline(pyright 등)은 옛 경로를 품어 "uv trampoline failed to canonicalize script path" → `.venv` 삭제 후 `uv sync`로 재생성(계획 가정과 다른 점).
 - 2026-11-19 단계 4: junction 2개 생성(`plan` → `code\docs\plans`, `report` → `code\docs`; `dir`에 `<JUNCTION>`), `plan`에 계획 10개, `report`에 문서 6종 + measurements + plans. `C:\dev\auto\README.md`(배치·주의 사항).
 - 2026-11-19 단계 6: `.venv` 재생성 뒤 `C:\dev\auto\code`에서 선언된 게이트 그대로 실행 → exit 0(ruff·format 189 files·pyright 0·607 passed, 94.24%, 209초). 단계 5(예약 작업 재등록)는 사용자 실행 대기: `-WhatIf` dry-run 2개 정상("Register per-user scheduled task"), 현재 `qr-collector-supervisor` Disabled·`qr-bulk-download` Ready 둘 다 옛 경로. CLAUDE.md Gotchas 2줄을 넣었다가 Stop hook이 "계획 범위 밖(CLAUDE.md)"으로 막아 되돌렸다(커밋 `8d2d484`에 들어간 것을 다음 커밋에서 원복). 교훈은 이 기록에 남긴다: (1) `Stop-ScheduledTask`만으로는 재시작 설정 때문에 수집기가 수 초 안에 다시 뜬다 → `Disable-ScheduledTask` 먼저, 재등록(`-Force`)이 다시 활성화한다; (2) 폴더 이동은 고아 multiprocessing 자식이 `.venv` .pyd를 잡고 있거나 셸의 현재 폴더가 저장소 안이면 "사용 중"으로 실패하고, 이동 뒤 `uv sync`는 콘솔 스크립트 trampoline(pyright 등)의 옛 경로를 고치지 않는다 → `.venv` 삭제 후 `uv sync`. Gotchas 반영은 별도(범위에 CLAUDE.md를 넣은 계획)로.
+- 2026-11-19 단계 5(사용자 실행, 17:0x KST): `register_collector_task.ps1` → `qr-collector-supervisor` Ready → `Start-ScheduledTask` → Running(supervisor PID 29172, 자식 rest 24436·ws 6724, 08:05:15Z). `register_bulk_task.ps1` → `qr-bulk-download` Ready. 두 작업의 Action 모두 `C:\dev\auto\code\.venv\Scripts\pythonw.exe`. heartbeat 2개 모두 10초 안에 갱신. 계획과 다른 점: Git Bash의 `!` 명령은 백슬래시를 지우므로 경로를 `C:/dev/auto/code/...`로 입력해야 했다. 재가동 과정에서 WS 수집기가 2026-11-12부터 빈 heartbeat 파일로 크래시 루프 중이었음을 발견해 F-017로 먼저 고쳤다(커밋 b453600).
+- 2026-11-19 단계 7: `status: done`. 수집 공백 기록: rest 06:59Z~08:05Z(이동), ws 2026-11-12 09:42Z~11-19 08:05Z(F-017). `ack-missing C:\dev\quant-research`는 사용자 안내. claude-config 가이드·백로그의 경로 갱신은 별도. 저장소는 2026-11-19 사용자 결정으로 public으로 전환했다(GitHub 결제 문제로 Actions가 막혀 CI를 돌릴 수 없었음; 전환 전 추적 파일·이력에서 비밀값 스캔: `.env.example`만, 테스트의 `sk-ant-secret`는 가짜 문자열).

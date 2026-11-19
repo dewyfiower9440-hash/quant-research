@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: blocked
+blocked_reason: step 5 needs the user to register the full backfill job; parked so the stale approval cannot re-arm (2026-11-11)
 task: qr-phase0-1-step9
 ---
 

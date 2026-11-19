@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: blocked
+blocked_reason: step 3 needs the user to register the Upbit backfill job; parked so the stale approval cannot re-arm (2026-11-11)
 task: qr-phase1-completion
 ---
 
