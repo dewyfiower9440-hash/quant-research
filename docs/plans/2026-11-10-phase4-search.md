@@ -72,7 +72,7 @@ task: qr-phase4-search
 - [x] 4. **비용 모델 `cost_s ≈ a + b·rows·ops`와 피크 메모리 모델.**
   - 단계별 실측(S1, S2, S3)으로 최소제곱 적합. 배치 전에 예측하고 예산을 넘으면 표본(심볼, 기간)을 줄입니다.
   - 검증: 보류 배치 90% 이상에서 예측/실측 0.5~1.5. 메모리 예측 초과 시 실행 전 거부.
-- [ ] 5. **충실도 편향 관리.** S1 탈락 후보의 5% 무작위 승격(시드 기록), 계열별 S1 대 S3 순위상관 기록.
+- [x] 5. **충실도 편향 관리.** S1 탈락 후보의 5% 무작위 승격(시드 기록), 계열별 S1 대 S3 순위상관 기록.
   - 검증: 승격 비율이 5% ± 이항 95% 구간, 승격 시도에 `promoted_random` 표시와 회계 포함.
 - [ ] 6. **탐색기: Random 기준선과 TPE.** Optuna 사용 여부를 **이 단계에서 확인받습니다**. 승인되면 버전 고정, 내부 평가마다 trial 기록. 같은 `cost_s` 예산으로 회수율, FWER, N_eff 증가량 비교.
   - 검증: Optuna 내부 평가 수 = trial 수, 심어 둔 합성 신호 회수율을 두 방법 모두 보고.
@@ -111,3 +111,4 @@ task: qr-phase4-search
 - 2026-11-10 단계 2: `search/s0_stage.py`(`run_s0`), 테스트 6개. 후보 1개 = S0 trial 1건(배치당 트랜잭션 1개). 통과=done, 제약·S0 위반=rejected(사유 전부), 정규형 중복=rejected(`duplicate: ... trial N`, 배치 안·이전 배치 모두). 제약 위반 후보는 spec이 없어 `spec_hash="point:"+sha256(point)`로 실험을 등록합니다 — 계획에 없던 세부, 회계 불변식 유지를 위해 추가.
 - 2026-11-10 단계 3: `search/s1.py`(순수: 라벨, Spearman IC, NW HAC t, 이벤트 조건 수익률, `IcFeatureEvaluator`), `search/s1_stage.py`(`run_s1`: S1 trial 1건 + feature_eval 1행), 테스트 17개. 라벨은 `exec_open[k+h]/exec_open[k]-1`(결정 후 첫 체결가). 합성 IC(ρ=0.3 → 기대 0.2876) ±0.02 재현, 랜덤워크 과거 특징 |IC|<0.03, 누수 라벨은 IC>0.9로 탐지, HAC t는 교과서 반복문 구현과 1e-12 일치. 계획과의 차이: (1) 비용 포함판은 이벤트 수익률에서 포지션당 왕복 비용 1회를 뺀 `event_mean_net`으로 정의(횡단면 순위 IC는 상수 비용에 불변이라 IC 자체의 비용판은 의미 없음), (2) 펀딩 포함판은 펀딩 데이터 미적재(OPS-006)라 미구현이며 모든 S1 결과에 `funding_not_modelled` 표시, (3) S2 승격 순위는 `event_hac_t`(순수익 기준) — ADR로 기록 예정.
 - 2026-11-10 단계 4: `search/cost_model.py`(단계별 OLS `a + b·rows·ops`, 메모리 `c + d·rows`, 실행 전 메모리 거부, 시간 예산에 맞춘 행 수 축소, 0.5~1.5 대역 비율), 테스트 7개. 합성(로그정규 잡음 σ=0.2) 보류 배치 200개 중 90% 이상이 대역 안. S1 trial metrics에 `rows`, `ops`를 기록해 실측 적합 입력으로 씁니다. **실데이터 완료 기준 측정은 단계 10**입니다(이 단계의 합성 검증은 완료 판정이 아님).
+- 2026-11-19 단계 5(2026-11-11 착수분을 이어서 마무리): `search/promotion.py`(순수: `select_for_s2` 상위 k + 나머지에서 시드 고정 `promote_rate` 무작위 승격, `rank_corr` Spearman, `Selection.kind`), `search/s2_stage.py`(`run_s2`: 승격 후보 1개 = S2 trial 1건, metrics에 `promotion`(top_k/promoted_random)·`promotion_seed`·`promotion_rate`·`s1_trial_id`·`s1_score` 태그; `fidelity_by_family`: spec_hash별 최신 S1·S3 done trial을 짝지어 계열별 순위상관), `backtest/run.py`의 `run_backtest(tags=...)`(trial metrics에 병합, 거부된 trial에도 남음). 테스트 9개(승격률 5% 이항 95% 구간, 시드 결정성, 회계 1:1, 거부 trial 태그, S3 재평가 시 최신 trial 짝). 계획과의 차이: 순위상관은 테이블에 저장하지 않고 `fidelity_by_family`가 trial에서 계산해 단계 10 측정표에 적습니다(저장 위치가 계획에 없었음). 사이에 F-017(WS 수집기 heartbeat) 수정이 끼어 커밋 b453600으로 먼저 나갔습니다.

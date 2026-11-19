@@ -14,6 +14,7 @@ import json
 import math
 import time
 import zlib
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Literal
@@ -135,12 +136,18 @@ def run_backtest(
     stage: Stage = "smoke",
     fold: str | None = None,
     origin: TrialOrigin | None = None,
+    tags: Mapping[str, object] | None = None,
 ) -> RunOutcome:
+    """One trial per call. `tags` are stored with the trial metrics (e.g. the S1 -> S2 promotion kind)."""
     h, run_config = experiment_config(spec, panel, catalog, config)
     frame = panel.frame
     key = ledger.register_experiment(h, spec.model_dump_json(), run_config)
     with ledger.evaluate(key, h, stage, fold=fold, origin=origin) as trial:
-        return _evaluate(spec, panel, frame, catalog, ledger, config, trial, run_config)
+        out = _evaluate(spec, panel, frame, catalog, ledger, config, trial, run_config)
+        if tags:
+            trial.metrics.update(tags)
+            out.metrics.update(tags)
+        return out
 
 
 def experiment_config(
