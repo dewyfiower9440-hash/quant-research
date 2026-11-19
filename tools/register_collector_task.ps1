@@ -10,7 +10,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-collector-supervisor',
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\quant-research',
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
     [ValidateNotNullOrEmpty()][string]$LogDir = 'C:\dev\qr-data\logs',
     # Supervisor-death detection latency. 1 min is the Task Scheduler minimum; IgnoreNew makes ticks
     # free while the instance runs (2026-11-08 decision 6).

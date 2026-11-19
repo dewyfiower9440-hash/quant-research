@@ -333,3 +333,10 @@
   - 한도 메시지의 종료 코드는 문서에 없어 텍스트 표지와 `api_error_status=429`로 감지합니다.
   - CLI가 보고하는 플랜(`pro`)과 사용자가 확인한 플랜(Max)이 다릅니다.
 - **CLI의 `total_cost_usd`**는 클라이언트 추정치이며 구독에서는 청구액이 아닙니다. 호출 상세에만 남깁니다.
+
+## ADR-026 (2026-11-19, 사용자 결정) 저장소를 `C:\dev\auto\code`로 이동, `plan`·`report`는 junction
+- **맥락:** 설계 기준서(`docs/plans/2026-11-08-autonomous-quant-research.md`)에 딸린 코드·문서·계획을 `C:\dev\auto` 한곳에 code/report/plan으로 모으라는 지시. 수집기 예약 작업이 저장소 경로의 `.venv`로 실행 중이고, hook은 `<저장소>/docs/plans`만 계획으로 읽는다.
+- **선택지:** (1) 저장소를 통째로 `C:\dev\auto\code`로 이동하고 `plan`·`report`는 `code\docs\plans`·`code\docs`를 가리키는 junction (2) `C:\dev\auto`를 git 루트로 재구성(code/report/plan 실제 폴더) (3) 사본만 복사.
+- **결정:** (1). 이력·원격·미커밋 변경을 그대로 보존하고, 게이트와 hook 규약(`docs/plans`)이 그대로 동작하며, 원본이 하나다. (2)는 게이트 경로·CLAUDE.md 위치·hook 규약을 함께 바꾸는 큰 작업이고, (3)은 두 벌이 생겨 어느 쪽이 진짜인지 흐려진다.
+- **영향:** 예약 작업 2개(`qr-collector-supervisor`, `qr-bulk-download`)를 새 경로로 재등록(사용자 실행). `tools/register_*.ps1`의 `$Project`·`$Script` 기본값과 `docs/operations.md`의 명령 경로가 `C:\dev\auto\code`로 바뀜. 데이터 경로 `C:\dev\qr-data`는 그대로. 새 세션은 `C:\dev\auto\code`에서 시작. 계획: `docs/plans/2026-11-19-move-to-auto.md`.
+- **주의:** `C:\dev\auto\plan`·`report`는 junction이라 `rm -rf`로 지우면 원본 `docs`가 지워진다. 링크만 지울 때는 `rmdir`.

@@ -12,7 +12,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-upbit-backfill',
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\quant-research',
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
     [ValidateNotNullOrEmpty()][string]$LogDir = 'C:\dev\qr-data\logs',
     [ValidateRange(5, 1440)][int]$RepeatMinutes = 30,
     [ValidateRange(1, 30)][int]$Days = 7,

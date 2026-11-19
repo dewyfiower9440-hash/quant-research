@@ -9,7 +9,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-ssd-temp-monitor',
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$Script = 'C:\dev\quant-research\tools\ssd_temp_monitor.ps1',
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$Script = 'C:\dev\auto\code\tools\ssd_temp_monitor.ps1',
     [ValidateRange(1, 60)][int]$EveryMinutes = 10
 )
 Set-StrictMode -Version Latest

@@ -4,7 +4,7 @@
 | 항목 | 내용 |
 |---|---|
 | 실행 주체 | Windows 작업 스케줄러 `qr-collector-supervisor`. 일반 사용자(`LogonType Interactive`, `RunLevel Limited`), 저장된 비밀번호 없음 |
-| 등록·갱신 | `powershell -File C:\dev\quant-research\tools\register_collector_task.ps1`. 다시 실행해도 안전하며, 실행 중인 인스턴스는 유지됩니다 |
+| 등록·갱신 | `powershell -File C:\dev\auto\code\tools\register_collector_task.ps1`. 다시 실행해도 안전하며, 실행 중인 인스턴스는 유지됩니다 |
 | 트리거 | 로그온할 때 + 1분마다 반복(F-006, 2026-11-08 결정 6). 인스턴스가 살아 있는 동안에는 `IgnoreNew` 때문에 반복 트리거가 새 프로세스를 띄우지 않습니다 |
 | 프로세스 | `pythonw.exe -m quant_research.capture.run supervisor --log-dir C:\dev\qr-data\logs`. 그 아래 자식 `rest`(REST 폴러)와 `ws`(forceOrder WS)가 있습니다 |
 | 로그 | `C:\dev\qr-data\logs\{supervisor,rest,ws}.log`(JSON 줄) |
@@ -66,7 +66,7 @@
 - **리허설:** `uv run python tools/restore_drill.py --to C:/dev/qr-restore-drill --snapshot` → exit 0이면 전부 일치입니다. 복원 폴더는 자동으로 지웁니다.
 
 ## 10. T1 추가 벌크와 유니버스 적재
-- **등록(사용자 실행):** `powershell -NoProfile -File C:\dev\quant-research\tools\register_bulk_extras_task.ps1`(작업 `qr-bulk-extras`)
+- **등록(사용자 실행):** `powershell -NoProfile -File C:\dev\auto\code\tools\register_bulk_extras_task.ps1`(작업 `qr-bulk-extras`)
   - klines가 실행 중이면 exit 2로 끝나고 30분 뒤 다시 시도합니다.
 - **상태:** `run/bulk-extras.progress.json`, `logs/bulk-extras-task.log`. 완료되면 `bulk/complete-extras-universe-20261109.json`이 생깁니다.
 - **유니버스 적재(멱등):** `uv run python tools/load_universe_catalog.py --universe C:/dev/qr-data/bulk/universe-20261109.json`
@@ -134,8 +134,8 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - **임시 대응책:** 강제 종료 후 복구는 실측했습니다(16.2초). 로그온 트리거 작업은 등록돼 있습니다.
 - **해결 계획**
   - 사용자가 실행합니다:
-    - `! powershell -NoProfile -File C:\dev\quant-research\tools\register_upbit_backfill_task.ps1`
-    - `! powershell -NoProfile -File C:\dev\quant-research\tools\register_bulk_extras_task.ps1`
+    - `! powershell -NoProfile -File C:\dev\auto\code\tools\register_upbit_backfill_task.ps1`
+    - `! powershell -NoProfile -File C:\dev\auto\code\tools\register_bulk_extras_task.ps1`
   - 사용자가 정한 시점에 재부팅하고, 재시작 gap과 하트비트로 복구 시간을 잽니다.
 - **완료 판정 기준:**
   - 두 작업이 Ready/Running 상태입니다.

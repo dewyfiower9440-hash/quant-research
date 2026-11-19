@@ -13,7 +13,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-bulk-download',
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\quant-research',
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$Universe = 'C:\dev\qr-data\bulk\universe-20261109.json',
     [ValidateNotNullOrEmpty()][string]$LogDir = 'C:\dev\qr-data\logs',
     [ValidateRange(5, 1440)][int]$RepeatMinutes = 30,
