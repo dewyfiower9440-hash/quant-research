@@ -17,11 +17,13 @@ Guarantees (tested in tests/director/test_director.py):
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import cast
+from typing import Literal, cast
 
+import numpy as np
 from pydantic import BaseModel, ValidationError
 
 from quant_research.backtest.panel import Panel
@@ -44,8 +46,14 @@ from quant_research.research.anonymize import Anonymizer, forbidden_terms, leaks
 from quant_research.research.features import evidence_ref
 from quant_research.research.ledger import TrialLedger, TrialOrigin
 from quant_research.research.memory import CauseCode, MemoryStore, struct_key
+from quant_research.search.bandit import BanditPrior, FamilyBandit, cost_normalised_reward, deflated_performance
+from quant_research.search.multiplicity import expected_max_sr, sr_variance
+from quant_research.search.optimizers import TpeSearcher
+from quant_research.search.pipeline import SearchBudget, point_from_json, point_json, run_family_search
+from quant_research.search.s1 import S1Config
+from quant_research.strategy.space import SPACES, build_point
 from quant_research.strategy.spec import StrategySpec
-from quant_research.strategy.templates import GRID, REQUIRED_DATA, build
+from quant_research.strategy.templates import FAMILIES, GRID, REQUIRED_DATA, build
 
 S = State
 PROMPT_VERSION = "phase3-v2"  # v2 (F-016): constraint notes in the system prompt, field-level feedback
@@ -68,6 +76,7 @@ SYSTEM: dict[str, str] = {
     ),
 }
 LEAVE_COOLDOWN: tuple[CauseCode, ...] = ("weak_signal", "regime_dependent", "infeasible")
+SearchMode = Literal["grid", "space"]
 PASS_SR = 0.0  # Phase 3 bar for "confirmation passed": positive daily SR, net and worst-case return > 0
 
 
@@ -84,6 +93,12 @@ class DirectorConfig:
     universe_n: int = 5
     capital: float = 10_000.0
     prompt_version: str = PROMPT_VERSION
+    # Phase 4: "space" runs the registered search space through the pipeline driver (TPE picks the numbers,
+    # the Director picks the family); "grid" is the Phase 3 fixed grid chosen by the LLM.
+    search: SearchMode = "grid"
+    s1_count: int = 40
+    top_k: int = 3
+    promote_rate: float = 0.05
 
     def as_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -128,6 +143,8 @@ class Director:
         symbols = sorted(set(selection.frame["symbol"].to_list()))
         self.terms = forbidden_terms(symbols)
         self.aliases = [self.anonymizer.alias("symbol", s) for s in symbols]
+        # Phase 4: the discounted, cost-normalised family bandit (rewards arrive after each cycle's S3)
+        self.bandit = FamilyBandit(tuple(FAMILIES), BanditPrior(min_pulls=0.0)) if config.search == "space" else None
 
     # ------------------------------------------------------------------ cycle bookkeeping
     def open_cycle(self, seq: int) -> tuple[int, State, str]:
@@ -364,7 +381,11 @@ class Director:
         blocked = sorted(self.memory.data_blocked()) if self.cfg.memory else []
         cooled = sorted(self.memory.cooled_families(seq, self.cfg.run_id, LEAVE_COOLDOWN)) if self.cfg.memory else []
         # every grid point already has a finished selection trial: nothing new to test (Phase 4 widens the space)
-        exhausted = [f for f in GRID if all(self._evaluated(k, "S2") is not None for k in self.grid_keys(f))]
+        exhausted = (
+            [f for f in GRID if all(self._evaluated(k, "S2") is not None for k in self.grid_keys(f))]
+            if self.cfg.search == "grid"
+            else []  # the registered space (>10^5 points per family) is never exhausted in practice
+        )
         released: str | None = None
         open_families = set(GRID) - set(blocked) - set(exhausted)
         if open_families and open_families <= set(cooled):
@@ -393,6 +414,7 @@ class Director:
             consecutive_in_family=streak,
             seed=self.cfg.seed,
             seq=seq,
+            bandit=self.bandit,
         )
         return (
             S.HYPOTHESIZE,
@@ -520,7 +542,23 @@ class Director:
             "select variants_json from experiment_plan where cycle_id = ?", (cycle_id,)
         ).fetchone()
         calls: list[int] = []
-        if row is None:
+        if row is None and self.cfg.search == "space":
+            # Phase 4: the LLM chose the family (and the hypothesis); numbers and structure come from the
+            # registered space through the searcher, so no grid-variant call is made (§7: "LLM은 구조만").
+            self.store.conn.execute(
+                "insert into experiment_plan(cycle_id, hypothesis_id, template, variants_json, rationale, llm_call_id, "
+                "created_ns) values (?,?,?,?,?,?,?)",
+                (
+                    cycle_id,
+                    hid,
+                    family,
+                    "[]",
+                    "space search: numbers chosen by the searcher (Phase 4)",
+                    None,
+                    time.time_ns(),
+                ),
+            )
+        elif row is None:
             excluded = [
                 i
                 for i in range(len(GRID[family]))
@@ -601,6 +639,13 @@ class Director:
 
     def _generate(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
         _hid, family, variants = self._variants(cycle_id)
+        if self.cfg.search == "space":
+            space = SPACES[family]
+            return (
+                S.SEARCH,
+                f"{family}: candidates come from the registered space",
+                {"space": family, "nominal_size": space.nominal_size(), "s1_count": self.cfg.s1_count},
+            )
         specs: dict[str, object] = {}
         for v in variants:
             spec = self._spec(family, v)
@@ -642,7 +687,41 @@ class Director:
         )
         return out.trial_id
 
+    def _search_space(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
+        """Phase 4: S0 -> S1 -> promotion -> S2 on the selection split through the pipeline driver."""
+        hid, family, _variants = self._variants(cycle_id)
+        ok, why = self.gate()
+        if not ok:
+            raise BudgetExceeded(f"resource / thermal gate: {why}")
+        searcher = TpeSearcher(
+            SPACES[family], seed=int(np.random.default_rng([self.cfg.seed, cycle_id]).integers(2**31))
+        )
+        result = run_family_search(
+            self.ledger,
+            family,
+            searcher,
+            selection=self.selection,
+            confirmation=None,  # S3 stays in the BACKTEST state (one event-engine run on the confirmation split)
+            catalog=self.catalog,
+            config={"run_id": self.cfg.run_id, "seed": self.cfg.seed, "search": "space"},
+            s1=S1Config(),
+            budget=SearchBudget(
+                s1_count=self.cfg.s1_count, top_k=self.cfg.top_k, promote_rate=self.cfg.promote_rate, s3_top=0
+            ),
+            seed=self.cfg.seed + cycle_id,
+            fold=f"cycle{cycle_id}",
+            origin=self._origin(cycle_id, hid),
+            s2_config=self._selection_config(),
+        )
+        evidence: dict[str, object] = {**result.summary(), "optuna_evaluations": searcher.internal_evaluations()}
+        best = result.best_s2()
+        if best is None:
+            return S.ANALYZE, "no candidate evaluated successfully on the selection split", evidence
+        return S.BACKTEST, f"best selection candidate trial {best.outcome.trial_id}", evidence
+
     def _search(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
+        if self.cfg.search == "space":
+            return self._search_space(cycle_id, seq)
         hid, family, variants = self._variants(cycle_id)
         trials: dict[str, int] = {}
         duplicates: dict[str, int] = {}
@@ -677,8 +756,19 @@ class Director:
 
     def _backtest(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
         hid, family, _variants = self._variants(cycle_id)
-        best = int(cast(int, self._evidence(cycle_id, S.BACKTEST)["best_variant"]))
-        spec = self._spec(family, best)
+        search_ev = self._evidence(cycle_id, S.BACKTEST)
+        if self.cfg.search == "space":
+            point = point_from_json(cast(dict[str, object], search_ev["best_point"]))
+            spec = build_point(SPACES[family], point)
+            best = -1
+            label: dict[str, object] = {
+                "best_point": point_json(point),
+                "best_s2_trial": search_ev.get("best_s2_trial"),
+            }
+        else:
+            best = int(cast(int, search_ev["best_variant"]))
+            spec = self._spec(family, best)
+            label = {"variant": best}
         config = RunConfig(engine="event", capital=self.cfg.capital, seed=self.cfg.seed)
         key = self._key(spec, self.confirmation, config)
         row = self.store.conn.execute(
@@ -694,10 +784,30 @@ class Director:
             and float(cast(float, m.get("total_return") or 0.0)) > 0
             and float(cast(float, m.get("worst_case_total_return") or 0.0)) > 0
         )
-        ev: dict[str, object] = {"confirmation_trial": trial, "variant": best, "passed_phase3_bar": passed}
+        ev: dict[str, object] = {"confirmation_trial": trial, **label, "passed_phase3_bar": passed}
+        if self.bandit is not None:  # Phase 4 reward: deflated confirmation SR per second of this cycle's cost
+            ev["bandit"] = self._reward_bandit(cycle_id, family, view)
         if passed:
             return S.VALIDATE, "confirmation split passed the Phase 3 bar (not a validation)", ev
         return S.ANALYZE, "confirmation split did not pass the Phase 3 bar", ev
+
+    def _reward_bandit(self, cycle_id: int, family: str, view: RunView) -> dict[str, object]:
+        """Reward = (S3 SR - E[max SR of this cycle's done S2 trials under the null]) / cycle cost_s (§8)."""
+        if self.bandit is None:
+            return {}
+        row = self.store.conn.execute(
+            "select coalesce(sum(cost_s), 0), sum(stage = 'S2' and status = 'done') from trial where cycle_id = ?",
+            (cycle_id,),
+        ).fetchone()
+        cost_s, n2 = float(row[0] or 0.0), int(row[1] or 0)
+        sr = view.metrics.get("sr_daily")
+        reward = 0.0
+        if view.status == "done" and isinstance(sr, int | float) and math.isfinite(float(sr)):
+            t = max(2, len(view.daily))
+            sr0 = expected_max_sr(max(1, n2), sr_variance(0.0, 0.0, 3.0, t))
+            reward = cost_normalised_reward(deflated_performance(float(sr), sr0), max(cost_s, 1e-6))
+        self.bandit.update(family, reward)
+        return {"reward": reward, "cost_s": cost_s, "n_s2_done": n2, "posterior": self.bandit.posterior()}
 
     def _validate(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
         return S.ANALYZE, "validator not implemented (Phase 5): no holdout access, no claim", {"validator": None}

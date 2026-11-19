@@ -50,6 +50,7 @@ def run_s2(
     config: RunConfig,
     *,
     origin: TrialOrigin | None = None,
+    fold: str | None = None,
 ) -> list[S2Scored]:
     out: list[S2Scored] = []
     for s in promoted(selection):
@@ -63,7 +64,7 @@ def run_s2(
             "s1_trial_id": s.trial_id,
             "s1_score": s.result.score(),
         }
-        result = run_backtest(spec, panel, catalog, ledger, config, stage="S2", origin=origin, tags=tags)
+        result = run_backtest(spec, panel, catalog, ledger, config, stage="S2", fold=fold, origin=origin, tags=tags)
         out.append(S2Scored(s, kind, result))
     return out
 

@@ -18,6 +18,7 @@ from quant_research.director.policy import Choice, PolicyMode
 from quant_research.director.schemas import HypothesisDraft
 from quant_research.director.states import State, check_transition
 from quant_research.research.memory import CauseCode, struct_key
+from quant_research.search.bandit import FamilyBandit
 from quant_research.strategy.compile import Compiled
 from quant_research.strategy.spec import StrategySpec
 
@@ -111,6 +112,7 @@ def test_missing_funding_blocks_the_family_through_a_recorded_data_request(
         consecutive_in_family: int = 0,
         seed: int,
         seq: int,
+        bandit: FamilyBandit | None = None,
     ) -> Choice:
         if seq == 1:
             return Choice("funding_basis", "test: forced", {})
@@ -123,6 +125,7 @@ def test_missing_funding_blocks_the_family_through_a_recorded_data_request(
             consecutive_in_family=consecutive_in_family,
             seed=seed,
             seq=seq,
+            bandit=bandit,
         )
 
     monkeypatch.setattr(director_module, "choose_family", first_funding)
@@ -349,3 +352,36 @@ def test_when_only_cooldowns_block_every_family_the_oldest_cooldown_is_released(
     assert observe["family"] == "trend" and observe["cooldown_released"] == "trend"  # failed longest ago
     states = [to for _f, to, _r, _e in transitions(env, res.cycle_id)]
     assert "PLAN" in states and states.count("OBSERVE") == 1  # the released family is really researched
+
+
+def test_space_search_runs_the_pipeline_driver_and_rewards_the_bandit(env: Env) -> None:
+    """Phase 4: the Director picks the family, the searcher picks the numbers; every stage is a trial."""
+    cfg = DirectorConfig(run_id="r-space", seed=5, universe_n=2, search="space", s1_count=10, top_k=2, promote_rate=0.0)
+    d = env.director(config=cfg)
+    results = d.run(3)
+    assert [r.status for r in results] == ["done"] * 3
+    stages = dict(
+        env.store.conn.execute("select stage, count(*) from trial where status <> 'aborted' group by stage").fetchall()
+    )
+    s0 = int(stages.get("S0", 0))
+    assert s0 >= 10 and s0 % 10 == 0 and stages.get("S1", 0) >= 1 and stages.get("S2", 0) >= 1  # cooldown cycles skip
+    # the plan step made no LLM variant call: only hypothesize / analyze purposes were asked
+    purposes = {str(r[0]) for r in env.store.conn.execute("select distinct purpose from llm_call")}
+    assert "plan" not in purposes and "hypothesize" in purposes
+    plans = env.store.conn.execute("select variants_json, llm_call_id from experiment_plan").fetchall()
+    assert plans and all(p[0] == "[]" and p[1] is None for p in plans)
+    search_ev = [ev for _f, to, _r, ev in transitions(env) if to in ("BACKTEST", "ANALYZE") and "s0_trials" in ev]
+    assert search_ev and all(ev["s0_trials"] == ev["proposed"] == ev["optuna_evaluations"] == 10 for ev in search_ev)
+    assert all(
+        int(str(ev["s2_trials"])) == int(str(ev["promoted_top"])) + int(str(ev["promoted_random"])) for ev in search_ev
+    )
+    backtests = [ev for _f, to, _r, ev in transitions(env) if to in ("VALIDATE", "ANALYZE") and "bandit" in ev]
+    if backtests:  # an S3 ran: the bandit was rewarded with a cost-normalised, deflated value
+        b = cast(dict[str, object], backtests[0]["bandit"])
+        assert float(cast(float, b["reward"])) >= 0.0 and "posterior" in b
+        assert d.bandit is not None and d.bandit.updates == len(backtests)
+    assert done_duplicates(env) == []
+    running = env.store.conn.execute("select count(*) from trial where status = 'running'").fetchone()[0]
+    assert running == 0
+    observe = [ev for _f, to, _r, ev in transitions(env) if to == "HYPOTHESIZE" and "family" in ev]
+    assert observe and all(ev["exhausted"] == [] for ev in observe)  # the space is never "exhausted"

@@ -35,6 +35,7 @@ class S0Outcome:
     duplicates: int
     rejected: int
     accepted: list[Accepted] = field(default_factory=lambda: list[Accepted]())
+    statuses: list[str] = field(default_factory=lambda: list[str]())  # per candidate: done | rejected | duplicate
 
 
 def point_json(point: Point) -> dict[str, object]:
@@ -63,6 +64,7 @@ def run_s0(
     origin: TrialOrigin | None = None,
 ) -> S0Outcome:
     accepted: list[Accepted] = []
+    statuses: list[str] = []
     duplicates = rejected = 0
     with ledger.store.transaction():
         for cand in candidates:
@@ -79,9 +81,13 @@ def run_s0(
                 if cand.spec is None:
                     trial.reject("; ".join(cand.reasons) or "rejected without a reason")
                     rejected += 1
+                    statuses.append("rejected")
                 elif first is not None:
                     trial.reject(f"duplicate: canonical spec already passed S0 in trial {first}")
                     duplicates += 1
+                    statuses.append("duplicate")
+                else:
+                    statuses.append("done")
             if cand.spec is not None and first is None:
                 accepted.append(Accepted(cand.point, h, key, trial.trial_id))
-    return S0Outcome(len(candidates), len(accepted), duplicates, rejected, accepted)
+    return S0Outcome(len(candidates), len(accepted), duplicates, rejected, accepted, statuses)

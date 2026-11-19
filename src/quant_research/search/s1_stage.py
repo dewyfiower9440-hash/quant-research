@@ -37,6 +37,7 @@ def run_s1(
     cfg: S1Config,
     *,
     origin: TrialOrigin | None = None,
+    fold: str | None = None,
 ) -> list[S1Scored]:
     out: list[S1Scored] = []
     version = data_version(panel.files)
@@ -46,7 +47,7 @@ def run_s1(
         key = ledger.register_experiment(cand.spec_hash, spec.model_dump_json(), s1_config(config, cfg))
         signal = expanded_trees(spec)["signal"]
         feature = json.dumps(None if signal is None else canonical_tree(signal), sort_keys=True)
-        with ledger.evaluate(key, cand.spec_hash, "S1", origin=origin) as trial:
+        with ledger.evaluate(key, cand.spec_hash, "S1", fold=fold, origin=origin) as trial:
             result = evaluate_s1(spec, panel, cfg)
             trial.metrics = {
                 **result.metrics(),
