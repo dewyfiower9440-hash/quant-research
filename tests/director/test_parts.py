@@ -265,3 +265,47 @@ def test_posterior_favours_families_that_passed_and_uniform_ignores_it() -> None
         mode="posterior", outcomes=outcomes, blocked=[], last_family=None, last_causes=[], seed=9, seq=1
     )  # reproducible for a seed
     assert json.dumps(same.posterior)  # serializable for the transition record
+
+
+def test_policy_uses_the_discounted_bandit_when_given_and_keeps_the_cause_rules() -> None:
+    from quant_research.search.bandit import BanditPrior, FamilyBandit
+
+    bandit = FamilyBandit(FAMILIES, BanditPrior(gamma=0.9, sigma=0.05, min_pulls=0.0))
+    for _ in range(20):
+        bandit.update("volatility", 1.0)
+        bandit.update("trend", 0.0)
+    picks = [
+        choose_family(
+            mode="posterior", outcomes={}, blocked=[], last_family=None, last_causes=[], seed=4, seq=s, bandit=bandit
+        )
+        for s in range(50)
+    ]
+    assert all(p.reason.startswith("bandit:") for p in picks)
+    assert [p.family for p in picks].count("volatility") >= 45
+    assert picks[0].posterior == bandit.posterior()
+    stay = choose_family(
+        mode="posterior",
+        outcomes={},
+        blocked=[],
+        last_family="trend",
+        last_causes=["cost_erosion"],
+        seed=4,
+        seq=99,
+        bandit=bandit,
+    )
+    assert stay.family == "trend" and "stay" in stay.reason  # cause-code rules still come first
+    leave = choose_family(
+        mode="posterior",
+        outcomes={},
+        blocked=[],
+        last_family="volatility",
+        last_causes=["weak_signal"],
+        seed=4,
+        seq=100,
+        bandit=bandit,
+    )
+    assert leave.family != "volatility"
+    uniform = choose_family(
+        mode="uniform", outcomes={}, blocked=[], last_family=None, last_causes=[], seed=4, seq=1, bandit=bandit
+    )
+    assert uniform.reason.startswith("uniform")

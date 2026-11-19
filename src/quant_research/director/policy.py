@@ -19,6 +19,7 @@ from typing import Literal
 import numpy as np
 
 from quant_research.research.memory import CauseCode
+from quant_research.search.bandit import FamilyBandit
 from quant_research.strategy.templates import FAMILIES
 
 PolicyMode = Literal["posterior", "uniform"]
@@ -43,13 +44,21 @@ def choose_family(
     consecutive_in_family: int = 0,
     seed: int,
     seq: int,
+    bandit: FamilyBandit | None = None,
 ) -> Choice:
+    """With `bandit` (Phase 4 step 8) the posterior is the discounted, cost-normalised Thompson sampler over
+    search-batch rewards; without it, the Phase 3 Beta(1, 1) over pass / fail cycles. Cause-code rules apply
+    to both; `mode="uniform"` ignores both (ablation switch)."""
     rng = np.random.default_rng([seed, seq])
     blocked_set = set(blocked)
     eligible = [f for f in FAMILIES if f not in blocked_set]
     if not eligible:
         eligible = list(FAMILIES)  # everything blocked: fall back rather than stall (recorded in the reason)
-    post = {f: (1.0 + outcomes.get(f, (0, 0))[0], 1.0 + outcomes.get(f, (0, 0))[1]) for f in FAMILIES}
+    post = (
+        bandit.posterior()
+        if bandit is not None
+        else {f: (1.0 + outcomes.get(f, (0, 0))[0], 1.0 + outcomes.get(f, (0, 0))[1]) for f in FAMILIES}
+    )
     causes = set(last_causes)
     stay_ok = consecutive_in_family < 2  # "stay once": at most two cycles in a row on the same family
     if last_family is not None and last_family in eligible and causes & STAY and not causes & LEAVE and stay_ok:
@@ -60,6 +69,9 @@ def choose_family(
     if mode == "uniform":
         pick = eligible[int(rng.integers(len(eligible)))]
         return Choice(pick, f"uniform over {eligible}", post)
+    if bandit is not None:
+        pick, why = bandit.choose(eligible, seed=seed, seq=seq)
+        return Choice(pick, f"bandit: {why}", post)
     draws = {f: float(rng.beta(*post[f])) for f in eligible}
     pick = max(draws, key=lambda f: draws[f])
     return Choice(pick, f"posterior draw {draws[pick]:.3f} highest among {eligible}", post)
