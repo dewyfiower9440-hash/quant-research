@@ -199,3 +199,19 @@ def test_s1_ignores_warm_up_rows(rw_panel: Panel) -> None:
 def test_malformed_s1_settings_are_rejected(make: Callable[[], object]) -> None:
     with pytest.raises(ValueError):
         make()
+
+
+def test_s1_score_needs_30_events_and_shrinks_small_samples() -> None:
+    """v2.2 B1 (root-cause 1-b, ADR-046): an S1 trial with 3 events reached HAC t = 35 and was promoted top-k in
+    every batch. Below 30 events (or 30 IC decisions) the score is -inf; above, t * n / (n + 30)."""
+    from quant_research.search.s1 import MIN_S1_SAMPLES, S1Result
+
+    def result(events: int, ic: int, t: float | None) -> S1Result:
+        return S1Result(24, 0.01, 1.0, ic, 0.02, 0.022, t, events, ())
+
+    assert MIN_S1_SAMPLES == 30
+    assert result(3, 500, 35.08).score() == -math.inf  # the real case (trial 3741)
+    assert result(500, 12, 4.0).score() == -math.inf  # too few IC decisions
+    assert result(30, 30, 4.0).score() == pytest.approx(4.0 * 30 / 60)
+    assert result(970, 1_000, 4.0).score() == pytest.approx(4.0 * 970 / 1_000)
+    assert result(500, 500, None).score() == -math.inf

@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal, cast
 
@@ -26,6 +27,7 @@ ROW_COUNT_SQL: dict[str, str] = {
     "dataset": "select count(*) from dataset",
     "gap": "select count(*) from gap",
     "seal_policy": "select count(*) from seal_policy",
+    "seal_window": "select count(*) from seal_window",
     "universe_membership": "select count(*) from universe_membership",
     "lag_policy": "select count(*) from lag_policy",
     "compacted_segment": "select count(*) from compacted_segment",
@@ -82,6 +84,17 @@ class LagPolicy:
     dataset_id: str
     lag_ns: int
     rationale: str
+
+
+SealRole = Literal["research", "holdout_hist", "holdout_fwd"]
+MIN_NS = -(2**63)
+
+
+@dataclass(frozen=True, slots=True)
+class SealWindow:
+    role: SealRole
+    from_ns: int
+    to_ns: int  # exclusive
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +219,44 @@ class Catalog:
             "values (?,?,?,?,?,?)",
             (e.dataset_id, e.epoch, e.research_until_ns, e.holdout_until_ns, e.rationale, time.time_ns()),
         )
+
+    def add_seal_windows(self, e: SealEpoch, windows: Sequence[SealWindow]) -> None:
+        """Register an epoch made of windows (ADR-040), in one transaction: the epoch row (same rules as
+        `add_seal_epoch`) and its windows. Windows must not overlap; research windows end by `research_until_ns`,
+        every window by `holdout_until_ns`."""
+        if not windows or not any(w.role == "research" for w in windows):
+            raise CatalogError(f"epoch {e.epoch} of {e.dataset_id} needs at least one research window")
+        ordered = sorted(windows, key=lambda w: w.from_ns)
+        for a, b in pairwise(ordered):
+            if b.from_ns < a.to_ns:
+                raise CatalogError(f"seal windows overlap for {e.dataset_id}: {a} and {b}")
+        for w in ordered:
+            if w.to_ns <= w.from_ns:
+                raise CatalogError(f"empty seal window {w} for {e.dataset_id}")
+            if w.role == "research" and w.to_ns > e.research_until_ns:
+                raise CatalogError(f"research window {w} ends after research_until for {e.dataset_id}")
+            if w.to_ns > e.holdout_until_ns:
+                raise CatalogError(f"seal window {w} ends after holdout_until for {e.dataset_id}")
+        with self.transaction():
+            self.add_seal_epoch(e)
+            for w in ordered:
+                self.conn.execute(
+                    "insert into seal_window(dataset_id, epoch, role, from_ns, to_ns) values (?,?,?,?,?)",
+                    (e.dataset_id, e.epoch, w.role, w.from_ns, w.to_ns),
+                )
+
+    def research_windows(self, dataset_id: str) -> list[tuple[int, int]]:
+        """[from, to) research windows of the dataset's latest epoch; an epoch without windows means
+        everything before its `research_until_ns` (epoch-1 semantics)."""
+        e = self.seal(dataset_id)
+        rows = self.conn.execute(
+            "select from_ns, to_ns from seal_window where dataset_id = ? and epoch = ? and role = 'research' "
+            "order by from_ns",
+            (dataset_id, e.epoch),
+        ).fetchall()
+        if not rows:
+            return [(MIN_NS, e.research_until_ns)]
+        return [(int(r[0]), int(r[1])) for r in rows]
 
     def seal(self, dataset_id: str) -> SealEpoch:
         row = self.conn.execute(

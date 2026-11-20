@@ -245,7 +245,7 @@ def load_panel(
             read = load_bulk(data_root, dataset_id, [symbol], months)
             files += read.files
             if read.frame.height:
-                pit.check_decisions(dataset_id, latest)
+                pit.check_span(dataset_id, first_bar_ns, latest)  # warm-up included (ADR-040)
                 frames[dataset_id] = pit.rows_visible(read.frame, dataset_id)
         if KLINES not in frames:
             raise FileNotFoundError(f"no {KLINES} lake files for {symbol} in {months[0]}..{months[-1]}")

@@ -446,3 +446,7 @@
 - **bandit 보상의 분할:** bandit이 있으면 선별 구간의 평가 결정 앞 75%(fit)에서 S1·S2를 돌리고, 최고 S2 후보를 뒤 25%(val, 앞의 행은 특징 계산용 웜업)에서 한 번 더 평가한 별도 S2 trial(fold `<fold>:val`)의 SR로만 보상한다. 확인 구간(S3)은 bandit에 들어가지 않는다. 각 부분은 최소 24결정.
 - **보상의 귀무:** val 실행은 후보 선택에 쓰이지 않은 데이터에서의 **1회 평가**이므로 귀무 SR = 0으로 둔다(이전의 "배치 S2 trial 수의 기대 최댓값" 차감은 최댓값이 아닌 값을 이중 차감해 보상을 거의 항상 0으로 만들었다, A4 리뷰). 보상 = max(SR_val, 0) / 배치 비용(초).
 - **배치 도구:** `tools/run_search.py`는 bandit을 쓰므로 S1·S2가 fit 부분(선별 구간의 앞 75%)에서 돈다. 비용 예측과 회계(`val_trials`)도 이에 맞췄다.
+
+### ADR-040 보강 (2026-11-20, B2 구현)
+- **구현:** catalog 마이그레이션 0008 `seal_window`(불변), `Catalog.add_seal_windows`·`research_windows`, `PointInTime.check_span`(연구 역할: 읽는 구간 전체(웜업 포함)가 연구 창 하나 안), `rows_visible`(연구 역할: event와 available이 같은 연구 창 안인 행만). `load_panel`은 `check_span(first_bar_ns, 마지막 결정)`을 쓴다. 등록은 `tools/register_seal_epoch2.py --apply`(ADR-013 epoch 1 데이터셋 9개: um klines·mark·index·premium·funding·metrics_5m·book_depth, spot klines, upbit.candles_1m; T0 수집 데이터셋은 epoch 1 유지).
+- **주의:** epoch 2의 `seal_policy` 행은 `research_until = 2026-07-01`이라, `seal_window`를 모르는 **B2 이전 코드는 역사 holdout을 연구 구간으로 읽는다.** B2 이전 커밋으로 연구 실행(재현 포함)을 하지 않는다. 등록은 구 코드로 도는 연구 프로세스(귀무 측정)가 끝난 뒤에 한다.

@@ -18,7 +18,7 @@ POINT = Point.of("trend", {"fast": 24, "slow": 96}, {})
 
 
 def _scored(trial_id: int, t: float | None) -> S1Scored:
-    res = S1Result(24, None, None, 0, None, None, t, 0, ())
+    res = S1Result(24, None, None, 100, None, None, t, 100, ())  # enough samples: the test is about ranking
     return S1Scored(Accepted(POINT, f"h{trial_id}", f"k{trial_id}", trial_id), res, trial_id)
 
 

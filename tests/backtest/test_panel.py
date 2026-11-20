@@ -140,3 +140,39 @@ def test_load_panel_reads_only_the_requested_symbols_and_refuses_the_sealed_hold
             )
     finally:
         catalog.close()
+
+
+def test_under_seal_epoch_2_a_panel_may_not_read_the_historical_holdout(tmp_path: Path) -> None:
+    """B2 (ADR-040) at the panel level: months of the historical holdout are refused (warm-up included), a
+    research-window month still loads."""
+    from quant_research.catalog.epochs import register_epoch2
+
+    catalog = Catalog.open(tmp_path / "c.db")
+    bootstrap(catalog)
+    try:
+        assert "binance.um.bulk.klines_1m" in register_epoch2(catalog, apply=True)
+        june_2024 = 1_717_200_000 * 10**9  # 2024-06-01: inside the historical holdout
+        frame = minutes("A", 30, start=june_2024)
+        write_frame(
+            frame.drop("available_ns", "symbol"),
+            tmp_path / "lake" / "binance.um.bulk.klines_1m" / "2024-06" / "A-2024-06-v1.parquet",
+            symbol="A",
+        )
+        _write(tmp_path, "binance.um.bulk.klines_1m", minutes("A", 30), "A")
+        pit = PointInTime(catalog)
+        with pytest.raises(SealViolationError, match="research window"):
+            load_panel(
+                pit,
+                tmp_path,
+                ["A"],
+                first_bar_ns=june_2024,
+                last_bar_ns=june_2024 + 10 * M,
+                config=PanelConfig(5 * M),
+                rule=None,
+            )
+        ok = load_panel(
+            pit, tmp_path, ["A"], first_bar_ns=T0, last_bar_ns=T0 + 10 * M, config=PanelConfig(5 * M), rule=None
+        )
+        assert ok.frame.height > 0  # 2026-01 lies in the second research window
+    finally:
+        catalog.close()

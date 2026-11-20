@@ -1,6 +1,7 @@
 """Step 4: incremental backup of closed raw files with a sha256 manifest, and a restore drill."""
 
 import gzip
+import hashlib
 import json
 from pathlib import Path
 
@@ -187,3 +188,27 @@ def test_row_count_queries_cover_every_catalog_table(tmp_path: Path) -> None:
     finally:
         catalog.close()
     assert set(ROW_COUNT_SQL) == tables  # a new migration must add its table to the snapshot check
+
+
+def test_a_snapshot_taken_before_a_new_catalog_table_still_restores(tmp_path: Path) -> None:
+    """B1/B2 review finding 2: the kept snapshots predate the seal_window table (migration 0008); counting every
+    table of today's schema raised `no such table` and the restore drill died instead of verifying."""
+    import sqlite3
+
+    data = tmp_path / "data"
+    _catalog_with_rows(data, 2)
+    dest = tmp_path / "backup"
+    snap = snapshot_catalog(data, dest, now_ns=T0)
+    assert snap is not None
+    conn = sqlite3.connect(snap.path)  # make the kept snapshot look like one taken before migration 0008
+    conn.execute("drop table seal_window")
+    conn.commit()
+    conn.close()
+    index_path = dest / "catalog" / "snapshots.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    meta = index[snap.path.name]
+    meta["tables"].pop("seal_window")
+    meta["sha256"] = hashlib.sha256(snap.path.read_bytes()).hexdigest()
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    report = restore_catalog_and_verify(dest, tmp_path / "restore")
+    assert report.ok and report.files == 1

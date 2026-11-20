@@ -91,11 +91,31 @@ class PointInTime:
                 "(sealed holdout)"
             )
 
+    def check_span(self, dataset_id: str, first_ns: int, last_ns: int) -> None:
+        """Research: the whole span a run reads (warm-up included) and decides in must lie inside ONE research
+        window (ADR-040: a warm-up reaching into a holdout, or a run across a holdout, is refused, not trimmed)."""
+        if self.role != "research":
+            return
+        self.check_decisions(dataset_id, last_ns)
+        windows = self.catalog.research_windows(dataset_id)
+        if not any(lo <= first_ns and last_ns < hi for lo, hi in windows):
+            raise SealViolationError(
+                f"span [{first_ns}, {last_ns}] of {dataset_id} is not inside one research window {windows}"
+            )
+
     def rows_visible(self, frame: pl.DataFrame, dataset_id: str) -> pl.DataFrame:
-        """Rows this role may see at all (research: available strictly before the seal boundary)."""
+        """Rows this role may see at all (research: available inside a research window of the latest epoch)."""
         out = self.with_available(frame, dataset_id)
         if self.role == "research":
-            out = out.filter(pl.col("available_ns") < self.catalog.seal(dataset_id).research_until_ns)
+            # the EVENT and the availability must lie in the same research window: a holdout bar that only
+            # becomes available after the window starts is still holdout data (B1/B2 review)
+            inside = pl.lit(False)
+            for lo, hi in self.catalog.research_windows(dataset_id):
+                in_window = (pl.col("available_ns") >= lo) & (pl.col("available_ns") < hi)
+                if "event_ns" in out.columns:
+                    in_window = in_window & (pl.col("event_ns").cast(pl.Int64).fill_null(lo) >= lo)
+                inside = inside | in_window
+            out = out.filter(inside)
         return out
 
     def join_asof(
@@ -113,8 +133,9 @@ class PointInTime:
         if not left.schema["decision_ns"].is_integer():
             raise AppError(f"decision_ns must be integer nanoseconds, got {left.schema['decision_ns']}")
         latest = left["decision_ns"].cast(pl.Int64).max()  # integer dtype checked above
-        if isinstance(latest, int):
-            self.check_decisions(dataset_id, latest)
+        earliest = left["decision_ns"].cast(pl.Int64).min()
+        if isinstance(latest, int) and isinstance(earliest, int):
+            self.check_span(dataset_id, earliest, latest)
         # Stable sort on (available, event); then drop rows whose event is older than one already
         # available (revisions of old buckets), so the backward as-of match is the newest event.
         right = self.rows_visible(frame, dataset_id).sort(["available_ns", "event_ns"], maintain_order=True)

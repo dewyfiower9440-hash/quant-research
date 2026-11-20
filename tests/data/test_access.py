@@ -1,13 +1,14 @@
 """Step 6: point-in-time access (design v2.1 §5.4). The leak tests inject future information on purpose."""
 
 import ast
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from quant_research.catalog.store import Catalog, Dataset, LagPolicy, SealEpoch
+from quant_research.catalog.store import Catalog, CatalogError, Dataset, LagPolicy, SealEpoch, SealWindow
 from quant_research.data.access import PointInTime, SealViolationError
 from quant_research.errors import AppError
 
@@ -227,3 +228,97 @@ def test_rows_without_event_time_stay_joinable_by_receive_time(catalog: Catalog)
     frame = pl.DataFrame({"event_ns": [5 * S, None, None], "received_ns": [5 * S, 6 * S, 7 * S], "value": [1, 2, 3]})
     out = pit.join_asof(pl.Series("decision_ns", [6 * S, 8 * S]), frame, "trades")
     assert out["value"].to_list() == [2, 3]
+
+
+# ---------------------------------------------------------------- v2.2 B2: seal epoch 2 with windows (ADR-040)
+K = 1_000 * S  # the fixture's epoch 1 seals research at 10 K; epoch 2 keeps that boundary (it may not move back)
+
+
+@pytest.fixture
+def windowed(catalog: Catalog) -> Catalog:
+    """Epoch 2 of 'trades': research [0, 1K) + [3K, 10K), historical holdout [1K, 3K), forward [10K, 20K)."""
+    catalog.add_seal_windows(
+        SealEpoch("trades", 2, research_until_ns=10 * K, holdout_until_ns=20 * K, rationale="ADR-040 test"),
+        [
+            SealWindow("research", 0, 1 * K),
+            SealWindow("holdout_hist", 1 * K, 3 * K),
+            SealWindow("research", 3 * K, 10 * K),
+            SealWindow("holdout_fwd", 10 * K, 20 * K),
+        ],
+    )
+    return catalog
+
+
+def test_research_sees_only_rows_inside_its_windows_and_the_validator_sees_all(windowed: Catalog) -> None:
+    stamps = [K // 2, 3 * K // 2, 7 * K // 2, 15 * K]
+    frame = pl.DataFrame({"event_ns": stamps, "received_ns": stamps, "value": [1.0, 2.0, 3.0, 4.0]})
+    seen = PointInTime(windowed, role="research").rows_visible(frame, "trades")
+    assert seen["value"].to_list() == [1.0, 3.0]  # neither the historical nor the forward holdout
+    assert PointInTime(windowed, role="validator").rows_visible(frame, "trades").height == 4
+    assert windowed.research_windows("trades") == [(0, 1 * K), (3 * K, 10 * K)]
+    assert windowed.research_windows("oi") == [(-(2**63), 10_000 * S)]  # an epoch-1 dataset: as before
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "ok"),
+    [
+        (0.1, 0.9, True),
+        (3.1, 9.5, True),
+        (0.9, 1.1, False),  # runs into the historical holdout
+        (1.5, 1.6, False),  # inside it
+        (2.5, 3.5, False),  # a warm-up that starts in the holdout
+        (9.8, 10.2, False),  # into the forward holdout
+        (0.1, 3.5, False),  # spans the holdout (two research blocks in one run)
+    ],
+)
+def test_a_span_must_lie_inside_one_research_window(windowed: Catalog, first: float, last: float, ok: bool) -> None:
+    pit = PointInTime(windowed, role="research")
+    lo, hi = int(first * K), int(last * K)
+    if ok:
+        pit.check_span("trades", lo, hi)
+    else:
+        with pytest.raises(SealViolationError):
+            pit.check_span("trades", lo, hi)
+    PointInTime(windowed, role="validator").check_span("trades", lo, hi)  # never refused
+
+
+def test_join_asof_refuses_decisions_spanning_the_historical_holdout(windowed: Catalog) -> None:
+    pit = PointInTime(windowed, role="research")
+    frame = pl.DataFrame({"event_ns": [0], "received_ns": [0], "value": [1.0]})
+    with pytest.raises(SealViolationError, match="research window"):
+        pit.join_asof(pl.Series("decision_ns", [K // 10, 7 * K // 2]), frame, "trades")
+    assert pit.join_asof(pl.Series("decision_ns", [K // 10, K // 5]), frame, "trades").height == 2
+
+
+def test_seal_windows_are_validated_and_immutable(catalog: Catalog) -> None:
+    e2 = SealEpoch("oi", 2, research_until_ns=10 * K, holdout_until_ns=20 * K, rationale="x")
+    with pytest.raises(CatalogError, match="overlap"):
+        catalog.add_seal_windows(e2, [SealWindow("research", 0, 2 * K), SealWindow("holdout_hist", 1 * K, 3 * K)])
+    with pytest.raises(CatalogError, match="research_until"):
+        catalog.add_seal_windows(e2, [SealWindow("research", 0, 15 * K), SealWindow("holdout_fwd", 15 * K, 20 * K)])
+    with pytest.raises(CatalogError, match="holdout_until"):
+        catalog.add_seal_windows(e2, [SealWindow("research", 0, 10 * K), SealWindow("holdout_fwd", 10 * K, 30 * K)])
+    assert catalog.seal("oi").epoch == 1  # refused windows registered nothing
+    catalog.add_seal_windows(e2, [SealWindow("research", 0, 10 * K), SealWindow("holdout_fwd", 10 * K, 20 * K)])
+    assert catalog.seal("oi").epoch == 2
+    with pytest.raises(sqlite3.IntegrityError):
+        catalog.conn.execute("update seal_window set to_ns = 1 where dataset_id = 'oi'")
+    with pytest.raises(sqlite3.IntegrityError):
+        catalog.conn.execute("delete from seal_window where dataset_id = 'oi'")
+
+
+def test_a_row_whose_event_lies_in_the_holdout_stays_hidden_even_once_available_in_research(
+    windowed: Catalog,
+) -> None:
+    """B1/B2 review finding 1: filtering on available_ns alone showed a bar whose EVENT lies in the historical
+    holdout once its availability crossed into the next research window (an hourly bar stamped 2:59 K becomes
+    available at 3.05 K). Both the event and the availability must lie inside the same research window."""
+    frame = pl.DataFrame(
+        {
+            "event_ns": [29 * K // 10, 31 * K // 10, 9 * K // 10],
+            "received_ns": [305 * K // 100, 32 * K // 10, 11 * K // 10],
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+    seen = PointInTime(windowed, role="research").rows_visible(frame, "trades")
+    assert seen["value"].to_list() == [2.0]  # event 2.9 K in the holdout: hidden; event 0.9 K, available 1.1 K: hidden

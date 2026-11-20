@@ -49,6 +49,9 @@ class S1Config:
             raise ValueError(f"min_cross_section must be >= 2, got {self.min_cross_section}")
 
 
+MIN_S1_SAMPLES = 30  # v2.2 B1 (ADR-046): events and IC decisions an S1 score needs; also the shrinkage scale
+
+
 @dataclass(frozen=True, slots=True)
 class S1Result:
     horizon_bars: int
@@ -62,8 +65,12 @@ class S1Result:
     flags: tuple[str, ...]
 
     def score(self) -> float:
-        """Ranking key for S2 promotion: HAC t of the net event return (undefined -> -inf)."""
-        return -math.inf if self.event_hac_t is None else self.event_hac_t
+        """Ranking key for S2 promotion: HAC t of the net event return, shrunk by n / (n + 30) for n events; fewer
+        than MIN_S1_SAMPLES events or IC decisions, or an undefined t -> -inf (v2.2 B1: 3 events reached t = 35)."""
+        n = self.event_samples
+        if self.event_hac_t is None or n < MIN_S1_SAMPLES or self.ic_samples < MIN_S1_SAMPLES:
+            return -math.inf
+        return self.event_hac_t * n / (n + MIN_S1_SAMPLES)
 
     @classmethod
     def from_metrics(cls, m: Mapping[str, object]) -> S1Result:

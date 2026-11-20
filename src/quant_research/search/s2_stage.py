@@ -8,6 +8,7 @@ to measure the S1 filter's bias (Spearman rank correlation per family)."""
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -18,6 +19,7 @@ from quant_research.research.ledger import TrialLedger, TrialOrigin
 from quant_research.search.cost_model import spec_ops
 from quant_research.search.promotion import Selection, rank_corr
 from quant_research.search.s0_stage import point_json
+from quant_research.search.s1 import S1Result
 from quant_research.search.s1_stage import S1Scored
 from quant_research.strategy.space import SPACES, build_point
 from quant_research.strategy.spec import StrategySpec
@@ -100,8 +102,8 @@ def fidelity_by_family(ledger: TrialLedger, *, s3_score: str = S3_SCORE) -> list
     for m1, m3 in rows:
         s1: dict[str, object] = json.loads(str(m1))
         s3: dict[str, object] = json.loads(str(m3))
-        a, b = s1.get("score"), s3.get(s3_score)
-        if not isinstance(a, int | float) or not isinstance(b, int | float) or a != a or b != b:
+        a, b = S1Result.from_metrics(s1).score(), s3.get(s3_score)  # recomputed: one rule for all (B1)
+        if not math.isfinite(a) or not isinstance(b, int | float) or b != b:  # -inf: below the S1 sample floor
             continue
         point = s1.get("point")
         family = str(cast(dict[str, object], point).get("family", "?")) if isinstance(point, dict) else "?"

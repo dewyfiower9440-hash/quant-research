@@ -124,9 +124,11 @@ class CatalogSnapshot:
 
 
 def _row_counts(db: Path) -> dict[str, int]:
+    """Rows per catalog table that EXISTS in this file (a snapshot taken before a migration lacks its table)."""
     conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
     try:
-        return {name: int(conn.execute(sql).fetchone()[0]) for name, sql in ROW_COUNT_SQL.items()}
+        present = {str(r[0]) for r in conn.execute("select name from sqlite_master where type = 'table'")}
+        return {name: int(conn.execute(sql).fetchone()[0]) for name, sql in ROW_COUNT_SQL.items() if name in present}
     finally:
         conn.close()
 

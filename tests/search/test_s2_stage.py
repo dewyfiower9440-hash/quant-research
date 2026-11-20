@@ -183,3 +183,12 @@ def test_stateful_specs_are_evaluated_by_the_event_engine_at_s2(env: tuple[Catal
     used = {o.source.candidate.point.struct_dict()["time_stop"]: o.outcome.metrics["engine_used"] for o in out}
     assert used == {24: "event", 0: "vector"}
     assert all("path dependent" not in (o.outcome.reason or "") for o in out)
+
+
+def test_fidelity_recomputes_the_s1_score_with_the_current_rule() -> None:
+    """B1/B2 review finding 3: stored S1 'score' metrics of trials before B1 use the raw HAC t (3 events gave t =
+    35); the fidelity table recomputes the score from the stored fields so both rules are not mixed."""
+    from quant_research.search.s1 import S1Result
+
+    stored = {"horizon_bars": 24, "ic_samples": 500, "event_hac_t": 35.08, "event_samples": 3, "score": 35.08}
+    assert S1Result.from_metrics(stored).score() == float("-inf")  # what fidelity_by_family must use
