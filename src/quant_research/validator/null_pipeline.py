@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast, get_args
 
 import numpy as np
 import polars as pl
@@ -45,14 +45,117 @@ F64 = NDArray[np.float64]
 HOUR_NS = 3_600 * 10**9
 DAY_NS = 24 * HOUR_NS
 Alpha = Literal["none", "random", "mechanism"]
+NullKind = Literal["bootstrap", "permute", "signflip"]
 
 
 @dataclass(frozen=True, slots=True)
 class SyntheticSpec:
+    """A synthetic market (ADR-043). Nulls: `bootstrap` = stationary block bootstrap of the base returns;
+    `permute` = whole blocks of the base in a random order (structure inside a block kept, its time position
+    lost); `signflip` = bootstrap path with each block's returns multiplied by a random sign (all symbols together:
+    volatility and co-movement kept, any direction removed). Every null starts from per-symbol demeaned returns.
+    `hours` = length of the output market (None: the base length), so holdouts longer than the base are possible.
+    Alphas: `random` adds `strength` to ALL symbols in a random fifth of the hours; `mechanism` makes every symbol
+    lean against its previous hour."""
+
     alpha: Alpha = "none"
     strength: float = 0.0  # per-hour drift (random) or mean-reversion coefficient (mechanism)
-    block_len: int = 24  # hours per bootstrap block
-    shuffle: bool = False  # additionally permute whole blocks (a stronger null)
+    block_len: int = 24  # hours per block
+    null: NullKind = "bootstrap"
+    hours: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.null not in get_args(NullKind):
+            raise ValueError(f"unknown null {self.null!r}; one of {get_args(NullKind)}")
+        if self.alpha not in get_args(Alpha):
+            raise ValueError(f"unknown alpha {self.alpha!r}; one of {get_args(Alpha)}")
+        if self.block_len < 1:
+            raise ValueError(f"block_len must be >= 1, got {self.block_len}")
+        if self.hours is not None and self.hours < 2:
+            raise ValueError(f"hours must be >= 2, got {self.hours}")
+
+
+def _bootstrap_path(source: int, length: int, block_len: int, rng: np.random.Generator) -> NDArray[np.int64]:
+    """Stationary bootstrap indices of `length` into a source of `source` rows (geometric blocks, circular)."""
+    starts = rng.integers(0, source, size=length)
+    new_block = rng.random(length) < 1.0 / block_len
+    new_block[0] = True
+    idx = np.empty(length, dtype=np.int64)
+    for t in range(length):
+        idx[t] = starts[t] if new_block[t] else (idx[t - 1] + 1) % source
+    return idx
+
+
+def _permutation_path(source: int, length: int, block_len: int, rng: np.random.Generator) -> NDArray[np.int64]:
+    """Whole blocks of the source in random order, passes repeated until `length` rows."""
+    blocks = [np.arange(s, min(s + block_len, source), dtype=np.int64) for s in range(0, source, block_len)]
+    out: list[NDArray[np.int64]] = []
+    n = 0
+    while n < length:
+        for b in rng.permutation(len(blocks)):
+            out.append(blocks[int(b)])
+            n += blocks[int(b)].shape[0]
+    return np.concatenate(out)[:length]
+
+
+def parse_null(name: str) -> NullKind:
+    """A null kind from text (CLI); an unknown name is refused, never mapped to another null."""
+    for kind in get_args(NullKind):
+        if name == kind:
+            return cast(NullKind, kind)
+    raise ValueError(f"unknown null {name!r}; one of {get_args(NullKind)}")
+
+
+def realizable_z(alpha: Alpha, rets: F64) -> float:
+    """z (mean / sd * sqrt(T)) on `rets` of the best strategy that can actually be TRADED against the planted alpha
+    (A3 review: the old formulas assumed independent symbols and an oracle that knows which hours drift).
+    random -> long all symbols equally (the drifting hours are not observable); mechanism -> per symbol, fade the
+    last hour (position -sign(r_{t-1})), equal weight; none -> the long-all z (a reference)."""
+    pnl = (-np.sign(rets[:-1]) * rets[1:]).mean(axis=1) if alpha == "mechanism" else rets.mean(axis=1)
+    sd = float(np.std(pnl, ddof=1))
+    return float(np.mean(pnl)) / sd * math.sqrt(pnl.shape[0]) if sd > 0 else 0.0
+
+
+def calibrate_strength(
+    alpha: Alpha,
+    z: float,
+    closes: F64,
+    *,
+    holdout_hours: int,
+    draws: int = 8,
+    seed: int = 0,
+    block_len: int = 24,
+    iters: int = 40,
+) -> float:
+    """The strength at which the tradable strategy of `realizable_z` reaches `z` on average over `draws` synthetic
+    holdouts of `holdout_hours` (bisection; ADR-043: the alpha strength comes from a detectability target)."""
+    if alpha == "none" or z <= 0:
+        return 0.0
+
+    def mean_z(strength: float) -> float:
+        zs = [
+            realizable_z(
+                alpha,
+                synthetic_returns(
+                    closes,
+                    SyntheticSpec(alpha=alpha, strength=strength, block_len=block_len, hours=holdout_hours + 1),
+                    np.random.default_rng(seed + i),
+                ),
+            )
+            for i in range(draws)
+        ]
+        return float(np.mean(zs))
+
+    lo, hi = 0.0, (0.9 if alpha == "mechanism" else 0.01)
+    while alpha == "random" and mean_z(hi) < z and hi < 1.0:  # widen until the target is bracketed
+        hi *= 2
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        if mean_z(mid) < z:
+            lo = mid
+        else:
+            hi = mid
+    return hi
 
 
 def hourly_closes(panel: Panel) -> tuple[list[str], NDArray[np.int64], F64]:
@@ -70,11 +173,21 @@ def synthetic_returns(closes: F64, spec: SyntheticSpec, rng: np.random.Generator
     logp = np.log(np.where(np.isnan(closes), np.nan, closes))
     rets = np.diff(logp, axis=0)
     rets = np.nan_to_num(rets, nan=0.0)
-    t = rets.shape[0]
-    idx = stationary_bootstrap_indices(t, spec.block_len, 1, rng)[0]
-    if spec.shuffle:
-        idx = rng.permutation(idx)
+    # every null starts from DEMEANED returns: resampling raw returns planted each symbol's drift of the base
+    # period into the whole synthetic market (A3 review finding 1)
+    rets = rets - rets.mean(axis=0)
+    source = rets.shape[0]
+    t = source if spec.hours is None else spec.hours - 1
+    if spec.null == "permute":
+        idx = _permutation_path(source, t, spec.block_len, rng)
+    elif spec.hours is None and spec.null == "bootstrap":
+        idx = stationary_bootstrap_indices(source, spec.block_len, 1, rng)[0]  # the v2.1 path, unchanged
+    else:
+        idx = _bootstrap_path(source, t, spec.block_len, rng)
     out = rets[idx].copy()
+    if spec.null == "signflip":
+        signs = np.where(rng.random(t // spec.block_len + 1) < 0.5, -1.0, 1.0)
+        out *= np.repeat(signs, spec.block_len)[:t, None]
     if spec.alpha == "random" and spec.strength:
         picks = rng.integers(0, 5, size=t)  # a random fifth of the hours carries a drift
         hours = np.equal(picks, 0)
@@ -91,6 +204,8 @@ def synthetic_panel(
     """A panel on the SAME decision grid as `base`, rebuilt from synthetic hourly bars (one bar = one hour).
     The same seed gives the same synthetic market at any `latency_ns` (the lag stress re-assembles it)."""
     symbols, grid, closes = hourly_closes(base)
+    if spec.hours is not None:  # a longer (or shorter) market on the base's hourly grid
+        grid = int(grid[0]) + np.arange(spec.hours, dtype=np.int64) * base.config.timeframe_ns
     rng = np.random.default_rng(seed)
     rets = synthetic_returns(closes, spec, rng)
     prices = start_price * np.exp(np.vstack([np.zeros((1, len(symbols))), np.cumsum(rets, axis=0)]))
@@ -124,7 +239,7 @@ def synthetic_panel(
         pl.lit(tf // MINUTE_NS).alias("exec_minutes"),
     )
     # the synthetic spec is part of the data identity (a reused S1 result must come from the same market)
-    files = [(f"synthetic:{spec.alpha}:{spec.strength}:{spec.block_len}:{spec.shuffle}", seed)]
+    files = [(f"synthetic:{spec.alpha}:{spec.strength}:{spec.block_len}:{spec.null}:{spec.hours}", seed)]
     return Panel(frame, settlements(None, None), files, cfg, evaluate_from_ns=base.evaluate_from_ns)
 
 
@@ -222,9 +337,13 @@ def holdout_evaluation(
 
 
 def incomplete_verdict(rule: DecisionRule, *, status: str, reason: str | None) -> Verdict:
-    """A failed verdict for a holdout run that did not complete; it carries the rule hash so it can be booked."""
+    """A holdout run that did not complete cannot be judged: insufficient (refused, no query spent; ADR-042). It
+    carries the rule hash so it can be booked."""
     return Verdict(
-        False, ("holdout run did not complete",), {"status": status, "reason": reason, "rule_hash": rule.hash()}
+        False,
+        ("holdout run did not complete",),
+        {"status": status, "reason": reason, "rule_hash": rule.hash(), "insufficient": True},
+        insufficient=True,
     )
 
 
@@ -381,3 +500,141 @@ def register_and_judge(
 
 def families_round_robin(families: Sequence[str], reps: int) -> list[str]:
     return [families[i % len(families)] for i in range(reps)]
+
+
+@dataclass(frozen=True, slots=True)
+class EpochReplication:
+    """One synthetic epoch: search over the families, then up to k holdout queries (ADR-043 end-to-end FWER)."""
+
+    seed: int
+    searcher: str
+    candidates: int  # S3 survivors offered to the validator
+    queries: int  # judged queries (insufficient ones are refused and spend nothing)
+    insufficient: int
+    passes: int
+    records: tuple[dict[str, object], ...]  # per submitted candidate; kept so passes can be inspected
+
+    @property
+    def passed(self) -> bool:
+        return self.passes > 0
+
+
+def replicate_epoch(
+    splits: Splits,
+    catalog: Catalog,
+    ledger: TrialLedger,
+    vstore: ValidatorStore,
+    *,
+    families: Sequence[str],
+    factory: SearcherFactory,
+    budget: SearchBudget,
+    rule: DecisionRule,
+    seed: int,
+    k: int,
+    epoch: int = 1,
+) -> EpochReplication:
+    """Search every family on selection/confirmation, rank the S3 survivors with a positive confirmation SR, and submit
+    them to the validator in that order until k queries are spent (review 1 finding 10: one query per replication
+    measured a per-query rate, not the epoch's FWER)."""
+    from quant_research.search.pipeline import point_from_json
+
+    if k != rule.k:
+        raise ValueError(f"the epoch budget k={k} must be the rule's k={rule.k} (alpha/k is the per-query level)")
+    offered: list[tuple[float, str, RunOutcome]] = []
+    name = ""
+    for family in families:
+        searcher = factory(family, seed)
+        name = searcher.name
+        res = run_family_search(
+            ledger,
+            family,
+            searcher,
+            selection=splits.selection,
+            confirmation=splits.confirmation,
+            catalog=catalog,
+            config={"null_pipeline": "epoch", "seed": seed, "family": family, "searcher": searcher.name},
+            s1=S1Config(horizon_bars=4),
+            budget=budget,
+            seed=seed,
+            fold=f"epoch{seed}",
+        )
+        for o in res.s3:
+            sr = o.metrics.get("sr_daily")
+            # the submission policy research would follow: only survivors with a positive confirmation SR
+            if o.status == "done" and isinstance(sr, int | float) and math.isfinite(float(sr)) and float(sr) > 0:
+                offered.append((float(sr), family, o))
+    offered.sort(key=lambda x: (-x[0], x[2].trial_id))
+    vstore.ensure_budget(epoch, k, rule_hash=rule.hash())
+    queries = insufficient = passes = 0
+    records: list[dict[str, object]] = []
+    for sr3, family, o in offered:
+        if queries >= k:
+            break
+        spec = build_point(SPACES[family], point_from_json(o.metrics.get("point")))  # type: ignore[arg-type]
+        verdict = holdout_evaluation(
+            spec,
+            splits.holdout,
+            catalog,
+            ledger,
+            rule,
+            in_sample_sr=sr3,
+            seed=seed,
+            panel_at_latency=splits.holdout_at_latency,
+        )
+        request = seed * 1_000 + len(records) + 1
+        ok = register_and_judge(
+            vstore, request, f"{family}:{o.trial_id}", rule, verdict, epoch=epoch, k=k, in_sample_sr=sr3
+        )
+        if verdict.insufficient:
+            insufficient += 1
+        else:
+            queries += 1
+            passes += int(ok)
+        records.append(
+            {
+                "family": family,
+                "trial_id": o.trial_id,
+                "sr3": sr3,
+                "passed": ok,
+                "insufficient": verdict.insufficient,
+                "detail": {key: verdict.detail.get(key) for key in ("sr_holdout", "p_one_sided", "psr", "days")},
+            }
+        )
+    return EpochReplication(seed, name, len(offered), queries, insufficient, passes, tuple(records))
+
+
+@dataclass(frozen=True, slots=True)
+class EpochResult:
+    label: str
+    replications: tuple[EpochReplication, ...]
+
+    def summary(self) -> dict[str, object]:
+        # an epoch with no positive survivor is a MEASURED non-pass; only an epoch whose every submission was
+        # insufficient measured nothing (A3 review finding 6)
+        judged = [r for r in self.replications if r.queries > 0 or r.candidates == 0]
+        n = len(judged)
+        rate = sum(r.passed for r in judged) / n if n else math.nan
+        lo, hi = wilson(rate, n)
+        return {
+            "label": self.label,
+            "replications": len(self.replications),
+            "measurable": n > 0,  # no replication made a query: nothing was measured (not an FWER of 0)
+            "judged_replications": n,
+            "unmeasured": sum(1 for r in self.replications if r.candidates > 0 and r.queries == 0),
+            "no_candidate": sum(1 for r in self.replications if r.candidates == 0),
+            "fwer": rate,  # P(at least one of the epoch's queries passed)
+            "wilson_95": [lo, hi],
+            "mean_queries": sum(r.queries for r in self.replications) / max(1, len(self.replications)),
+            "mean_candidates": sum(r.candidates for r in self.replications) / max(1, len(self.replications)),
+            "insufficient_share": sum(r.insufficient for r in self.replications)
+            / max(1, sum(r.insufficient + r.queries for r in self.replications)),
+        }
+
+
+def wilson(p: float, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n == 0 or not math.isfinite(p):
+        return math.nan, math.nan
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)

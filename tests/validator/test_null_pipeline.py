@@ -18,16 +18,21 @@ from quant_research.research.store import ResearchStore
 from quant_research.search.pipeline import SearchBudget
 from quant_research.strategy.templates import templates
 from quant_research.validator.null_pipeline import (
+    EpochResult,
     HarnessResult,
     Replication,
     SyntheticSpec,
+    calibrate_strength,
     families_round_robin,
     holdout_evaluation,
     hourly_closes,
     incomplete_verdict,
+    parse_null,
     random_factory,
+    realizable_z,
     register_and_judge,
     replicate,
+    replicate_epoch,
     split_three,
     synthetic_panel,
     synthetic_returns,
@@ -213,8 +218,10 @@ def test_an_incomplete_holdout_verdict_carries_the_rule_hash_and_can_be_booked(t
     try:
         rule = DecisionRule(bootstrap_reps=200)
         v = incomplete_verdict(rule, status="failed", reason="no data")
-        assert v.passed is False and v.detail["rule_hash"] == rule.hash()
+        assert v.passed is False and v.insufficient and v.detail["rule_hash"] == rule.hash()
+        # a run that did not complete cannot be judged: refused, no query spent (A3 review finding 8, ADR-042)
         assert register_and_judge(store, 1, "h", rule, v, epoch=1, k=20, in_sample_sr=0.1) is False
+        assert store.budget(1) == (20, 0)
     finally:
         store.close()
 
@@ -243,3 +250,141 @@ def test_the_harness_separates_insufficient_replications_from_failed_ones() -> N
     assert s["judged"] == 2 and s["insufficient"] == 1 and s["pass_rate"] == 0.5 and s["measurable"] is True
     none = HarnessResult("y", reps[:1]).summary()
     assert none["measurable"] is False and none["judged"] == 0
+
+
+def test_synthetic_markets_can_be_longer_than_the_base_and_three_nulls_are_available(base: Panel) -> None:
+    """A3 (ADR-043): holdouts of >= 600 days need markets longer than the base sample; three pre-registered nulls."""
+    hours = 60 * 24
+    long = synthetic_panel(base, SyntheticSpec(hours=hours), seed=2)
+    assert long.frame["decision_ns"].n_unique() == hours  # 60 days from a 40-day base
+    _, _, closes = hourly_closes(base)
+    raw = np.nan_to_num(np.diff(np.log(closes), axis=0))
+    for null in ("bootstrap", "permute", "signflip"):
+        r = synthetic_returns(closes, SyntheticSpec(null=null, hours=hours), np.random.default_rng(5))
+        assert r.shape == (hours - 1, closes.shape[1])
+        # every value comes from the demeaned base sample (up to its sign): no invented returns
+        assert np.isin(np.round(np.abs(r), 12), np.round(np.abs(raw - raw.mean(axis=0)), 12)).all()
+    flip = synthetic_returns(closes, SyntheticSpec(null="signflip", hours=hours), np.random.default_rng(6))
+    assert abs(float(np.mean(flip))) < abs(float(np.mean(raw))) + 2e-5  # the sign flip removes the market drift
+    perm = synthetic_returns(closes, SyntheticSpec(null="permute", block_len=24), np.random.default_rng(7))
+    centred = raw[:, 0] - raw[:, 0].mean()
+    assert perm.shape == raw.shape and np.allclose(np.sort(perm[:, 0]), np.sort(centred))  # a reordering
+    assert not np.array_equal(perm[:, 0], raw[:, 0])
+    with pytest.raises(ValueError):
+        SyntheticSpec(hours=1)
+    with pytest.raises(ValueError, match="null"):
+        SyntheticSpec(null="permutation")  # type: ignore[arg-type]  # a typo must not silently run the bootstrap
+
+
+def test_every_null_is_demeaned_so_the_base_drift_is_not_planted(base: Panel) -> None:
+    """A3 review finding 1: resampling raw returns carried each symbol's 2025H1 drift into the whole synthetic
+    market (a long-short on the base drift signs reached z ~2.9 on a 700-day 'null' holdout)."""
+    _, _, closes = hourly_closes(base)
+    raw = np.nan_to_num(np.diff(np.log(closes), axis=0))
+    perm = synthetic_returns(closes, SyntheticSpec(null="permute"), np.random.default_rng(7))
+    assert np.allclose(perm.mean(axis=0), 0.0, atol=1e-15)  # a full permutation pass of demeaned returns
+    assert np.allclose(np.sort(perm[:, 0]), np.sort(raw[:, 0] - raw[:, 0].mean()))
+
+
+def test_alpha_strength_is_calibrated_so_a_tradable_strategy_reaches_the_target_z(base: Panel) -> None:
+    """A3 review findings 2-3: the analytic formulas assumed independent symbols (real pairwise correlation ~0.76)
+    and an oracle that knows WHICH hours drift; the strength is now calibrated by simulation so that a strategy
+    that can actually be traded (long all symbols / fade the last hour) reaches the target z on the holdout."""
+    _, _, closes = hourly_closes(base)
+    hours = 24 * 300
+    for alpha in ("random", "mechanism"):
+        s = calibrate_strength(alpha, 3.0, closes, holdout_hours=hours, draws=16, seed=1, iters=25)  # type: ignore[arg-type]
+        assert s > 0
+        zs = [
+            realizable_z(
+                alpha,
+                synthetic_returns(
+                    closes,
+                    SyntheticSpec(alpha=alpha, strength=s, hours=hours + 1),  # type: ignore[arg-type]
+                    np.random.default_rng(100 + i),
+                ),
+            )
+            for i in range(16)
+        ]
+        assert 2.3 < float(np.mean(zs)) < 3.7  # the target on fresh draws (sd of the mean of 16 z's ~0.25)
+    assert calibrate_strength("none", 3.0, closes, holdout_hours=hours, draws=2, seed=1) == 0.0
+    assert parse_null("signflip") == "signflip"
+    with pytest.raises(ValueError, match="unknown null"):
+        parse_null("sign_flip")
+
+
+def test_an_epoch_replication_spends_up_to_k_queries_and_counts_any_pass(
+    env: tuple[Catalog, TrialLedger], base: Panel, tmp_path: Path
+) -> None:
+    """A3 / review 1 finding 10: FWER is P(any of up to k holdout queries passes) in one epoch, not the rate of a
+    single query. Each judged candidate spends one query of the epoch's budget; insufficient ones spend none."""
+    catalog, ledger = env
+    # a 120-day market (longer than the 40-day base) with a planted mechanism, so positive survivors exist
+    spec = SyntheticSpec(alpha="mechanism", strength=0.3, hours=24 * 120)
+    sp = synthetic_splits(base, spec, seed=4, warmup_days=10, sel_days=40, conf_days=30)
+    rule = DecisionRule(
+        k=3, bootstrap_reps=200, min_holdout_days=3, min_active_days=0, min_entries=0, min_mean_exposure=0.0
+    )
+    vstore = ValidatorStore.open(tmp_path / "v.db")
+    try:
+        rep = replicate_epoch(
+            sp,
+            catalog,
+            ledger,
+            vstore,
+            families=["mean_reversion", "momentum"],
+            factory=random_factory,
+            budget=SearchBudget(s1_count=6, top_k=2, promote_rate=0.0, s3_top=2),
+            rule=rule,
+            seed=4,
+            k=rule.k,
+        )
+        k, used = vstore.budget(1)
+        assert rep.candidates > 0 and rep.queries > 0  # precondition: the epoch actually reached the validator
+        assert k == 3 and used == rep.queries <= 3 and rep.candidates >= rep.queries
+        assert rep.passed == (rep.passes > 0) and rep.passes <= rep.queries
+        assert all({"family", "sr3", "passed"} <= set(c) for c in rep.records)
+        assert all(float(str(c["sr3"])) > 0 for c in rep.records)  # only positive survivors are submitted
+    finally:
+        vstore.close()
+    res = EpochResult("x", (rep,)).summary()
+    assert res["replications"] == 1 and res["measurable"] == (rep.queries > 0)
+
+
+def test_the_epoch_fwer_counts_epochs_without_candidates_and_excludes_only_all_insufficient_ones() -> None:
+    """A3 review finding 6: an epoch whose search found no positive survivor is a measured non-pass; only epochs
+    whose every submission was insufficient measured nothing."""
+    from quant_research.validator.null_pipeline import EpochReplication
+
+    reps = (
+        EpochReplication(1, "random", 0, 0, 0, 0, ()),  # no candidate: a measured non-pass
+        EpochReplication(2, "random", 3, 0, 3, 0, ()),  # all insufficient: not measured
+        EpochReplication(3, "random", 5, 2, 3, 1, ()),  # a pass
+        EpochReplication(4, "random", 2, 2, 0, 0, ()),
+    )
+    s = EpochResult("x", reps).summary()
+    assert s["judged_replications"] == 3 and s["unmeasured"] == 1 and s["no_candidate"] == 1
+    assert s["fwer"] == pytest.approx(1 / 3)
+
+
+def test_the_epoch_budget_must_be_the_rules_k(env: tuple[Catalog, TrialLedger], base: Panel, tmp_path: Path) -> None:
+    """A3 review finding 4: k = 50 queries judged at alpha/20 would bound the FWER by 0.125, not 0.05."""
+    catalog, ledger = env
+    sp = synthetic_splits(base, SyntheticSpec(), seed=4, warmup_days=5, sel_days=14, conf_days=8)
+    vstore = ValidatorStore.open(tmp_path / "v.db")
+    try:
+        with pytest.raises(ValueError, match="rule's k"):
+            replicate_epoch(
+                sp,
+                catalog,
+                ledger,
+                vstore,
+                families=["momentum"],
+                factory=random_factory,
+                budget=SearchBudget(s1_count=2, top_k=1, promote_rate=0.0, s3_top=1),
+                rule=DecisionRule(bootstrap_reps=200),
+                seed=1,
+                k=50,
+            )
+    finally:
+        vstore.close()
