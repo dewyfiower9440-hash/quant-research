@@ -375,11 +375,12 @@ def test_space_search_runs_the_pipeline_driver_and_rewards_the_bandit(env: Env) 
     assert all(
         int(str(ev["s2_trials"])) == int(str(ev["promoted_top"])) + int(str(ev["promoted_random"])) for ev in search_ev
     )
+    # A4: the bandit is rewarded by the pipeline's validation run inside selection (one update per search that
+    # found a candidate), never by the confirmation (S3) backtest
+    rewarded = [ev for ev in search_ev if ev.get("reward") is not None]
+    assert d.bandit is not None and d.bandit.updates == len(rewarded)
     backtests = [ev for _f, to, _r, ev in transitions(env) if to in ("VALIDATE", "ANALYZE") and "bandit" in ev]
-    if backtests:  # an S3 ran: the bandit was rewarded with a cost-normalised, deflated value
-        b = cast(dict[str, object], backtests[0]["bandit"])
-        assert float(cast(float, b["reward"])) >= 0.0 and "posterior" in b
-        assert d.bandit is not None and d.bandit.updates == len(backtests)
+    assert all("reward" not in cast(dict[str, object], ev["bandit"]) for ev in backtests)
     assert done_duplicates(env) == []
     running = env.store.conn.execute("select count(*) from trial where status = 'running'").fetchone()[0]
     assert running == 0

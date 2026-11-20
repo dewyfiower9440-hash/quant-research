@@ -17,7 +17,6 @@ Guarantees (tested in tests/director/test_director.py):
 from __future__ import annotations
 
 import json
-import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -46,8 +45,7 @@ from quant_research.research.anonymize import Anonymizer, forbidden_terms, leaks
 from quant_research.research.features import evidence_ref
 from quant_research.research.ledger import TrialLedger, TrialOrigin
 from quant_research.research.memory import CauseCode, MemoryStore, struct_key
-from quant_research.search.bandit import BanditPrior, FamilyBandit, cost_normalised_reward, deflated_performance
-from quant_research.search.multiplicity import expected_max_sr, sr_variance
+from quant_research.search.bandit import BanditPrior, FamilyBandit
 from quant_research.search.optimizers import TpeSearcher
 from quant_research.search.pipeline import SearchBudget, point_from_json, point_json, run_family_search
 from quant_research.search.s1 import S1Config
@@ -150,7 +148,8 @@ class Director:
         else:  # §9-6 measurement arm: real names go out, no leak check, hypotheses recorded as anonymized=0
             self.terms = ()
             self.aliases = list(symbols)
-        # Phase 4: the discounted, cost-normalised family bandit (rewards arrive after each cycle's S3)
+        # Phase 4: the discounted, cost-normalised family bandit (A4: rewarded by the search's validation run
+        # inside the selection split, never by the confirmation split)
         self.bandit = FamilyBandit(tuple(FAMILIES), BanditPrior(min_pulls=0.0)) if config.search == "space" else None
 
     # ------------------------------------------------------------------ cycle bookkeeping
@@ -720,6 +719,7 @@ class Director:
             fold=f"cycle{cycle_id}",
             origin=self._origin(cycle_id, hid),
             s2_config=self._selection_config(),
+            bandit=self.bandit,  # A4: rewarded inside the pipeline by a validation run within selection
         )
         evidence: dict[str, object] = {**result.summary(), "optuna_evaluations": searcher.internal_evaluations()}
         best = result.best_s2()
@@ -793,29 +793,11 @@ class Director:
             and float(cast(float, m.get("worst_case_total_return") or 0.0)) > 0
         )
         ev: dict[str, object] = {"confirmation_trial": trial, **label, "passed_phase3_bar": passed}
-        if self.bandit is not None:  # Phase 4 reward: deflated confirmation SR per second of this cycle's cost
-            ev["bandit"] = self._reward_bandit(cycle_id, family, view)
+        if self.bandit is not None:  # A4: the confirmation split is NOT a reward; the state is only reported
+            ev["bandit"] = {"posterior": self.bandit.posterior(), "updates": self.bandit.updates}
         if passed:
             return S.VALIDATE, "confirmation split passed the Phase 3 bar (not a validation)", ev
         return S.ANALYZE, "confirmation split did not pass the Phase 3 bar", ev
-
-    def _reward_bandit(self, cycle_id: int, family: str, view: RunView) -> dict[str, object]:
-        """Reward = (S3 SR - E[max SR of this cycle's done S2 trials under the null]) / cycle cost_s (§8)."""
-        if self.bandit is None:
-            return {}
-        row = self.store.conn.execute(
-            "select coalesce(sum(cost_s), 0), sum(stage = 'S2' and status = 'done') from trial where cycle_id = ?",
-            (cycle_id,),
-        ).fetchone()
-        cost_s, n2 = float(row[0] or 0.0), int(row[1] or 0)
-        sr = view.metrics.get("sr_daily")
-        reward = 0.0
-        if view.status == "done" and isinstance(sr, int | float) and math.isfinite(float(sr)):
-            t = max(2, len(view.daily))
-            sr0 = expected_max_sr(max(1, n2), sr_variance(0.0, 0.0, 3.0, t))
-            reward = cost_normalised_reward(deflated_performance(float(sr), sr0), max(cost_s, 1e-6))
-        self.bandit.update(family, reward)
-        return {"reward": reward, "cost_s": cost_s, "n_s2_done": n2, "posterior": self.bandit.posterior()}
 
     def _validate(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
         return S.ANALYZE, "validator not implemented (Phase 5): no holdout access, no claim", {"validator": None}

@@ -17,14 +17,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
-from quant_research.backtest.panel import Panel
+from quant_research.backtest.panel import Panel, slice_panel
 from quant_research.backtest.run import RunConfig, RunOutcome, experiment_config, run_backtest
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger, TrialOrigin, experiment_key
 from quant_research.search.archive import Archive, Descriptor, Elite
 from quant_research.search.bandit import FamilyBandit, cost_normalised_reward, deflated_performance
 from quant_research.search.cost_model import LinearCost, LinearMemory, guard_memory, plan_rows, spec_ops
-from quant_research.search.multiplicity import expected_max_sr, sr_variance
 from quant_research.search.optimizers import Searcher, propose
 from quant_research.search.promotion import Selection, select_for_s2
 from quant_research.search.s0_stage import Accepted, S0Outcome, run_s0
@@ -62,6 +61,7 @@ class SearchResult:
     cost_s: dict[str, float]  # measured wall time per stage
     proposed: int = 0
     reward: float | None = None
+    validation: RunOutcome | None = None  # the bandit's reward run (last part of selection), when a bandit is given
     archive_offers: dict[str, int] = field(default_factory=lambda: dict[str, int]())
 
     def best_s2(self) -> S2Scored | None:
@@ -83,6 +83,7 @@ class SearchResult:
             "s2_trials": len(self.s2),
             "s2_done": sum(1 for s in self.s2 if s.outcome.status == "done"),
             "s3_trials": len(self.s3),
+            "val_trials": 0 if self.validation is None else 1,  # the bandit's reward run (A4)
         }
 
     def summary(self) -> dict[str, object]:
@@ -94,6 +95,8 @@ class SearchResult:
             **self.counts(),
             "cost_s": self.cost_s,
             "reward": self.reward,
+            "val_trial": None if self.validation is None else self.validation.trial_id,
+            "val_sr": None if self.validation is None else self.validation.metrics.get("sr_daily"),
             "best_s2_trial": None if best is None else best.outcome.trial_id,
             "best_point": None if best is None else point_json(best.source.candidate.point),
             "archive_offers": self.archive_offers,
@@ -146,15 +149,19 @@ def run_family_search(
     archive: Archive | None = None,
     s2_config: RunConfig | None = None,
     s3_config: RunConfig | None = None,
+    reward_split: float = 0.25,
 ) -> SearchResult:
     """Run one family's search batch. Raises MemoryBudgetExceeded before any trial when the predicted peak
     memory exceeds the budget; raises RuntimeError when the resource gate refuses."""
     if family not in SPACES:
         raise ValueError(f"unknown family {family!r}")
     space = SPACES[family]
+    reward_panel = selection  # replaced by the validation part when a bandit is given
+    if bandit is not None:  # A4: S1/S2 on the fit part; the last `reward_split` of selection is the bandit's
+        selection, reward_panel = split_for_reward(selection, reward_split)
     rows = selection.frame.height
-    if memory_model is not None:
-        guard_memory(memory_model, rows, limit_mb=budget.memory_limit_mb)  # refuses BEFORE any trial
+    if memory_model is not None:  # refuses BEFORE any trial; the reward run's panel is the larger one
+        guard_memory(memory_model, max(rows, reward_panel.frame.height), limit_mb=budget.memory_limit_mb)
     if gate is not None:
         ok, why = gate()
         if not ok:
@@ -228,6 +235,9 @@ def run_family_search(
 
     result = SearchResult(family, searcher.name, fold, s0, scored, sel, s2, s3, cost, proposed=len(cands))
     if bandit is not None:
+        tv = time.perf_counter()
+        result.validation = _reward_run(ledger, s2, reward_panel, catalog, s2cfg, fold=fold, origin=origin)
+        cost["val"] = time.perf_counter() - tv
         result.reward = batch_reward(result, sum(cost.values()))
         bandit.update(family, result.reward)
     if archive is not None:
@@ -273,18 +283,75 @@ def _run_s2_resumable(
     return reused + out
 
 
+MIN_SPLIT_DECISIONS = 24  # each part of the reward split keeps at least a day of hourly decisions
+
+
+def split_for_reward(selection: Panel, share: float) -> tuple[Panel, Panel]:
+    """(fit, validation): the selection block's evaluated decisions cut at 1 - `share`; the validation part keeps
+    every earlier row as warm-up only (features), so it is evaluated on data the fit part never scored."""
+    if not 0.0 < share < 1.0:
+        raise ValueError(f"reward_split must be in (0, 1), got {share}")
+    col = selection.frame["decision_ns"]
+    lo, hi = col.min(), col.max()
+    if not isinstance(lo, int) or not isinstance(hi, int):
+        raise ValueError("an empty selection panel cannot be split")
+    start = selection.evaluate_from_ns if selection.evaluate_from_ns is not None else lo
+    grid = sorted(int(d) for d in col.unique().to_list() if int(d) >= start)
+    cut_at = int(len(grid) * (1.0 - share))
+    if cut_at < MIN_SPLIT_DECISIONS or len(grid) - cut_at < MIN_SPLIT_DECISIONS:
+        raise ValueError(f"selection too short for the reward split ({len(grid)} decisions, share {share})")
+    cut = grid[cut_at]
+    tf = selection.config.timeframe_ns
+    fit = slice_panel(selection, start, cut - tf, warmup_ns=start - lo)
+    val = slice_panel(selection, cut, hi, warmup_ns=cut - lo)
+    return fit, val
+
+
+def _reward_run(
+    ledger: TrialLedger,
+    s2: Sequence[S2Scored],
+    panel: Panel,
+    catalog: Catalog,
+    config: RunConfig,
+    *,
+    fold: str | None,
+    origin: TrialOrigin | None,
+) -> RunOutcome | None:
+    """The best S2 candidate on the reward (validation) part of selection: a trial of its own (stage S2,
+    fold '<fold>:val'), reused on resume."""
+    done = sorted(
+        (s for s in s2 if s.outcome.status == "done"), key=lambda s: (-_sr(s.outcome.metrics), s.outcome.trial_id)
+    )
+    if not done:
+        return None
+    best = done[0]
+    spec = build_point(SPACES[best.source.candidate.point.family], best.source.candidate.point)
+    cfg = s2_engine_config(spec, config)
+    vfold = f"{fold}:val" if fold is not None else "val"
+    h, conf = experiment_config(spec, panel, catalog, cfg)
+    prior = existing_trial(ledger, experiment_key(h, conf), "S2", vfold)
+    if prior is not None:
+        return outcome_from_trial(ledger, prior)
+    tags: dict[str, object] = {
+        "point": point_json(best.source.candidate.point),
+        "s2_trial_id": best.outcome.trial_id,
+        "purpose": "bandit_reward",
+        "rows": panel.frame.height,
+        "ops": spec_ops(spec),
+    }
+    return run_backtest(spec, panel, catalog, ledger, cfg, stage="S2", fold=vfold, origin=origin, tags=tags)
+
+
 def batch_reward(result: SearchResult, cost_s: float) -> float:
-    """Validation-split (S3) SR of the best candidate, net of the null's expected max over the S2 trials of
-    this batch, per second of total batch cost. No S3 / undefined -> 0 reward (the cost was still paid)."""
-    done3 = [o for o in result.s3 if o.status == "done" and math.isfinite(_sr(o.metrics))]
-    if not done3:
+    """SR of the best S2 candidate on the reward (validation) part of selection, per second of total batch cost
+    (A4: the confirmation split never enters the bandit). The validation run is ONE evaluation on data the
+    selection of that candidate never scored, so its null is SR 0, not the expected maximum of the batch's S2
+    trials (A4 review: that double deflation floored almost every reward; ADR-046 addendum). No validation run /
+    undefined -> 0 reward (the cost was still paid)."""
+    v = result.validation
+    if v is None or v.status != "done" or not math.isfinite(_sr(v.metrics)):
         return 0.0
-    best = max(_sr(o.metrics) for o in done3)
-    days_v = done3[0].metrics.get("days")
-    t = int(days_v) if isinstance(days_v, int | float) and days_v >= 2 else 2
-    n2 = max(1, sum(1 for s in result.s2 if s.outcome.status == "done"))
-    sr0 = expected_max_sr(n2, sr_variance(0.0, 0.0, 3.0, t))
-    return cost_normalised_reward(deflated_performance(best, sr0), max(cost_s, 1e-6))
+    return cost_normalised_reward(deflated_performance(_sr(v.metrics), 0.0), max(cost_s, 1e-6))
 
 
 def offer_to_archive(archive: Archive, family: str, outcomes: Sequence[RunOutcome]) -> dict[str, int]:

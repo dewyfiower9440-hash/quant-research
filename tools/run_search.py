@@ -89,7 +89,7 @@ def main() -> int:
     from quant_research.search.multiplicity import dsr_report, sharpe_stats
     from quant_research.search.neff_stage import group_summary, neff_groups
     from quant_research.search.optimizers import RandomSearcher, Searcher, TpeSearcher
-    from quant_research.search.pipeline import SearchBudget, run_family_search
+    from quant_research.search.pipeline import SearchBudget, run_family_search, split_for_reward
     from quant_research.search.s1 import S1Config
     from quant_research.search.s2_stage import fidelity_by_family
     from quant_research.strategy.ops import FUNDING, KLINES, MARK
@@ -159,7 +159,8 @@ def main() -> int:
             base_config: dict[str, object] = {"run_id": run_id, "seed": a.seed, "search": "space", "tool": "run_search"}
             batches: list[dict[str, object]] = []
             trials_before = int(store.conn.execute("select count(*) from trial").fetchone()[0])
-            rows = selection.frame.height
+            # with a bandit (always here) S1/S2 run on the fit part of selection (A4): predict on those rows
+            rows = split_for_reward(selection, 0.25)[0].frame.height
             n_s2 = a.top_k + round(a.promote_rate * a.s1_count)
             for family in families:
                 for name in searchers:
@@ -222,7 +223,8 @@ def main() -> int:
             trials_after = int(store.conn.execute("select count(*) from trial").fetchone()[0])
             ran = [b for b in batches if "s0_trials" in b]
             expected = sum(
-                _i(b, "s0_trials") + _i(b, "s1_trials") + _i(b, "s2_trials") + _i(b, "s3_trials") for b in ran
+                _i(b, "s0_trials") + _i(b, "s1_trials") + _i(b, "s2_trials") + _i(b, "s3_trials") + _i(b, "val_trials")
+                for b in ran
             )
             ratios_all = [
                 float(cast(float, r))

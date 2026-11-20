@@ -11,6 +11,7 @@ import polars as pl
 import pytest
 
 from quant_research.backtest.panel import Panel, PanelConfig, assemble, decision_grid, settlements, slice_panel
+from quant_research.backtest.run import RunOutcome
 from quant_research.catalog.bootstrap import bootstrap
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
@@ -115,7 +116,8 @@ def test_every_stage_is_accounted_and_the_searcher_is_told_once_per_proposal(
     assert res.archive_offers["offered"] == c["s2_done"] + sum(1 for o in res.s3 if o.status == "done")
     s = res.summary()
     assert s["best_s2_trial"] is not None and point_from_json(s["best_point"]) == res.best_s2().source.candidate.point  # type: ignore[arg-type,union-attr]
-    assert set(res.cost_s) == {"S0", "S1", "S2", "S3"}
+    assert set(res.cost_s) == {"S0", "S1", "S2", "S3", "val"}  # val: the bandit's reward run (A4)
+    assert _count(ledger, "S2", "cycle1:val") == (1 if c["s2_done"] else 0)
     assert ledger.store.conn.execute("select count(*) from trial where status = 'running'").fetchone()[0] == 0
 
 
@@ -261,3 +263,93 @@ def test_reuse_finds_the_trial_of_the_same_window_among_several(
     before = _count(ledger, "S1", "two-windows")
     again = run(w2)
     assert len(again.s1) > 0 and _count(ledger, "S1", "two-windows") == before  # W2's own trials reused
+
+
+def test_the_bandit_reward_comes_from_a_validation_split_inside_selection_never_from_s3(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """v2.2 A4 (analysis A-4, ADR-046; design v2.1 §8): with a bandit, S1/S2 run on the first 75 % of the selection
+    block, the best S2 candidate is re-run on the last 25 % (its own trial, fold '<fold>:val') and only that run
+    rewards the bandit; the confirmation split (S3) does not enter it."""
+    catalog, ledger = env
+    sel, conf = panels
+
+    def run(fold: str, confirmation: Panel | None) -> tuple[SearchResult, FamilyBandit]:
+        bandit = FamilyBandit(tuple(SPACES), BanditPrior(min_pulls=0.0))
+        res = run_family_search(
+            ledger,
+            "mean_reversion",
+            RandomSearcher(SPACES["mean_reversion"], seed=3),
+            selection=sel,
+            confirmation=confirmation,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=10, top_k=2, promote_rate=0.0, s3_top=1),
+            seed=1,
+            fold=fold,
+            bandit=bandit,
+        )
+        return res, bandit
+
+    with_s3, b1 = run("a4-with-s3", conf)
+    without_s3, b2 = run("a4-no-s3", None)
+    assert with_s3.validation is not None and with_s3.validation.status == "done"
+    assert _count(ledger, "S2", "a4-with-s3:val") == 1  # the validation run is a trial of its own
+    # S1 / S2 saw only the fit part: fewer rows than the whole selection block
+    s1_rows = {int(str(s.result.metrics().get("ic_samples", 0))) for s in with_s3.s1}
+    assert with_s3.s1 and max(s1_rows) > 0
+    assert int(str(with_s3.validation.metrics.get("days"))) < int(str(with_s3.s2[0].outcome.metrics.get("days")))
+    assert with_s3.s3 and not without_s3.s3
+    assert with_s3.counts()["val_trials"] == 1 and with_s3.summary()["val_trial"] == with_s3.validation.trial_id
+    # the reward is a function of the validation run and the cost only (A4 review: compare at a FIXED cost; the
+    # batches' wall times differ, and with a 0-floored reward an end-to-end comparison could not fail)
+    assert b1.arms["mean_reversion"].pulls == b2.arms["mean_reversion"].pulls == 1.0
+
+
+def test_batch_reward_ignores_s3_and_does_not_deflate_a_single_held_out_run() -> None:
+    """A4 review findings 2-3: the reward must not move when the S3 results change, and a single run on unseen
+    data is not a maximum over trials (deflating it by E[max of the S2 trials] floored almost every reward)."""
+    from dataclasses import replace
+
+    from quant_research.search.pipeline import batch_reward
+
+    def outcome(tid: int, sr: float) -> RunOutcome:
+        return RunOutcome(tid, "done", None, {"sr_daily": sr, "days": 30}, None)
+
+    base = _result_with(validation=outcome(9, 0.2), s3=[outcome(10, -1.0)])
+    other_s3 = replace(base, s3=[outcome(11, 3.0)])
+    assert batch_reward(base, 10.0) == batch_reward(other_s3, 10.0) > 0.0  # S3 changed: same reward
+    worse = replace(base, validation=outcome(9, -0.1))
+    assert batch_reward(worse, 10.0) == 0.0  # a negative held-out SR earns nothing
+    assert batch_reward(replace(base, validation=None), 10.0) == 0.0
+
+
+def _result_with(*, validation: RunOutcome | None, s3: list[RunOutcome]) -> SearchResult:
+    from quant_research.search.promotion import Selection
+    from quant_research.search.s0_stage import S0Outcome
+
+    return SearchResult(
+        "trend",
+        "random",
+        "f",
+        S0Outcome(0, 0, 0, 0),
+        [],
+        Selection([], [], [], 0, 0.0),
+        [],
+        s3,
+        {},
+        validation=validation,
+    )
+
+
+def test_the_reward_split_refuses_a_selection_too_short_to_split(panels: tuple[Panel, Panel]) -> None:
+    from quant_research.search.pipeline import split_for_reward
+
+    sel, _ = panels
+    grid = sel.frame["decision_ns"].unique().sort().to_list()
+    tiny = slice_panel(sel, int(grid[-3]), int(grid[-1]))
+    with pytest.raises(ValueError, match="too short"):
+        split_for_reward(tiny, 0.25)
+    fit, val = split_for_reward(sel, 0.25)
+    assert fit.frame.height > 0 and val.frame.height > 0
