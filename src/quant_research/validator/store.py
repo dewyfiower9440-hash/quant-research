@@ -156,6 +156,35 @@ class ValidatorStore:
         )
         return int(cur.lastrowid or 0)
 
+    def record_refused(self, s: Submission, why: str) -> int:
+        """A request refused before it could be registered (rule mismatch, unreadable spec, used-up budget): kept
+        as a `refused` submission so it is never retried and never spends a query (B8 review)."""
+        if self.conn.execute("select 1 from submission where request_id = ?", (s.request_id,)).fetchone():
+            raise ValidatorError(f"request {s.request_id} is already registered")
+        cur = self.conn.execute(
+            "insert into submission(request_id, spec_hash, rule_hash, experiment_key, in_sample_sr, dataset_ids_json, "
+            "epoch, registered_ns, status, refusal) values (?,?,?,?,?,?,?,?, 'refused', ?)",
+            (
+                s.request_id,
+                s.spec_hash,
+                s.rule_hash,
+                s.experiment_key,
+                s.in_sample_sr,
+                json.dumps(sorted(s.dataset_ids)),
+                s.epoch,
+                self.now_ns(),
+                why,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+    def submission_of(self, request_id: int) -> tuple[int, str] | None:
+        """(submission id, status) of a request, None when the validator has not seen it."""
+        row = self.conn.execute(
+            "select submission_id, status from submission where request_id = ?", (request_id,)
+        ).fetchone()
+        return None if row is None else (int(row[0]), str(row[1]))
+
     def submission(self, submission_id: int) -> tuple[Submission, str]:
         row = self.conn.execute(
             "select request_id, spec_hash, rule_hash, experiment_key, in_sample_sr, dataset_ids_json, epoch, status "

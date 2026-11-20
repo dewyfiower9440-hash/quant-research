@@ -326,11 +326,7 @@ def holdout_evaluation(
         cfg = replace(base_cfg, cost=CostModel(stress=m))
         out = run_backtest(spec, holdout, catalog, ledger, cfg, stage="reference", fold=f"holdout-cost{m:g}")
         stressed[f"cost x{m:g}"] = sharpe(_pnl(ledger, out)) if out.status == "done" else None
-    lag = holdout.config.latency_ns
-    for name, lat in (
-        ("lag+1", lag + holdout.config.timeframe_ns),
-        ("lagx2", max(2 * lag, holdout.config.timeframe_ns)),
-    ):
+    for name, lat in stress_latencies(holdout.config.latency_ns, holdout.config.timeframe_ns).items():
         if panel_at_latency is None:  # refused before the base run already; kept for the type checker
             raise ValueError("the lag stress needs the holdout rebuilt at the stressed latency (panel_at_latency)")
         panel_l = panel_at_latency(lat)
@@ -348,6 +344,12 @@ def holdout_evaluation(
         entries=float(entries) if isinstance(entries, int | float) else None,
         mean_exposure=float(exposure) if isinstance(exposure, int | float) else None,
     )
+
+
+def stress_latencies(latency_ns: int, timeframe_ns: int) -> dict[str, int]:
+    """The two lag stresses of the rule: one bar later, and twice the latency but at least two bars (with latency 0
+    the old `max(2 * lag, bar)` equalled lag+1, so the second stress was the first one again; B8 review)."""
+    return {"lag+1": latency_ns + timeframe_ns, "lagx2": max(2 * latency_ns, 2 * timeframe_ns)}
 
 
 def incomplete_verdict(rule: DecisionRule, *, status: str, reason: str | None) -> Verdict:

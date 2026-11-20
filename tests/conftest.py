@@ -18,3 +18,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     configure_logging("DEBUG", json=True, cache=False)
     yield
     structlog.reset_defaults()
+
+
+# shared panels / temporary databases of the search tests, also used by tests/validator (v2.2 B8)
+pytest_plugins = ["search_fixtures"]

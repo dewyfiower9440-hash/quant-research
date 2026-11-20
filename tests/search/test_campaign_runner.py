@@ -213,3 +213,30 @@ def test_the_time_budget_ends_the_campaign_as_budget_not_as_the_gate(
         out_of_time=lambda: True,
     )
     assert (out.status, out.reason) == ("budget", "time budget used")
+
+
+def test_a_transient_failure_stops_the_campaign_without_retiring_the_cell(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    """B8 review (part 2): MemoryError / OSError (disk, file in use) are not a property of the cell; recording them
+    as `error` retired the cell for good. The campaign stops (resumable) and nothing is recorded."""
+    catalog, ledger = env
+    state = CampaignState.new("m", CELLS, max_pulls=1)
+
+    def short_of_memory(_cell: Cell) -> tuple[Panel, Panel]:
+        raise MemoryError("unable to allocate")
+
+    out = run_campaign(
+        state,
+        _bandit(state),
+        ledger=ledger,
+        catalog=catalog,
+        panels=short_of_memory,
+        config=CONFIG,
+        gate=lambda: (True, ""),
+        stop=lambda: False,
+        persist=lambda _s, _b: None,
+    )
+    assert out.status == "gate" and "MemoryError" in out.reason
+    assert state.history == [] and state.retired == []

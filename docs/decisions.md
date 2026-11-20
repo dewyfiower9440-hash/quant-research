@@ -481,3 +481,25 @@
   - 배치마다 무작위 탐색만 쓴다(배치마다 새 TPE study는 시작 무작위 표본만 낸다).
   - 웜업은 최대 1,200봉이다(메모리·S3 비용).
   - 도구 변경: `run/research.lock` 보유(다른 연구 프로세스의 running trial을 abandoned로 덮지 않는다), 설정·그리드를 상태에 저장하고 재개 때 다르면 거부(exit 1), run-id 형식 검증, 보고서 경로는 저장소 기준, `--max-hours`는 budget 종료(exit 0).
+
+### ADR-041 보강 (2026-11-20, B8 구현: validator 프로세스)
+- **흐름:** 연구 쪽 `tools/submit_candidates.py`가 캠페인 후보의 S3 trial을 research.db outbox(`validation_request`)에 넣는다(`run/research.lock` 보유). validator 쪽 `tools/run_validator.py`는 research.db를 읽기 전용으로 열고 다음 순서로 처리한다(`run/validator.lock`).
+  1. 요청을 사전 등록한다(명세 + 규칙 해시, epoch 2 예산 k = 20).
+  2. 모든 holdout 읽기를 해시 체인 접근 로그에 남긴다(데이터셋 × 창 × 목적).
+  3. H_hist [2023-01, 2024-12)에서 사전 등록 규칙(기본 실행 + 비용 ×2·×3 + 지연 +1봉·×2)으로 판정한다(`null_pipeline.holdout_evaluation`).
+  4. 사전 조건을 못 채우면 거부한다(질의를 쓰지 않는다).
+  5. H_fwd [2026-07, 2026-11)을 실행해 LLM 기원(trial `model_id` 있음)이면 SR > 0을 요구하고, 그 밖의 기원은 보고만 한다.
+  6. 1비트 ack를 남긴다.
+- **격리:** holdout 실행 trial은 validator 소유 `validator-trials.db`에 기록하고 research.db에는 쓰지 않는다. holdout 패널은 validator 역할 키로 패널 저장소에 따로 캐시한다(역할이 키에 들어 있다). 유니버스는 시점 기준 top-100 구성원, 웜업은 2개월이다.
+- **남은 것(B12에 기록):** 연구 역할의 1비트 읽기 경로는 `ValidatorStore.ack`(읽기 전용 연결) 그대로다. 접근 로그의 꼬리 고정(외부 앵커)과 epoch별 거부 상한은 이번 범위에 넣지 않았다(아래 보고서 미완료 항목).
+- **리뷰 반영(B8):**
+  - 요청마다 격리한다. 등록 전에 실패하는 경우(규칙 불일치, 실험·명세를 읽지 못함, 예산 소진)는 holdout을 전혀 읽지 않고 `refused`로 기록하며, 다시 시도하지 않는다. 등록 뒤 예외가 나면 `registered`로 남기고 다음 실행에서 같은 시드로 다시 평가하며, 큐는 이어서 진행한다.
+  - 판정 detail의 NaN·inf는 null로 바꾼다. 평평한 H_fwd에서 SR NaN이 json_valid에 걸려 요청이 멈췄다.
+  - 예산은 rule.k 하나다(CLI `--k` 제거: α/k의 k와 어긋나면 FWER이 커진다).
+  - 같은 명세는 epoch당 한 번만 제출한다.
+  - 접근 로그는 패널이 실제로 읽는 모든 데이터셋을 담는다.
+  - H_hist에서 탈락하면 H_fwd를 읽지 않는다.
+  - holdout 웜업은 연구와 같은 최대 1,200봉이고, 가장 이른 시점은 2020-01이다. 2개월 웜업이면 1d·720봉 명세가 판정 불가였다.
+  - 도구는 ack 비트만 출력한다.
+  - 지연 0에서 lag×2 스트레스는 2봉이다(이전 `max(2 × lag, 1봉)`은 lag+1과 같았다). 이번 측정(A3)은 이전 정의로 돌았다. 스트레스를 강화하는 쪽이므로 귀무 FWER 결론을 바꾸지 않는다.
+  - 캠페인의 일시적 예외(MemoryError, OSError)는 셀을 은퇴시키지 않고 캠페인을 멈춘다(재개 가능).

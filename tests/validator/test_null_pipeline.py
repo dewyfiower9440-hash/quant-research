@@ -399,3 +399,13 @@ def test_the_epoch_budget_must_be_the_rules_k(env: tuple[Catalog, TrialLedger], 
             )
     finally:
         vstore.close()
+
+
+def test_the_two_lag_stresses_differ_at_zero_base_latency() -> None:
+    """B8 review 9: with latency 0, lag+1 = tf and lagx2 = max(0, tf) = tf ran the same stress twice."""
+    from quant_research.validator.null_pipeline import stress_latencies
+
+    tf = 3_600 * 10**9
+    assert stress_latencies(0, tf) == {"lag+1": tf, "lagx2": 2 * tf}
+    assert stress_latencies(tf, tf) == {"lag+1": 2 * tf, "lagx2": 2 * tf}
+    assert stress_latencies(3 * tf, tf) == {"lag+1": 4 * tf, "lagx2": 6 * tf}
