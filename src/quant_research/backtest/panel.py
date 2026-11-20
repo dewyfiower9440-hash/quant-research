@@ -235,7 +235,7 @@ def load_panel(
     if decisions.is_empty():
         raise ValueError(f"no decisions between {first_bar_ns} and {last_bar_ns}")
     latest = int(cast(int, decisions.max()))
-    members = _members(pit, rule)
+    members = membership_spans(pit, rule)
     files: list[tuple[str, int]] = []
     parts: list[pl.DataFrame] = []
     funding_parts: list[pl.DataFrame] = []
@@ -267,7 +267,7 @@ def load_panel(
     return Panel(frame, pl.concat(funding_parts, how="diagonal_relaxed"), files, config)
 
 
-def _members(pit: PointInTime, rule: str | None) -> pl.DataFrame | None:
+def membership_spans(pit: PointInTime, rule: str | None) -> pl.DataFrame | None:
     members = None
     if rule is not None:
         rows = pit.catalog.conn.execute(

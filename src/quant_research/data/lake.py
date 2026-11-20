@@ -167,6 +167,12 @@ def read_lake_file(path: Path, columns: Sequence[str] | None = None) -> pl.DataF
     return pl.read_parquet(path, columns=list(columns) if columns is not None else None)
 
 
+def read_derived_file(path: Path) -> pl.DataFrame:
+    """A derived cache file (backtest/panel_store.py shards). Its content was built through the point-in-time
+    API (`load_panel`) and its key binds the seal windows, so reading it back is not a raw lake read."""
+    return pl.read_parquet(path)
+
+
 def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:
     """All compacted rows of a dataset. Bitemporal datasets collapse identical repeats to their first
     receipt and keep changed values under the same key as later versions."""
