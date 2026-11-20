@@ -17,6 +17,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
+import numpy as np
+
 from quant_research.backtest.panel import Panel, slice_panel
 from quant_research.backtest.run import RunConfig, RunOutcome, experiment_config, run_backtest
 from quant_research.catalog.store import Catalog
@@ -40,11 +42,18 @@ class SearchBudget:
     top_k: int = 10
     promote_rate: float = 0.05
     s3_top: int = 1  # S3 runs on the best S2 candidates (0: the caller runs S3, e.g. the Director)
+    s3_random_rate: float = 0.05  # A6: plus this random share of the other S2 survivors (S1-vs-S3 fidelity pairs)
     time_budget_s: float | None = None  # predicted S1 time budget; shrinks s1_count when the cost model is known
     memory_limit_mb: float = 2_048.0
 
     def __post_init__(self) -> None:
-        if self.s1_count < 0 or self.top_k < 0 or self.s3_top < 0 or not 0.0 <= self.promote_rate <= 1.0:
+        if (
+            self.s1_count < 0
+            or self.top_k < 0
+            or self.s3_top < 0
+            or not 0.0 <= self.promote_rate <= 1.0
+            or not 0.0 <= self.s3_random_rate <= 1.0
+        ):
             raise ValueError(f"invalid search budget {self}")
 
 
@@ -62,6 +71,8 @@ class SearchResult:
     proposed: int = 0
     reward: float | None = None
     validation: RunOutcome | None = None  # the bandit's reward run (last part of selection), when a bandit is given
+    # A7: predicted seconds per stage from the cost model, on the candidates actually evaluated (rows x ops each)
+    predicted: dict[str, float] = field(default_factory=lambda: dict[str, float]())
     archive_offers: dict[str, int] = field(default_factory=lambda: dict[str, int]())
 
     def best_s2(self) -> S2Scored | None:
@@ -169,7 +180,7 @@ def run_family_search(
     s1_count = budget.s1_count
     if cost_model is not None and budget.time_budget_s is not None and "S1" in cost_model:
         # shrink the sample so the predicted S1 batch fits the time budget (cost is per row x ops)
-        fit_rows = plan_rows(cost_model["S1"], rows=rows, ops=[20] * s1_count, budget_s=budget.time_budget_s)
+        fit_rows = plan_rows(cost_model["S1"], rows=rows, ops=[OPS_PRIOR] * s1_count, budget_s=budget.time_budget_s)
         if fit_rows < rows:
             s1_count = max(0, int(s1_count * fit_rows / max(rows, 1)))
     cost: dict[str, float] = {}
@@ -213,7 +224,11 @@ def run_family_search(
             (s for s in s2 if s.outcome.status == "done"), key=lambda s: (-_sr(s.outcome.metrics), s.outcome.trial_id)
         )
         s3cfg = s3_config or RunConfig(engine="event", seed=seed)
-        for s in done[: budget.s3_top]:
+        rest = done[budget.s3_top :]
+        draws = np.random.default_rng([seed, 3]).random(len(rest))
+        sampled = [s for s, u in zip(rest, draws, strict=True) if float(u) < budget.s3_random_rate]
+        chosen = done[: budget.s3_top] + sampled
+        for s in chosen:
             spec = build_point(space, s.source.candidate.point)
             h, conf = experiment_config(spec, confirmation, catalog, s3cfg)
             prior = existing_trial(ledger, experiment_key(h, conf), "S3", fold)
@@ -234,6 +249,8 @@ def run_family_search(
         cost["S3"] = time.perf_counter() - t3
 
     result = SearchResult(family, searcher.name, fold, s0, scored, sel, s2, s3, cost, proposed=len(cands))
+    if cost_model is not None:
+        result.predicted = predicted_costs(ledger, cost_model, fold=fold, s1=scored, s2=s2)
     if bandit is not None:
         tv = time.perf_counter()
         result.validation = _reward_run(ledger, s2, reward_panel, catalog, s2cfg, fold=fold, origin=origin)
@@ -284,6 +301,36 @@ def _run_s2_resumable(
 
 
 MIN_SPLIT_DECISIONS = 24  # each part of the reward split keeps at least a day of hourly decisions
+
+
+OPS_PRIOR = 20  # typical expanded-tree node count, used only before the candidates are known
+
+
+def predicted_costs(
+    ledger: TrialLedger,
+    cost_model: Mapping[str, LinearCost],
+    *,
+    fold: str | None,
+    s1: Sequence[S1Scored],
+    s2: Sequence[S2Scored],
+) -> dict[str, float]:
+    """Model seconds for the S1 / S2 trials of this batch, each from ITS recorded rows and ops (A7: a constant
+    ops count and the expected S2 count made the band ratio swing 0.6-2.5). Reused trials count too: the
+    prediction is compared with the stage's measured wall time, which includes looking them up."""
+    out: dict[str, float] = {}
+    for stage, trials in (("S1", [s.trial_id for s in s1]), ("S2", [s.outcome.trial_id for s in s2])):
+        if stage not in cost_model or not trials:
+            continue
+        total = 0.0
+        for (raw,) in ledger.store.conn.execute(
+            "select metrics_json from trial where trial_id in (select value from json_each(?))", (json.dumps(trials),)
+        ):
+            m = cast(dict[str, object], json.loads(str(raw))) if raw else {}
+            r, o = m.get("rows"), m.get("ops")
+            if isinstance(r, int | float) and isinstance(o, int | float):
+                total += cost_model[stage].predict(int(r), int(o))
+        out[stage] = total
+    return out
 
 
 def split_for_reward(selection: Panel, share: float) -> tuple[Panel, Panel]:

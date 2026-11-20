@@ -62,7 +62,7 @@ def main() -> int:
     ap.add_argument("--s1-count", type=int, default=200)
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--promote-rate", type=float, default=0.05)
-    ap.add_argument("--s3-top", type=int, default=1)
+    ap.add_argument("--s3-top", type=int, default=5)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--compare-budget-s", type=float, default=30.0, help="synthetic Random-vs-TPE cost budget")
@@ -200,9 +200,11 @@ def main() -> int:
                         archive=archive,
                         s2_config=RunConfig(engine="vector", seed=a.seed),
                         s3_config=RunConfig(engine="event", seed=a.seed),
+                        cost_model=fit or None,
                     )
                     peak = max(peak, memory_sample()["private"])
                     ratios: dict[str, float | None] = {}
+                    pred = {**pred, **{k: v for k, v in res.predicted.items() if k in ("S1", "S2")}}  # A7: actual ops
                     for st in ("S1", "S2"):
                         p = pred[st]
                         actual = res.cost_s.get(st, 0.0)
