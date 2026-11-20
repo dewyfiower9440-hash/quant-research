@@ -203,7 +203,7 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - **완료 판정 기준:** CLI가 보고하는 플랜이 사용자 계정 플랜과 같습니다. 그렇지 않으면 공식 지원 채널에 문의한 결과를 기록합니다.
 
 ### OPS-009 WS 수집기 7일 크래시 루프를 모니터가 1회만 알림 (2026-11-19, F-017)
-- **상태:** 코드 수정 완료(F-017), 재경보 정책은 OPEN
+- **상태:** 해결(2026-11-20, v2.2 A10): 6시간 재알림, 연속 재시작 incident, paper 등록 표시
 - **증상:** 2026-11-12 09:42Z `heartbeat:ws` critical incident가 열리고 토스트 1회 뒤 재경보가 없어 7일간 아무도 몰랐습니다. supervisor는 5분마다 재시작했고 ws는 빈 heartbeat 파일 때문에 시작 직후 죽었습니다.
 - **해결 계획:** (1) 열린 critical incident는 N시간(초깃값 6시간)마다 다시 알린다(`monitor/incidents.py`), (2) supervisor가 같은 자식의 연속 재시작 횟수(초깃값 10회)를 넘으면 별도 incident를 연다. OPS-004(hang 감지)와 함께 작은 계획으로 구현합니다.
 - **회피책(지금):** 수집기 재배포 뒤 `C:\dev\qr-data\run\*.heartbeat.json`의 갱신 시각과 `logs\supervisor.log`의 `child_exited` 빈도를 하루 1회 눈으로 확인합니다.
@@ -223,3 +223,8 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - 정책: `C:\dev\qr-data\paper\policy.json`(`risk.policy.policy_bytes` 형식) + `policy.sig`(hex) + `policy.key`(HMAC 비밀, 모의매매 전용). 정책이 없거나 만료되면 모든 주문을 거부하고 tick 요약에 `policy` 사유를 남깁니다.
 - 대상 전략: validator.db에서 verdict 통과 + 수명주기 `Validated`/`Paper`인 spec만. 현재 그런 전략은 **0개**이므로 프로세스는 heartbeat만 쓰며 주문을 내지 않습니다.
 - 30일 운영 판정은 `ledger.db`의 `verify_chain`·`reconcile`과 `paper/divergence.py`의 분해 보고로 하며, 시작 시점은 사용자가 작업을 등록한 날입니다.
+
+## 17. 모의매매 작업 해제 (v2.2 A10, 2026-11-20)
+- `tools/register_paper_task.ps1`은 등록 뒤 `C:\dev\qr-data\run\paper.expected`를 만든다. 이 표시가 있으면 모니터는 paper heartbeat가 없어도 `heartbeat:paper` critical을 열고 6시간마다 다시 알린다.
+- **해제 절차:** `Unregister-ScheduledTask -TaskName qr-paper -Confirm:$false` → `C:\dev\qr-data\run\paper.expected`와 `paper.heartbeat.json` 삭제. 표시만 남기면 경보가 계속된다.
+- supervisor 상태(`run/supervisor.state.json`)는 60초마다 다시 쓰이며, 10분보다 오래된 상태는 모니터가 무시한다(supervisor가 꺼진 동안 이전 연속 재시작 횟수로 경보하지 않음).

@@ -32,13 +32,15 @@ class NeffGroup:
         return self.n_s2plus + self.n_s1
 
 
-def load_pnl_matrix(ledger: TrialLedger, *, window_from_ns: int, window_to_ns: int) -> tuple[list[int], F64]:
+def load_pnl_matrix(
+    ledger: TrialLedger, *, window_from_ns: int, window_to_ns: int, fold_prefix: str | None = None
+) -> tuple[list[int], F64]:
     """(trial ids, days x trials matrix) of done S2/S3 trials of one window; shorter vectors are NaN-padded."""
     rows = ledger.store.conn.execute(
         "select b.trial_id, b.pnl_daily from backtest_run b join trial t on t.trial_id = b.trial_id "
         "where t.status = 'done' and t.stage in ('S2', 'S3') and b.window_from_ns = ? and b.window_to_ns = ? "
-        "order by b.trial_id",
-        (window_from_ns, window_to_ns),
+        "and (? is null or t.fold like ? || '%') order by b.trial_id",
+        (window_from_ns, window_to_ns, fold_prefix, fold_prefix),
     ).fetchall()
     ids = [int(r[0]) for r in rows]
     series = [unblob(bytes(r[1])) for r in rows]
@@ -51,16 +53,24 @@ def load_pnl_matrix(ledger: TrialLedger, *, window_from_ns: int, window_to_ns: i
     return ids, mat
 
 
-def neff_groups(ledger: TrialLedger, *, seed: int = 0) -> list[NeffGroup]:
+def neff_groups(ledger: TrialLedger, *, seed: int = 0, fold_prefix: str | None = None) -> list[NeffGroup]:
+    """Per evaluation window; `fold_prefix` restricts to one run's trials (A11: re-runs of the same batch add to
+    the cumulative N_total, which the DSR keeps; the per-run view shows what this run alone tried)."""
     windows = ledger.store.conn.execute(
         "select distinct b.window_from_ns, b.window_to_ns from backtest_run b join trial t on t.trial_id = b.trial_id "
-        "where t.status = 'done' and t.stage in ('S2', 'S3') order by 1, 2"
+        "where t.status = 'done' and t.stage in ('S2', 'S3') and (? is null or t.fold like ? || '%') order by 1, 2",
+        (fold_prefix, fold_prefix),
     ).fetchall()
-    n_s1 = int(ledger.store.conn.execute("select count(*) from trial where stage = 'S1'").fetchone()[0])
+    n_s1 = int(
+        ledger.store.conn.execute(
+            "select count(*) from trial where stage = 'S1' and (? is null or fold like ? || '%')",
+            (fold_prefix, fold_prefix),
+        ).fetchone()[0]
+    )
     out: list[NeffGroup] = []
     for w in windows:
         wf, wt = int(w[0]), int(w[1])
-        ids, mat = load_pnl_matrix(ledger, window_from_ns=wf, window_to_ns=wt)
+        ids, mat = load_pnl_matrix(ledger, window_from_ns=wf, window_to_ns=wt, fold_prefix=fold_prefix)
         if not ids:
             continue
         corr = pairwise_corr(mat)

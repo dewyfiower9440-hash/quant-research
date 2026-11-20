@@ -13,6 +13,7 @@ param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-paper',
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
     [ValidateNotNullOrEmpty()][string]$LogDir = 'C:\dev\qr-data\logs',
+    [ValidateNotNullOrEmpty()][string]$RunDir = 'C:\dev\qr-data\run',
     [ValidateRange(1, 60)][int]$RepeatMinutes = 5,
     [ValidateRange(1, 1440)][double]$IntervalMinutes = 10
 )
@@ -39,4 +40,8 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register per-user scheduled task')) {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
         -Principal $principal -Description "quant-research paper trading (Phase 6, log $log)" -Force |
         Select-Object TaskName, State
+    # OPS-009 / v2.2 A10: from now on the monitor watches the paper heartbeat even if the process never starts
+    if (-not (Test-Path -LiteralPath $RunDir)) { New-Item -ItemType Directory -Path $RunDir | Out-Null }
+    $marker = Join-Path $RunDir 'paper.expected'
+    [IO.File]::WriteAllText($marker, "registered $TaskName", [Text.UTF8Encoding]::new($false))
 }

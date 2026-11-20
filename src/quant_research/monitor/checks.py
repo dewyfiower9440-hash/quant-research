@@ -5,7 +5,7 @@ recorded incidents)."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 Severity = Literal["warn", "critical"]
@@ -31,6 +31,8 @@ class Observation:
     ssd_state_ns: int | None  # at_ns of run/ssd_state.json (None: SSD monitor never ran)
     ssd_level: str | None
     receive_gaps: Sequence[tuple[str, int, int]]  # (source, start_ns, end_ns) recorded since last check
+    # consecutive short runs per supervised child (run/supervisor.state.json; empty: no supervisor state yet)
+    restart_streaks: Mapping[str, int] = field(default_factory=lambda: dict[str, int]())
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,7 @@ class Thresholds:
     clock_stale_ns: int = 300 * S
     ssd_stale_ns: int = 30 * 60 * S  # thermal.STALE_NS
     gap_report_ns: int = 300 * S
+    restart_loop: int = 10  # OPS-009: consecutive short runs of one child that make a critical incident
 
 
 def evaluate(o: Observation, t: Thresholds) -> list[Finding]:
@@ -70,6 +73,9 @@ def evaluate(o: Observation, t: Thresholds) -> list[Finding]:
     elif o.ssd_level in ("warn", "critical"):
         level: Severity = "critical" if o.ssd_level == "critical" else "warn"
         out.append(Finding("ssd_temp", level, f"SSD temperature level {o.ssd_level}"))
+    for name, streak in sorted(o.restart_streaks.items()):
+        if streak >= t.restart_loop:
+            out.append(Finding(f"restart_loop:{name}", "critical", f"{name} restarted {streak} times in a row"))
     for source, start, end in o.receive_gaps:
         if end - start >= t.gap_report_ns:
             out.append(Finding(f"gap:{source}:{start}", "warn", f"{source} silent {(end - start) / 60 / S:.1f} min"))

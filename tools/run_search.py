@@ -65,7 +65,9 @@ def main() -> int:
     ap.add_argument("--s3-top", type=int, default=5)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--run-id", default=None)
-    ap.add_argument("--compare-budget-s", type=float, default=30.0, help="synthetic Random-vs-TPE cost budget")
+    ap.add_argument(
+        "--compare-budget-s", type=float, default=0.0, help="synthetic Random-vs-TPE budget (>= 60 s, else skipped)"
+    )
     ap.add_argument("--out", type=Path, default=Path("docs/measurements/phase4-search-batch.md"))
     a = ap.parse_args()
     os.environ.setdefault("POLARS_MAX_THREADS", "2")
@@ -86,7 +88,7 @@ def main() -> int:
     from quant_research.search.bandit import BanditPrior, FamilyBandit
     from quant_research.search.compare import compare, planted_landscape
     from quant_research.search.cost_model import BAND, CostSample, LinearCost, fit_cost
-    from quant_research.search.multiplicity import dsr_report, sharpe_stats
+    from quant_research.search.multiplicity import dsr_report, sharpe_stats, sr_variance
     from quant_research.search.neff_stage import group_summary, neff_groups
     from quant_research.search.optimizers import RandomSearcher, Searcher, TpeSearcher
     from quant_research.search.pipeline import SearchBudget, run_family_search, split_for_reward
@@ -191,7 +193,11 @@ def main() -> int:
                         config={**base_config, "family": family, "searcher": name},
                         s1=S1Config(),
                         budget=SearchBudget(
-                            s1_count=a.s1_count, top_k=a.top_k, promote_rate=a.promote_rate, s3_top=a.s3_top
+                            s1_count=a.s1_count,
+                            top_k=a.top_k,
+                            promote_rate=a.promote_rate,
+                            s3_top=a.s3_top,
+                            s3_random_rate=0.05,  # A6: fidelity pairs (S1 vs S3 rank correlation)
                         ),
                         seed=seed,
                         fold=f"{run_id}:{family}:{name}",
@@ -235,7 +241,8 @@ def main() -> int:
                 if isinstance(r, int | float)
             ]
             in_band = sum(1 for r in ratios_all if BAND[0] <= r <= BAND[1])
-            groups = [group_summary(g) for g in neff_groups(ledger, seed=a.seed)]
+            groups = [group_summary(g) for g in neff_groups(ledger, seed=a.seed)]  # cumulative (the DSR uses it)
+            groups_run = [group_summary(g) for g in neff_groups(ledger, seed=a.seed, fold_prefix=f"{run_id}:")]
             fidelity = [
                 {"family": f.family, "pairs": f.pairs, "rank_corr": f.rank_corr} for f in fidelity_by_family(ledger)
             ]
@@ -254,7 +261,9 @@ def main() -> int:
                 if daily.shape[0] < 3 or float(daily.std()) <= 0:
                     continue
                 st = sharpe_stats(daily)
-                rep = dsr_report(st, n_eff=max(1, n_eff), n_total=max(n_eff, n_total), var_sr_trials=st.variance())
+                # V[SR] of the trials under the NULL (A12: the best trial's own estimator variance was inconsistent)
+                var0 = sr_variance(0.0, st.skew, st.kurt, st.t)
+                rep = dsr_report(st, n_eff=max(1, n_eff), n_total=max(n_eff, n_total), var_sr_trials=var0)
                 dsr_rows.append(
                     {
                         "trial": int(best[0]),
@@ -270,7 +279,8 @@ def main() -> int:
                 )
             synthetic: list[dict[str, object]] = []
             s1_cost = fit_cost(cost_samples(store)).get("S1", LinearCost(0.05, 0.0))
-            for family in families if a.compare_budget_s > 0 else []:  # 0 skips the synthetic comparison
+            # A12: below 60 s the planted-landscape comparison recovered nothing (0/3 at 3 s): skipped, not reported
+            for family in families if a.compare_budget_s >= 60 else []:
                 land = planted_landscape(SPACES[family], seed=a.seed)
                 rep2 = compare(SPACES[family], land, s1_cost, rows=rows, budget_s=a.compare_budget_s, seeds=[1, 2, 3])
                 synthetic.append(rep2.summary())
@@ -294,6 +304,7 @@ def main() -> int:
                 "bandit": bandit.snapshot(),
                 "archive": archive.diversity(),
                 "neff_groups": groups,
+                "neff_groups_this_run": groups_run,
                 "fidelity_s1_vs_s3": fidelity,
                 "dsr_best_s3": dsr_rows,
                 "synthetic_random_vs_tpe": synthetic,
@@ -303,7 +314,7 @@ def main() -> int:
             store.close()
             catalog.close()
     _report(a.out, totals, batches)
-    skip = ("bandit", "neff_groups", "synthetic_random_vs_tpe")
+    skip = ("bandit", "neff_groups", "neff_groups_this_run", "synthetic_random_vs_tpe")
     print(json.dumps({k: v for k, v in totals.items() if k not in skip}, indent=1, default=str))
     return 0
 
@@ -324,7 +335,15 @@ def _row(cells: Sequence[object]) -> str:
 
 
 def _report(path: Path, totals: dict[str, object], batches: list[dict[str, object]]) -> None:
-    head_skip = ("bandit", "neff_groups", "synthetic_random_vs_tpe", "dsr_best_s3", "fidelity_s1_vs_s3", "cost_ratios")
+    head_skip = (
+        "bandit",
+        "neff_groups",
+        "neff_groups_this_run",
+        "synthetic_random_vs_tpe",
+        "dsr_best_s3",
+        "fidelity_s1_vs_s3",
+        "cost_ratios",
+    )
     head = {k: v for k, v in totals.items() if k not in head_skip}
     lines = [
         "# Phase 4 실데이터 탐색 배치 측정 (tools/run_search.py)",
@@ -394,12 +413,16 @@ def _report(path: Path, totals: dict[str, object], batches: list[dict[str, objec
                 ]
             )
         )
-    lines += ["", "## N_eff (ONC, 창 단위) / N_total(S1 포함)"]
-    lines.append(_row(["창 from", "창 to", "S2+", "N_eff", "S1", "N_total", "평균 rho", "품질"]))
-    lines.append("|" + "---|" * 8)
-    for g in cast(list[dict[str, object]], totals.get("neff_groups", [])):
-        keys = ("window_from_ns", "window_to_ns", "n_s2plus", "n_eff", "n_s1", "n_total", "avg_rho", "quality")
-        lines.append(_row([g[k] for k in keys]))
+    keys = ("window_from_ns", "window_to_ns", "n_s2plus", "n_eff", "n_s1", "n_total", "avg_rho", "quality")
+    for title, field in (
+        ("## N_eff (ONC, 창 단위) / N_total(S1 포함) - 누적(DSR에 사용)", "neff_groups"),
+        ("## N_eff / N_total - 이 실행만(fold 접두사 run_id:)", "neff_groups_this_run"),
+    ):
+        lines += ["", title]
+        lines.append(_row(["창 from", "창 to", "S2+", "N_eff", "S1", "N_total", "평균 rho", "품질"]))
+        lines.append("|" + "---|" * 8)
+        for g in cast(list[dict[str, object]], totals.get(field, [])):
+            lines.append(_row([g[k] for k in keys]))
     lines += ["", "## DSR 2회 보고 (창별 최고 S3, 기간 단위)"]
     lines.append(_row(["trial", "SR(일)", "N_eff", "N_total", "SR0 eff", "SR0 total", "DSR eff", "DSR total", "보수"]))
     lines.append("|" + "---|" * 9)

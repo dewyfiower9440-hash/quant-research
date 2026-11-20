@@ -25,10 +25,11 @@ import polars as pl
 
 from quant_research.backtest.panel import MINUTE_NS, Panel, PanelConfig, assemble, decision_grid, settlements
 from quant_research.capture.compress import hour_end_ns
-from quant_research.data.lake import read_lake_file, read_lake_rows, segment_stem
+from quant_research.data.lake import load_bulk, read_lake_file, read_lake_rows, segment_stem
 from quant_research.paper.engine import Quote
 
 BOOK_TICKER = "binance.um.book_ticker_1s"
+KLINES_BULK = "binance.um.bulk.klines_1m"  # traded quote volume: the backtest's liquidity basis (A9)
 HOUR_NS = 3_600 * 10**9
 QUOTE_COLUMNS = ("symbol", "event_ns", "received_ns", "bid_price", "bid_qty", "ask_price", "ask_qty")
 _QUOTE_SCHEMA = {
@@ -186,6 +187,10 @@ class MarketFeed(Protocol):
         """True when every quote of the window is readable (nothing of it is still waiting for compaction)."""
         ...
 
+    def liquidity(self, symbols: list[str], now_ns: int) -> dict[str, float]:
+        """Traded quote volume per symbol (mean per day of the last complete month available)."""
+        ...
+
 
 @dataclass
 class LakeFeed:
@@ -196,6 +201,7 @@ class LakeFeed:
     files_read: int = 0
     max_file_rows: int = 0
     _coverage: tuple[tuple[str, int], int | None] | None = None
+    _liquidity: dict[str, dict[str, float]] = field(default_factory=lambda: {})
 
     def _file_bars(self, path: Path, symbols: tuple[str, ...]) -> pl.DataFrame:
         key = (str(path), path.stat().st_size, symbols)
@@ -228,6 +234,34 @@ class LakeFeed:
 
     def quotes(self, symbols: list[str], window: FeedWindow) -> pl.DataFrame:
         return load_quotes(self.data_root, symbols, window)
+
+    def liquidity(self, symbols: list[str], now_ns: int) -> dict[str, float]:
+        """Mean daily TRADED quote volume per symbol over the last complete calendar month in the bulk klines
+        (the backtest ranks `pit_top_liquidity` by traded quote volume; the bookTicker bars only count samples,
+        A9). Live 1m klines are not collected, so the basis lags by up to a month; symbols without data are
+        absent (they cannot be selected)."""
+        now = datetime.fromtimestamp(now_ns / 1e9, UTC)
+        year, month = now.year, now.month
+        out: dict[str, float] = {}
+        remaining = list(symbols)
+        for _ in range(3):  # each symbol's newest complete month, at most three back (A6-A12 review: the bulk
+            year, month = (year - 1, 12) if month == 1 else (year, month - 1)  # download fills a month per symbol)
+            key = f"{year:04d}-{month:02d}"
+            known = self._liquidity.setdefault(key, {})
+            need = [s for s in remaining if s not in known]
+            if need:
+                read = load_bulk(self.data_root, KLINES_BULK, need, [key])
+                if read.frame.height:
+                    days = read.frame.group_by("symbol").agg(
+                        (pl.col("quote_volume").sum() / (pl.col("event_ns").n_unique() / 1_440)).alias("per_day")
+                    )
+                    known.update({str(s): float(v) for s, v in days.iter_rows()})
+            for s in [s for s in remaining if s in known]:
+                out[s] = known[s]
+                remaining.remove(s)
+            if not remaining:
+                break
+        return out
 
     def covers(self, window: FeedWindow) -> bool:
         """The lake reaches the window's end AND every raw segment whose hour overlaps the window has its lake

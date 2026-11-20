@@ -69,6 +69,9 @@ def test_supervisor_restarts_crashing_child_with_backoff_and_retires_blocked_chi
     # (The reviewed bug slept min(delay, poll_s) and would restart every ~0.5-2 s: many restarts.)
     assert result.restarts["crash"] == 1
     assert time.monotonic() - started < 30
+    # A10 / OPS-009: the consecutive short runs are published for the monitor (restart-loop incident)
+    state = json.loads((tmp_path / "run" / "supervisor.state.json").read_text(encoding="utf-8"))
+    assert state["streaks"]["crash"] >= 1 and "at_ns" in state
 
 
 def test_supervisor_stops_everything_when_a_child_reports_a_ban(tmp_path: Path) -> None:

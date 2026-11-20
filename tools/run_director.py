@@ -41,6 +41,9 @@ def main() -> int:
     ap.add_argument("--llm", choices=["fake", "claude-cli", "claude-api"], default="fake")
     ap.add_argument("--max-total-usd", type=float, default=5.0)
     ap.add_argument("--universe-n", type=int, default=5, help="universe size of the specs (part of the experiment)")
+    ap.add_argument("--search", choices=["grid", "space"], default="grid", help="space = Phase 4 pipeline (v2.2 A8)")
+    ap.add_argument("--s1-count", type=int, default=40, help="space mode: S1 proposals per cycle")
+    ap.add_argument("--top-k", type=int, default=3, help="space mode: S1 top-k promoted to S2")
     ap.add_argument("--out", type=Path, default=Path("docs/measurements/phase3-director-run.md"))
     a = ap.parse_args()
     os.environ.setdefault("POLARS_MAX_THREADS", "2")
@@ -100,7 +103,14 @@ def main() -> int:
             data = ["klines", "mark"] + (["funding"] if panel.funding.height else [])
             director = Director(
                 DirectorConfig(
-                    run_id=run_id, seed=a.seed, memory=a.memory == "on", policy=a.policy, universe_n=a.universe_n
+                    run_id=run_id,
+                    seed=a.seed,
+                    memory=a.memory == "on",
+                    policy=a.policy,
+                    universe_n=a.universe_n,
+                    search=a.search,
+                    s1_count=a.s1_count,
+                    top_k=a.top_k,
                 ),
                 ledger=TrialLedger(store, env_id=ENV_ID, code_sha=git_sha(repo_root())),
                 catalog=catalog,

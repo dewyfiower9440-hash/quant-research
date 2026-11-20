@@ -505,6 +505,44 @@ def _child_entry(role: str) -> None:
     main([role])
 
 
+SHORT_RUN_S = 120.0  # a child that exits sooner than this counts towards a restart loop (OPS-009)
+STATE_EVERY_S = 60.0  # the supervisor rewrites its state at least this often (the monitor drops older state)
+
+
+def update_streak(streaks: dict[str, int], name: str, *, ran_s: float, short_s: float = SHORT_RUN_S) -> None:
+    """Consecutive short runs of one child; a run of `short_s` or longer ends the streak."""
+    streaks[name] = streaks.get(name, 0) + 1 if ran_s < short_s else 0
+
+
+def reset_recovered(streaks: dict[str, int], *, running_for_s: dict[str, float], short_s: float = SHORT_RUN_S) -> bool:
+    """A child that has been running for `short_s` has recovered: its streak ends (A6-A12 review: the streak was
+    only touched on an exit, so a recovered child kept its restart-loop incident open). True when anything changed."""
+    changed = False
+    for name, ran in running_for_s.items():
+        if ran >= short_s and streaks.get(name, 0) > 0:
+            streaks[name] = 0
+            changed = True
+    return changed
+
+
+def write_supervisor_state(path: Path, streaks: dict[str, int]) -> None:
+    """run/supervisor.state.json for the monitor. Temporary file + rename; on Windows the rename is refused while
+    the monitor reads the file, then the file is written in place (as `Health.write`). Never raises: a failed
+    state write must not stop the supervisor and with it every collector (A6-A12 review)."""
+    body = json.dumps({"streaks": streaks, "at_ns": time.time_ns()})
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        try:
+            os.replace(tmp, path)
+        except PermissionError:
+            path.write_text(body, encoding="utf-8")
+            tmp.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("supervisor.state_write_failed", path=str(path), error=str(e))
+
+
 @dataclass
 class SupervisorResult:
     restarts: dict[str, int]
@@ -532,6 +570,10 @@ def supervise(
     restart_at: dict[str, float] = {}
     delay: dict[str, float] = dict.fromkeys(children, 5.0)
     result = SupervisorResult(dict.fromkeys(children, 0), set(), stopped_all=False)
+    streaks: dict[str, int] = dict.fromkeys(children, 0)
+    state_file = settings.data_root / "run" / "supervisor.state.json"
+    write_supervisor_state(state_file, streaks)
+    last_state = time.monotonic()
     t_end = time.monotonic() + max_runtime_s if max_runtime_s else None
 
     def spawn(name: str) -> None:
@@ -550,6 +592,10 @@ def supervise(
                 log.info("supervisor.stop_file", path=str(stop_file))
                 break
             now = time.monotonic()
+            alive = {n: now - started[n] for n in children if n in procs and procs[n].exitcode is None}
+            if reset_recovered(streaks, running_for_s=alive) or now - last_state >= STATE_EVERY_S:
+                write_supervisor_state(state_file, streaks)  # also periodically: the monitor ignores a stale state file
+                last_state = now
             for name in children:
                 if name in result.retired:
                     continue
@@ -564,6 +610,8 @@ def supervise(
                     continue
                 ran = now - started[name]
                 log.warning("supervisor.child_exited", child=name, code=code, ran_s=round(ran, 1))
+                update_streak(streaks, name, ran_s=ran)
+                write_supervisor_state(state_file, streaks)
                 if code == EXIT_STOP_ALL:
                     log.error("supervisor.stop_all", child=name, reason="Binance IP ban; manual action needed")
                     result.stopped_all = True

@@ -17,6 +17,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from statistics import NormalDist
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -250,23 +251,35 @@ class Clustering:
         return self.k
 
 
+MAX_K_CEILING = 40  # k-means x silhouette costs ~n^2.5 in k: n=400 took 30.6 s at k<=30 and 45.2 s at k<=40
 MAX_K_DEFAULT = 30  # ONC search cap: k-means x silhouette for k = 2..min(n-1, 30); raised only by measurement
 
 
-def onc_clusters(corr: F64, *, seed: int = 0, max_k: int | None = MAX_K_DEFAULT, n_init: int = 10) -> Clustering:
+def onc_k_cap(n: int) -> int:
+    """The k search cap: at least MAX_K_DEFAULT, growing like 2*sqrt(n) (v2.2 A12: a fixed 30 capped N_eff at 30
+    for any number of independent trials), never more than n - 1."""
+    return max(1, min(n - 1, max(MAX_K_DEFAULT, min(MAX_K_CEILING, math.ceil(2.0 * math.sqrt(n))))))
+
+
+def onc_clusters(
+    corr: F64, *, seed: int = 0, max_k: int | Literal["auto"] | None = "auto", n_init: int = 10
+) -> Clustering:
     """ONC: k-means on the correlation distance sqrt(0.5·(1-rho)) for k = 2..max_k, pick the k (and init)
-    with the highest silhouette quality mean/std. Fewer than 3 trials form one cluster (N_eff = N).
-    `max_k=None` searches every k (slow beyond ~100 trials)."""
+    with the highest silhouette quality mean/std. Fewer than 3 trials form one cluster each (N_eff = N); a group
+    whose trials are all (nearly) perfectly correlated is ONE effective trial. `max_k="auto"` = `onc_k_cap(n)`,
+    `None` searches every k (slow beyond ~100 trials)."""
     n = corr.shape[0]
     if corr.shape != (n, n):
         raise ValueError(f"corr must be square, got {corr.shape}")
+    if n >= 2 and float(np.min(corr[~np.eye(n, dtype=bool)])) >= 0.999:
+        return Clustering(tuple([0] * n), 1, math.inf)  # the same strategy n times (A12: k >= 2 said N_eff 2)
     if n < 3:
         return Clustering(tuple(range(n)), n, math.inf)
     dist = np.sqrt(np.clip(0.5 * (1.0 - corr), 0.0, 1.0))
     np.fill_diagonal(dist, 0.0)
     rng = np.random.default_rng(seed)
     best: tuple[float, int, NDArray[np.int64]] | None = None
-    top = n - 1 if max_k is None else min(max_k, n - 1)
+    top = n - 1 if max_k is None else onc_k_cap(n) if max_k == "auto" else min(max_k, n - 1)
     for k in range(2, top + 1):
         for _ in range(n_init):
             labels = _kmeans(dist, k, rng)

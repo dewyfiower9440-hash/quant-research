@@ -24,7 +24,24 @@ from quant_research.monitor.incidents import reconcile
 
 Notifier = Callable[[list[Finding]], None]
 WATCHED_HEARTBEATS = ("ws",)
-OPTIONAL_HEARTBEATS = ("paper",)  # watched only once the process has ever written a heartbeat (Phase 6)
+OPTIONAL_HEARTBEATS = ("paper",)  # watched once it wrote a heartbeat OR its task is registered (run/<name>.expected)
+
+
+SUPERVISOR_STATE_STALE_NS = 600 * 10**9  # older state = no supervisor running: its streaks are not current
+
+
+def _restart_streaks(path: Path, now_ns: int) -> dict[str, int]:
+    try:
+        body = cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+    except (FileNotFoundError, json.JSONDecodeError):  # no supervisor state yet, or caught mid-write
+        return {}
+    at = body.get("at_ns")
+    if not isinstance(at, int) or now_ns - at > SUPERVISOR_STATE_STALE_NS:
+        return {}
+    raw = body.get("streaks")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): int(v) for k, v in cast(dict[object, object], raw).items() if isinstance(v, int)}
 
 
 def _heartbeat_ns(path: Path) -> int | None:
@@ -61,7 +78,7 @@ def observe(data_root: Path, catalog: Catalog, clock: ClockReference, *, since_n
             **{
                 name: _heartbeat_ns(run / f"{name}.heartbeat.json")
                 for name in OPTIONAL_HEARTBEATS
-                if (run / f"{name}.heartbeat.json").exists()
+                if (run / f"{name}.heartbeat.json").exists() or (run / f"{name}.expected").exists()
             },
         },
         free_disk=shutil.disk_usage(data_root).free,
@@ -71,6 +88,7 @@ def observe(data_root: Path, catalog: Catalog, clock: ClockReference, *, since_n
         ssd_state_ns=None if ssd is None else ssd.at_ns,
         ssd_level=None if ssd is None else ssd.level,
         receive_gaps=gaps,
+        restart_streaks=_restart_streaks(run / "supervisor.state.json", now_ns),
     )
 
 

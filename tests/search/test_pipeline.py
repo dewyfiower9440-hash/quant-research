@@ -110,7 +110,7 @@ def test_every_stage_is_accounted_and_the_searcher_is_told_once_per_proposal(
     assert c["proposed"] == c["s0_trials"] == 12 == _count(ledger, "S0")
     assert c["s1_trials"] == c["s0_accepted"] == _count(ledger, "S1", "cycle1")
     assert c["s2_trials"] == c["promoted_top"] + c["promoted_random"] == _count(ledger, "S2", "cycle1")
-    assert c["s3_trials"] == _count(ledger, "S3", "cycle1") >= min(1, c["s2_done"])  # top 1 + a random share (A6)
+    assert c["s3_trials"] == min(1, c["s2_done"]) == _count(ledger, "S3", "cycle1")  # sampling off
     assert searcher.pending() == 0 and searcher.internal_evaluations() == 12  # Optuna evaluations = proposals
     assert res.reward is not None and res.reward >= 0.0 and bandit.arms["mean_reversion"].pulls == 1.0
     assert res.archive_offers["offered"] == c["s2_done"] + sum(1 for o in res.s3 if o.status == "done")
@@ -422,3 +422,60 @@ def test_predicted_costs_use_the_evaluated_candidates_rows_and_ops(
         for m in [json.loads(str(raw))]
     ]
     assert res.predicted["S2"] == pytest.approx(sum(model["S2"].predict(r, o) for r, o in s2_rows_ops))
+
+
+def test_s3_sampling_is_off_by_default_and_its_time_is_not_charged_to_the_bandit_reward(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """A6-A12 review finding 5: a 5 % default silently changed the null harness's candidate sets and charged the
+    fidelity runs' wall time to the bandit reward."""
+    assert SearchBudget().s3_random_rate == 0.0
+    catalog, ledger = env
+    sel, conf = panels
+    bandit = FamilyBandit(tuple(SPACES), BanditPrior(min_pulls=0.0))
+    res = run_family_search(
+        ledger,
+        "momentum",
+        RandomSearcher(SPACES["momentum"], seed=8),
+        selection=sel,
+        confirmation=conf,
+        catalog=catalog,
+        config=CONFIG,
+        s1=S1Config(horizon_bars=4),
+        budget=SearchBudget(s1_count=10, top_k=4, promote_rate=0.0, s3_top=1, s3_random_rate=1.0),
+        seed=3,
+        fold="sample-cost",
+        bandit=bandit,
+    )
+    assert "S3_sample" in res.cost_s and res.cost_s["S3_sample"] > 0.0
+    assert "S3_sample" not in res.reward_cost_stages
+
+
+def test_predicted_costs_count_only_trials_created_in_this_batch(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """A6-A12 review finding 6: reused trials were predicted at full cost but measured at lookup cost."""
+    from quant_research.search.cost_model import LinearCost
+
+    catalog, ledger = env
+    sel, conf = panels
+    model = {"S1": LinearCost(0.01, 1e-6), "S2": LinearCost(0.02, 2e-6)}
+
+    def run() -> SearchResult:
+        return run_family_search(
+            ledger,
+            "trend",
+            RandomSearcher(SPACES["trend"], seed=2),
+            selection=sel,
+            confirmation=conf,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=8, top_k=2, promote_rate=0.0, s3_top=0),
+            seed=1,
+            fold="a7-resume",
+            cost_model=model,
+        )
+
+    first, again = run(), run()
+    assert first.predicted["S1"] > 0 and again.predicted.get("S1", 0.0) == 0.0  # everything reused the 2nd time

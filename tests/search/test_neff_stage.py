@@ -25,9 +25,16 @@ def ledger(tmp_path: Path) -> Generator[TrialLedger]:
     store.close()
 
 
-def _record(ledger: TrialLedger, stage: Stage, pnl: np.ndarray | None, *, window: tuple[int, int] = (W0, W1)) -> int:
+def _record(
+    ledger: TrialLedger,
+    stage: Stage,
+    pnl: np.ndarray | None,
+    *,
+    window: tuple[int, int] = (W0, W1),
+    fold: str | None = None,
+) -> int:
     key = ledger.register_experiment(f"h{ledger.now_ns()}", "{}", {"n": ledger.now_ns()})
-    with ledger.evaluate(key, key, stage) as trial:
+    with ledger.evaluate(key, key, stage, fold=fold) as trial:
         trial.metrics = {"sr_daily": 0.1}
         if pnl is not None:
             ledger.store.conn.execute(
@@ -66,3 +73,17 @@ def test_pnl_matrix_aligns_by_day_and_pads_with_nan(ledger: TrialLedger) -> None
     assert len(ids) == 2 and mat.shape == (60, 2)
     assert np.isnan(mat[59, 1]) and mat[39, 1] == 39.0
     assert load_pnl_matrix(ledger, window_from_ns=1, window_to_ns=2)[1].shape == (0, 0)
+
+
+def test_n_total_is_reported_per_run_and_cumulative(ledger: TrialLedger) -> None:
+    """v2.2 A11: re-runs of the same batch added to N_total; the report separates the run's own trials (fold
+    prefix) from the cumulative count (the DSR keeps the cumulative, conservative one)."""
+    rng = np.random.default_rng(2)
+    for fold in ("runA:trend", "runA:momentum", "runB:trend"):
+        key = ledger.register_experiment(f"h-{fold}", "{}", {"fold": fold})
+        with ledger.evaluate(key, key, "S1", fold=fold) as trial:
+            trial.metrics = {"score": 1.0}
+        _record(ledger, "S2", rng.standard_normal(60), fold=fold)
+    total = neff_groups(ledger)
+    run_a = neff_groups(ledger, fold_prefix="runA:")
+    assert total[0].n_total == 6 and run_a[0].n_total == 4

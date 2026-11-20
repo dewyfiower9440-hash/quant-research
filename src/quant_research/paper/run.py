@@ -30,7 +30,7 @@ import polars as pl
 import structlog
 
 from quant_research.backtest.market import prepare
-from quant_research.backtest.panel import PanelConfig
+from quant_research.backtest.panel import PanelConfig, select_top_liquidity
 from quant_research.backtest.run import unblob
 from quant_research.capture.lock import AlreadyRunningError, InstanceLock
 from quant_research.capture.run import Health
@@ -223,8 +223,18 @@ def load_policy(data_root: Path, store: PolicyStore, *, now_ns: int) -> None:
         store.apply(message, bytes.fromhex(sig.read_text(encoding="utf-8").strip()), now_ns=now_ns)
 
 
-def target_weights(spec: StrategySpec, frame: pl.DataFrame, config: PanelConfig) -> dict[str, float]:
-    """Latest complete decision's signed target weights per symbol (0 when the spec has no view)."""
+def target_weights(
+    spec: StrategySpec, frame: pl.DataFrame, config: PanelConfig, *, liquidity: dict[str, float] | None = None
+) -> dict[str, float]:
+    """Latest complete decision's signed target weights per symbol (0 when the spec has no view). A
+    `pit_top_liquidity` spec selects its n symbols exactly as the backtest does (`select_top_liquidity`), ranked by
+    TRADED quote volume (`liquidity`, per symbol); without it the selector would see bookTicker sample counts."""
+    if spec.universe.selector == "pit_top_liquidity":
+        frame = (
+            select_top_liquidity(frame, spec.universe.n)
+            if liquidity is None
+            else select_by_liquidity(frame, liquidity, n=spec.universe.n)
+        )
     compiled = compile_spec(spec, frame)
     market, targets = prepare(
         spec, compiled, frame, _empty_funding(), fidelity="L1", config_latency_ns=config.latency_ns
@@ -233,6 +243,17 @@ def target_weights(spec: StrategySpec, frame: pl.DataFrame, config: PanelConfig)
         return {}
     last = targets.weight[-1]
     return {s: float(w) for s, w in zip(market.symbols, last, strict=True) if math.isfinite(float(w)) and w != 0.0}
+
+
+def select_by_liquidity(frame: pl.DataFrame, liquidity: dict[str, float], *, n: int) -> pl.DataFrame:
+    """`selected` = the n members with the largest traded quote volume (one value per symbol for the month, ties by
+    name). Symbols without a value are never selected (A6-A12 review: they were ranked as 0 and could be picked;
+    the backtest's selector leaves them out). Ranking the monthly value directly also avoids weighting it by the
+    number of bookTicker bars, which a collection gap would distort."""
+    top = [s for s, _v in sorted(liquidity.items(), key=lambda kv: (-kv[1], kv[0]))]
+    members = set(frame.filter(pl.col("member"))["symbol"].unique().to_list())
+    chosen = [s for s in top if s in members][:n]
+    return frame.with_columns((pl.col("member") & pl.col("symbol").is_in(chosen)).alias("selected"))
 
 
 def _empty_funding() -> pl.DataFrame:
@@ -321,6 +342,11 @@ def tick(
     last_decision = (now_ns // HOUR_NS) * HOUR_NS - HOUR_NS  # the last fully elapsed hour
     first_decision = last_decision - (cfg.lookback_days - 1) * DAY_NS
     hourly = [st for st in strategies if TIMEFRAME_NS[st.spec.timeframe] == HOUR_NS]  # the paper feed is hourly
+    liquidity = feed.liquidity(symbols, now_ns)  # traded quote volume, the backtest's selection basis (A9)
+    blind = [st.spec_hash for st in hourly if st.spec.universe.selector == "pit_top_liquidity" and not liquidity]
+    if blind:  # no traded-volume data: such a strategy decides nothing (and keeps its positions), never by name
+        summary["no_liquidity"] = blind
+        hourly = [st for st in hourly if st.spec_hash not in blind]
     other = {st.spec_hash for st in strategies} - {st.spec_hash for st in hourly}
     # each strategy's own position + its open orders' remainder (an order not yet settled is not planned
     # again, review 2 finding 4); approved non-hourly strategies are left alone (not decided, not flattened)
@@ -347,7 +373,9 @@ def tick(
     prices = {s: m for s in fresh if (m := bar_mid(bars, s, last_decision)) is not None}
     capital_each = cfg.capital / max(1, len(hourly))  # equal capital per approved strategy
     targets = {
-        st.spec_hash: {s: w * capital_each for s, w in target_weights(st.spec, panel.frame, config).items()}
+        st.spec_hash: {
+            s: w * capital_each for s, w in target_weights(st.spec, panel.frame, config, liquidity=liquidity).items()
+        }
         for st in hourly
     }
     intents = plan_portfolio(

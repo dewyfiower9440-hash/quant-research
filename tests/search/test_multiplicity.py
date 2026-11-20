@@ -19,6 +19,7 @@ from quant_research.search.multiplicity import (
     min_sr,
     min_sr_table,
     onc_clusters,
+    onc_k_cap,
     pairwise_corr,
     psr,
     sharpe_stats,
@@ -117,3 +118,12 @@ def test_annualised_inputs_are_not_mixed_into_period_formulas() -> None:
     mixed = psr(sr_ann, expected_max_sr(50, st.variance()), st.skew, st.kurt, st.t)
     assert period == pytest.approx(psr(back, expected_max_sr(50, st.variance()), st.skew, st.kurt, st.t))
     assert mixed != pytest.approx(period)
+
+
+def test_onc_treats_a_perfectly_correlated_group_as_one_trial_and_caps_k_by_sqrt_n() -> None:
+    """v2.2 A12 (A3 review note): k started at 2, so a group of identical strategies still counted N_eff = 2, and
+    the fixed cap of 30 held N_eff <= 30 for any number of independent trials."""
+    same = np.ones((12, 12))
+    assert onc_clusters(same).n_eff == 1
+    # the cap grows like 2 sqrt(n) but stops at 40: k-means x silhouette costs ~n^2.5 (n=400: 30 -> 45 s)
+    assert onc_k_cap(5) == 4 and onc_k_cap(100) == 30 and onc_k_cap(300) == 35 and onc_k_cap(2_500) == 40

@@ -42,7 +42,9 @@ class SearchBudget:
     top_k: int = 10
     promote_rate: float = 0.05
     s3_top: int = 1  # S3 runs on the best S2 candidates (0: the caller runs S3, e.g. the Director)
-    s3_random_rate: float = 0.05  # A6: plus this random share of the other S2 survivors (S1-vs-S3 fidelity pairs)
+    # A6: plus this random share of the other S2 survivors (S1-vs-S3 fidelity pairs). Off by default: it changes
+    # the candidate sets of every caller (the null harness included); the batch tool turns it on
+    s3_random_rate: float = 0.0
     time_budget_s: float | None = None  # predicted S1 time budget; shrinks s1_count when the cost model is known
     memory_limit_mb: float = 2_048.0
 
@@ -73,6 +75,8 @@ class SearchResult:
     validation: RunOutcome | None = None  # the bandit's reward run (last part of selection), when a bandit is given
     # A7: predicted seconds per stage from the cost model, on the candidates actually evaluated (rows x ops each)
     predicted: dict[str, float] = field(default_factory=lambda: dict[str, float]())
+    # the cost stages that the bandit reward is divided by (the fidelity S3 samples are measurement, not search)
+    reward_cost_stages: tuple[str, ...] = ("S0", "S1", "S2", "S3", "val")
     archive_offers: dict[str, int] = field(default_factory=lambda: dict[str, int]())
 
     def best_s2(self) -> S2Scored | None:
@@ -185,6 +189,7 @@ def run_family_search(
             s1_count = max(0, int(s1_count * fit_rows / max(rows, 1)))
     cost: dict[str, float] = {}
 
+    first_new = int(ledger.store.conn.execute("select coalesce(max(trial_id), 0) from trial").fetchone()[0])
     t0 = time.perf_counter()
     cands = propose(space, searcher, s1_count)
     s0 = run_s0(ledger, cands, config, origin=origin)
@@ -228,7 +233,11 @@ def run_family_search(
         draws = np.random.default_rng([seed, 3]).random(len(rest))
         sampled = [s for s, u in zip(rest, draws, strict=True) if float(u) < budget.s3_random_rate]
         chosen = done[: budget.s3_top] + sampled
-        for s in chosen:
+        n_top = len(done[: budget.s3_top])
+        for i, s in enumerate(chosen):
+            if i == n_top:  # from here on: the fidelity samples, timed apart from the search's own S3
+                cost["S3"] = time.perf_counter() - t3
+                t3 = time.perf_counter()
             spec = build_point(space, s.source.candidate.point)
             h, conf = experiment_config(spec, confirmation, catalog, s3cfg)
             prior = existing_trial(ledger, experiment_key(h, conf), "S3", fold)
@@ -246,16 +255,17 @@ def run_family_search(
                     spec, confirmation, catalog, ledger, s3cfg, stage="S3", fold=fold, origin=origin, tags=tags
                 )
             )
-        cost["S3"] = time.perf_counter() - t3
+        cost["S3_sample" if len(chosen) > n_top else "S3"] = time.perf_counter() - t3
+        cost.setdefault("S3", 0.0)
 
     result = SearchResult(family, searcher.name, fold, s0, scored, sel, s2, s3, cost, proposed=len(cands))
     if cost_model is not None:
-        result.predicted = predicted_costs(ledger, cost_model, fold=fold, s1=scored, s2=s2)
+        result.predicted = predicted_costs(ledger, cost_model, fold=fold, s1=scored, s2=s2, after_trial_id=first_new)
     if bandit is not None:
         tv = time.perf_counter()
         result.validation = _reward_run(ledger, s2, reward_panel, catalog, s2cfg, fold=fold, origin=origin)
         cost["val"] = time.perf_counter() - tv
-        result.reward = batch_reward(result, sum(cost.values()))
+        result.reward = batch_reward(result, sum(cost.get(k, 0.0) for k in result.reward_cost_stages))
         bandit.update(family, result.reward)
     if archive is not None:
         result.archive_offers = offer_to_archive(archive, family, [s.outcome for s in s2] + s3)
@@ -313,12 +323,16 @@ def predicted_costs(
     fold: str | None,
     s1: Sequence[S1Scored],
     s2: Sequence[S2Scored],
+    after_trial_id: int = 0,
 ) -> dict[str, float]:
-    """Model seconds for the S1 / S2 trials of this batch, each from ITS recorded rows and ops (A7: a constant
-    ops count and the expected S2 count made the band ratio swing 0.6-2.5). Reused trials count too: the
-    prediction is compared with the stage's measured wall time, which includes looking them up."""
+    """Model seconds for the S1 / S2 trials EVALUATED in this batch (trial id > `after_trial_id`), each from its
+    recorded rows and ops (A7: a constant ops count and the expected S2 count made the band ratio swing 0.6-2.5;
+    review: reused trials cost a lookup, not an evaluation, and are left out)."""
     out: dict[str, float] = {}
-    for stage, trials in (("S1", [s.trial_id for s in s1]), ("S2", [s.outcome.trial_id for s in s2])):
+    for stage, trials in (
+        ("S1", [s.trial_id for s in s1 if s.trial_id > after_trial_id]),
+        ("S2", [s.outcome.trial_id for s in s2 if s.outcome.trial_id > after_trial_id]),
+    ):
         if stage not in cost_model or not trials:
             continue
         total = 0.0

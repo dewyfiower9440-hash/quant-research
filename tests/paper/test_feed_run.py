@@ -29,6 +29,7 @@ from quant_research.paper.run import (
     PaperConfig,
     Strategy,
     account_exposure,
+    approved_strategies,
     daily_closes,
     health_due,
     load_policy,
@@ -146,14 +147,21 @@ class _FrameFeed:
     """In-memory feed over one quote frame (the lake feed is tested separately below). `visible_until` models
     the lake's lag (hourly segments are compacted about an hour late): nothing after it can be read."""
 
-    def __init__(self, quotes: pl.DataFrame, visible_until: int | None = None) -> None:
+    def __init__(
+        self, quotes: pl.DataFrame, visible_until: int | None = None, liq: dict[str, float] | None = None
+    ) -> None:
         self.q = quotes
         self.visible_until = visible_until
+        # traded quote volume per symbol (the backtest's liquidity basis); default: the fixture's natural order
+        self.liq = liq if liq is not None else {s: 1_000.0 * (k + 1) for k, s in enumerate(SYMBOLS)}
         self.quote_windows: list[FeedWindow] = []
 
     def _window(self, symbols: list[str], window: FeedWindow) -> pl.DataFrame:
         last = window.last_ns if self.visible_until is None else min(window.last_ns, self.visible_until)
         return self.q.filter(pl.col("symbol").is_in(symbols) & pl.col("received_ns").is_between(window.first_ns, last))
+
+    def liquidity(self, symbols: list[str], now_ns: int) -> dict[str, float]:
+        return {s: v for s, v in self.liq.items() if s in symbols}
 
     def covers(self, window: FeedWindow) -> bool:
         top = self.q["received_ns"].max()
@@ -447,3 +455,135 @@ def test_a_header_only_segment_compacted_to_zero_rows_does_not_block_coverage(tm
     )
     catalog.close()
     assert LakeFeed(tmp_path).covers(window)  # compacted with 0 rows: nothing to wait for
+
+
+def test_paper_selects_the_universe_by_traded_quote_volume_like_the_backtest(tmp_path: Path) -> None:
+    """v2.2 A9 (analysis A-9): the paper tick never applied `select_top_liquidity` (it traded every member while
+    the backtest traded the top n), and its bars' volume is a bookTicker sample count, not traded volume."""
+    settings, ledger, policy, strat, cfg, q, _clock = _paper_setup(tmp_path)
+    assert strat.spec.universe.n == 2
+    # traded volume ranks AAA > BBB > CCC (the bookTicker notional ranks the other way: CCC has the highest price)
+    feed = _FrameFeed(q, visible_until=NOW, liq={"AAAUSDT": 9e9, "BBBUSDT": 5e9, "CCCUSDT": 1e6})
+    tick(settings, cfg, ledger, policy, now_ns=NOW, symbols=SYMBOLS, strategies=[strat], feed=feed)
+    traded = {o.symbol for o in ledger.open_orders()}
+    assert traded and traded <= {"AAAUSDT", "BBBUSDT"}  # never the least liquid symbol
+    ledger.close()
+
+
+def test_lake_feed_liquidity_is_last_complete_months_mean_daily_quote_volume(tmp_path: Path) -> None:
+    from quant_research.paper.feed import KLINES_BULK
+
+    month_dir = tmp_path / "lake" / KLINES_BULK / "2026-10"
+    for k, sym in enumerate(["AAAUSDT", "BBBUSDT"]):
+        n = 31 * 1_440
+        frame = pl.DataFrame({"event_ns": np.arange(n, dtype=np.int64), "quote_volume": np.full(n, 10.0 * (k + 1))})
+        write_frame(frame, month_dir / f"{sym}-2026-10-20261102T000000000Z.parquet", symbol=sym)
+    feed = LakeFeed(tmp_path)
+    now = int(datetime(2026, 11, 20, tzinfo=UTC).timestamp()) * S
+    liq = feed.liquidity(["AAAUSDT", "BBBUSDT", "ZZZUSDT"], now)
+    assert liq == pytest.approx({"AAAUSDT": 10.0 * 1_440, "BBBUSDT": 20.0 * 1_440})  # per-day mean; ZZZ absent
+    assert feed.liquidity(["AAAUSDT"], now) == pytest.approx({"AAAUSDT": 10.0 * 1_440})  # cached month
+
+
+def test_approved_strategies_needs_a_passed_verdict_a_paper_state_and_carries_the_s3_baseline(tmp_path: Path) -> None:
+    """A9: the paper process's read of validator.db / research.db (lifecycle state, passed verdict, the S3 daily
+    returns as the degradation baseline)."""
+    import zlib
+
+    from quant_research.research.ledger import TrialLedger
+    from quant_research.research.store import ResearchStore
+    from quant_research.validator.lifecycle import LifecycleLedger, Transition
+    from quant_research.validator.store import Submission, ValidatorStore, rule_hash
+
+    research = ResearchStore.open(tmp_path / "research.db")
+    ledger = TrialLedger(research, env_id="E", code_sha="x")
+    spec = StrategySpec.model_validate(templates()["trend"].model_dump(mode="json"))
+    key = ledger.register_experiment("h1", spec.model_dump_json(), {"k": 1})
+    ledger.register_experiment("h2", spec.model_dump_json(), {"k": 2})
+    with ledger.evaluate(key, "h1", "S3") as trial:
+        trial.metrics = {"sr_daily": 0.1}
+    daily = np.array([0.01, -0.005, 0.02, 0.0], dtype="<f8")
+    research.conn.execute(
+        "insert into backtest_run(trial_id, engine, fidelity, data_version, lag_versions_json, seal_epochs_json, "
+        "cost_json, window_from_ns, window_to_ns, pnl_daily, created_ns) values (?,?,?,?,?,?,?,?,?,?,?)",
+        (trial.trial_id, "event", "L1", "d", "{}", "{}", "{}", 0, 1, zlib.compress(daily.tobytes()), 1),
+    )
+    research.close()
+    vstore = ValidatorStore.open(tmp_path / "validator.db")
+    rh = rule_hash({"r": 1})
+    vstore.ensure_budget(1, 5, rule_hash=rh)
+    for req, h in ((1, "h1"), (2, "h2")):
+        sid = vstore.register(Submission(req, h, rh, key if h == "h1" else "k2", 0.1, ("d",), 1))
+        vstore.judge(sid, h == "h1", {"rule_hash": rh})  # h1 passes, h2 fails
+    lc = LifecycleLedger(vstore.conn, now_ns=lambda: 1)
+    for h in ("h1", "h2"):
+        lc.move(Transition(h, None, "Candidate", "s", "t", "research"))
+        lc.move(Transition(h, "Candidate", "Validated", "v", "x", "validator"))
+    vstore.close()
+    out = approved_strategies(tmp_path / "validator.db", tmp_path / "research.db")
+    assert [s.spec_hash for s in out] == ["h1"] and out[0].state == "Validated"  # h2's verdict failed
+    assert out[0].expected == pytest.approx((float(daily.mean()), float(daily.std(ddof=1))))
+    assert approved_strategies(tmp_path / "missing.db", tmp_path / "research.db") == []
+
+
+def test_the_paper_loop_honours_stop_waits_for_a_fresh_collector_and_ticks(tmp_path: Path) -> None:
+    import asyncio
+    import json
+    import time
+
+    from quant_research.paper.run import loop
+
+    settings = Settings(data_root=tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = PaperConfig("paper-loop")
+    # no collector heartbeat: the tick is skipped and the paper heartbeat records the stale collector
+    assert asyncio.run(loop(settings, cfg, interval_s=0.0, duration_s=0.0, symbols=SYMBOLS)) == 0
+    beat = json.loads((run_dir / "paper.heartbeat.json").read_text(encoding="utf-8"))
+    assert "collector" in json.dumps(beat)
+    # a fresh collector heartbeat: one real tick on an empty lake (no policy key -> no policy -> nothing traded)
+    (run_dir / "rest.heartbeat.json").write_text(json.dumps({"at_ns": time.time_ns()}), encoding="utf-8")
+    assert asyncio.run(loop(settings, cfg, interval_s=0.0, duration_s=0.0, symbols=SYMBOLS)) == 0
+    beat = json.loads((run_dir / "paper.heartbeat.json").read_text(encoding="utf-8"))
+    assert "tick" in json.dumps(beat)
+    (run_dir / "STOP").write_text("", encoding="utf-8")
+    assert asyncio.run(loop(settings, cfg, interval_s=0.0, duration_s=None, symbols=SYMBOLS)) == 0  # stops at once
+
+
+def test_symbols_without_traded_volume_are_never_selected_and_no_data_means_no_decision(tmp_path: Path) -> None:
+    """A6-A12 review finding 1: a missing symbol got quote volume 0 and was still ranked (ties broken
+    alphabetically); with no data at all the 'top n' was the first n names."""
+    from quant_research.paper.run import select_by_liquidity
+
+    frame = pl.DataFrame({"symbol": ["AAAUSDT", "BBBUSDT", "CCCUSDT"], "member": [True, True, True]})
+    picked = select_by_liquidity(frame, {"CCCUSDT": 1.0, "BBBUSDT": 5.0}, n=2)
+    assert picked.filter(pl.col("selected"))["symbol"].to_list() == ["BBBUSDT", "CCCUSDT"]  # AAA has no data
+    only_one = select_by_liquidity(frame, {"CCCUSDT": 1.0}, n=2)
+    assert only_one.filter(pl.col("selected"))["symbol"].to_list() == ["CCCUSDT"]
+    settings, ledger, policy, strat, cfg, q, _clock = _paper_setup(tmp_path)
+    blind = _FrameFeed(q, visible_until=NOW, liq={})
+    out = tick(settings, cfg, ledger, policy, now_ns=NOW, symbols=SYMBOLS, strategies=[strat], feed=blind)
+    assert out["submitted"] == 0 and out.get("no_liquidity") == [strat.spec_hash] and ledger.open_orders() == []
+    ledger.close()
+
+
+def test_liquidity_takes_each_symbols_newest_month_so_a_partly_downloaded_month_does_not_hide_it(
+    tmp_path: Path,
+) -> None:
+    """A6-A12 review finding 2: the bulk download goes symbol by symbol; a month holding only some symbols was
+    cached and the others vanished (counted as the least liquid) until the download finished."""
+    from quant_research.paper.feed import KLINES_BULK
+
+    def write(sym: str, month: str, qv: float) -> None:
+        n = 30 * 1_440
+        frame = pl.DataFrame({"event_ns": np.arange(n, dtype=np.int64), "quote_volume": np.full(n, qv)})
+        write_frame(
+            frame, tmp_path / "lake" / KLINES_BULK / month / f"{sym}-{month}-20261102T000000000Z.parquet", symbol=sym
+        )
+
+    write("AAAUSDT", "2026-10", 1.0)  # October already downloaded for AAA only
+    write("AAAUSDT", "2026-09", 9.0)
+    write("BBBUSDT", "2026-09", 2.0)
+    now = int(datetime(2026, 11, 20, tzinfo=UTC).timestamp()) * S
+    liq = LakeFeed(tmp_path).liquidity(["AAAUSDT", "BBBUSDT"], now)
+    assert liq == pytest.approx({"AAAUSDT": 1.0 * 1_440, "BBBUSDT": 2.0 * 1_440})  # BBB from its newest month
