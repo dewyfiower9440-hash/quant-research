@@ -3,6 +3,7 @@
 Design v2.1 §13 Phase 2 done-criteria: reference cases 100 %, engines agree."""
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -197,3 +198,90 @@ def test_engines_agree_on_every_stateless_scenario(case: tuple[Market, Targets])
     assert ev.costs == pytest.approx(vec.costs, rel=1e-9, abs=1e-9)
     assert ev.funding == pytest.approx(vec.funding, rel=1e-9, abs=1e-9)
     np.testing.assert_allclose(ev.gap_loss, vec.gap_loss, rtol=1e-9, atol=1e-9)
+
+
+def test_reference_rebalance_every_k_bars_holds_the_drifted_position_in_between() -> None:
+    """v2.2 B5 (D5): with rebalance_bars = 2 orders go out on bars 0 and 2 only; bar 1 holds what bar 0 bought
+    (no drift-back trade) and its target change is ignored."""
+    prices = [[100.0], [110.0], [99.0], [99.0]]
+    m, t = market(prices), targets([[1.0], [0.5], [1.0], [1.0]])
+    q0 = C0 / 100.0
+    cash = C0 - q0 * 100.0 - R * q0 * 100.0
+    e1 = cash + q0 * 110.0  # bar 1: no trade, the target 0.5 is ignored
+    e2 = cash + q0 * 99.0
+    q2 = e2 / 99.0  # bar 2: rebalance to weight 1
+    cash += -(q2 - q0) * 99.0 - R * abs(q2 - q0) * 99.0
+    final = cash + q2 * 99.0 - R * q2 * 99.0
+    for engine in ("event", "vector"):
+        if engine == "event":
+            res = run_event(m, t, COST, capital=C0, fidelity="L1", n_universe=1, rebalance_bars=2)
+        else:
+            res = run_vector(m, t, COST, capital=C0, fidelity="L1", n_universe=1, stateless=True, rebalance_bars=2)
+        assert res.equity.tolist() == pytest.approx([C0, e1, e2, final], rel=1e-12)
+        assert res.trades == 3  # buy, rebalance, close
+
+
+def test_reference_a_same_side_resize_below_the_band_is_skipped() -> None:
+    """v2.2 B5: min_trade_weight 0.2: the drift from 1.0 after +10 % is tiny next to the band, so bar 1 does not
+    trade; a flip or an exit always trades."""
+    prices = [[100.0], [110.0], [99.0], [99.0]]
+    m, t = market(prices), targets([[1.0], [0.9], [-1.0], [-1.0]])  # the last bar closes everything
+    for engine in ("event", "vector"):
+        if engine == "event":
+            res = run_event(m, t, COST, capital=C0, fidelity="L1", n_universe=1, min_trade_weight=0.2)
+        else:
+            res = run_vector(m, t, COST, capital=C0, fidelity="L1", n_universe=1, stateless=True, min_trade_weight=0.2)
+        assert res.trades == 3  # buy, (no resize at 0.9), flip to short, close
+        q0 = C0 / 100.0
+        assert res.equity[1] == pytest.approx(C0 - R * q0 * 100.0 + q0 * 10.0, rel=1e-12)
+
+
+@settings(max_examples=300, deadline=None)
+@given(scenarios(), st.integers(1, 5), st.sampled_from([0.0, 0.05, 0.2]))
+def test_engines_agree_with_a_rebalance_schedule_and_a_no_trade_band(
+    case: tuple[Market, Targets], every: int, band: float
+) -> None:
+    m, t = case
+    ev = run_event(m, t, COST, capital=C0, fidelity="L1", n_universe=1, rebalance_bars=every, min_trade_weight=band)
+    vec = run_vector(
+        m, t, COST, capital=C0, fidelity="L1", n_universe=1, stateless=True, rebalance_bars=every, min_trade_weight=band
+    )
+    np.testing.assert_allclose(ev.equity, vec.equity, rtol=1e-9, atol=1e-9)
+    assert ev.costs == pytest.approx(vec.costs, rel=1e-9, abs=1e-9)
+    assert ev.trades == vec.trades
+
+
+def test_invalid_rebalance_settings_are_refused() -> None:
+    m, t = market([[100.0], [101.0]]), targets([[1.0], [1.0]])
+    with pytest.raises(ValueError, match="rebalance"):
+        run_vector(m, t, COST, capital=C0, fidelity="L1", n_universe=1, stateless=True, rebalance_bars=0)
+    with pytest.raises(ValueError, match="band"):
+        run_event(m, t, COST, capital=C0, fidelity="L1", n_universe=1, min_trade_weight=-0.1)
+
+
+def test_a_time_stop_fires_between_rebalances_even_when_the_signal_has_changed() -> None:
+    """B5 review 2: the time stop required desire == side; with k > 1 a signal that turned off on a
+    non-rebalance bar skipped the stop and the position was held until the next rebalance."""
+    prices = [[100.0]] * 7
+    m = market(prices)
+    w = [[1.0], [1.0], [0.0], [0.0], [0.0], [0.0], [0.0]]  # the signal turns off at bar 2
+    res = run_event(m, targets(w), COST, capital=C0, fidelity="L1", n_universe=1, time_stop_bars=2, rebalance_bars=4)
+    assert res.stops == 1 and res.position_bars == 2  # stopped at bar 2, not held to the bar-4 rebalance
+    unchanged = run_event(
+        m, targets([[1.0]] * 7), COST, capital=C0, fidelity="L1", n_universe=1, time_stop_bars=2, rebalance_bars=1
+    )
+    assert unchanged.stops >= 1 and unchanged.position_bars == 2  # k = 1 behaves as before
+
+
+def test_the_rebalance_phase_is_anchored_to_absolute_time_not_to_the_first_row() -> None:
+    """B5 review 3: `t % k` tied the schedule to the first row (warm-up included), so selection, confirmation,
+    holdout slices and paper rebalanced on different bars. The phase is now (decision // bar) % k."""
+    prices = [[100.0 + t] for t in range(8)]
+    base = market(prices)
+    shifted = replace(base, decisions=base.decisions + 1)  # the same bars, the panel starts one bar later
+    w = targets([[1.0], [0.5], [1.0], [0.5], [1.0], [0.5], [1.0], [0.5]])
+    a = run_vector(base, w, COST, capital=C0, fidelity="L1", n_universe=1, stateless=True, rebalance_bars=2)
+    b = run_vector(shifted, w, COST, capital=C0, fidelity="L1", n_universe=1, stateless=True, rebalance_bars=2)
+    assert a.trades != b.trades or not np.allclose(a.equity, b.equity)  # rows 0, 2, .. vs 1, 3, .. rebalance
+    ev = run_event(shifted, w, COST, capital=C0, fidelity="L1", n_universe=1, rebalance_bars=2)
+    np.testing.assert_allclose(ev.equity, b.equity, rtol=1e-12)  # both engines use the same anchor

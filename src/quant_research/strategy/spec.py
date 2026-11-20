@@ -57,6 +57,9 @@ class Execution(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     style: Literal["taker", "maker"] = "taker"
     max_participation: float = Field(default=0.01, gt=0, le=0.1)
+    # v2.2 B5 (D5): orders only every k bars, and same-side resizes below this weight are skipped (turnover)
+    rebalance_bars: int = Field(default=1, ge=1, le=720)
+    min_trade_weight: float = Field(default=0.0, ge=0, lt=1)
 
 
 Family = Literal["trend", "mean_reversion", "momentum", "funding_basis", "volatility"]  # v1 families (§7)

@@ -194,6 +194,11 @@ def _evaluate(
     if violations:
         trial.reject("S0: " + "; ".join(violations))
         return RunOutcome(trial.trial_id, "rejected", trial.rejected_reason, {}, None)
+    if TIMEFRAME_NS[spec.timeframe] != panel.config.timeframe_ns:
+        trial.reject(
+            f"timeframe: the spec is {spec.timeframe} but the panel bars are {panel.config.timeframe_ns // 10**9} s"
+        )
+        return RunOutcome(trial.trial_id, "rejected", trial.rejected_reason, {}, None)
     if spec.universe.selector == "pit_top_liquidity":
         frame = select_top_liquidity(frame, spec.universe.n)
     stateless = spec.exit.time_stop_bars is None and spec.exit.stop_loss_atr is None
@@ -216,6 +221,8 @@ def _evaluate(
                 fidelity=config.fidelity,
                 n_universe=spec.universe.n,
                 stateless=stateless,
+                rebalance_bars=spec.execution.rebalance_bars,
+                min_trade_weight=spec.execution.min_trade_weight,
             )
         else:
             res = run_event(
@@ -227,6 +234,8 @@ def _evaluate(
                 n_universe=spec.universe.n,
                 time_stop_bars=spec.exit.time_stop_bars,
                 stop_loss_atr=spec.exit.stop_loss_atr,
+                rebalance_bars=spec.execution.rebalance_bars,
+                min_trade_weight=spec.execution.min_trade_weight,
             )
     except (FidelityUnavailable, EngineUnsupported) as e:
         trial.reject(str(e))

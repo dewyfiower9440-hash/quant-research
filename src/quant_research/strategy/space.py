@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from quant_research.strategy.s0 import check
-from quant_research.strategy.spec import StrategySpec
+from quant_research.strategy.spec import TIMEFRAME_NS, StrategySpec, Timeframe
 from quant_research.strategy.templates import build
 
 Choice = str | int
@@ -101,10 +101,16 @@ class Point:
 
 @dataclass(frozen=True, slots=True)
 class Space:
-    family: str
+    family: str  # the registry name a Point carries: "momentum" (v1) or "momentum@4h" (v2.2 B5)
     params: tuple[NumAxis, ...]
     struct: tuple[ChoiceAxis, ...]
     constraint: Constraint | None = field(default=None, compare=False)
+    template: str = ""  # the template family (strategy/templates.py); empty = `family`
+    timeframe: Timeframe = "1h"
+
+    @property
+    def template_family(self) -> str:
+        return self.template or self.family
 
     def violation(self, params: dict[str, float]) -> str | None:
         return None if self.constraint is None else self.constraint(params)
@@ -163,6 +169,52 @@ SPACES: dict[str, Space] = {
 }
 
 
+# v2.2 B5 (D5, ADR-046 addendum): the same families on 1h / 4h / 1d bars with a rebalance interval and a no-trade
+# band. Signal windows stay in bars (the timeframe scales their horizon); volatility windows and time stops are
+# chosen per timeframe so the warm-up fits a research window. Pre-registered before any 2020-2022 data is read.
+V2_TIMEFRAMES: tuple[Timeframe, ...] = ("1h", "4h", "1d")
+REBALANCE_HOURS = (1, 4, 24, 72, 168)
+BAND_BP = (0, 200, 500)  # no-trade band in basis points of weight
+_VOL_WINDOWS: dict[str, tuple[int, ...]] = {"1h": (48, 96, 168, 336), "4h": (12, 24, 42, 84), "1d": (20, 40, 60, 120)}
+_TIME_STOPS: dict[str, tuple[int, ...]] = {"1h": (0, 24, 72, 168), "4h": (0, 6, 18, 42), "1d": (0, 5, 10, 20)}
+
+
+def _v2_struct(tf: Timeframe, *, side: bool) -> tuple[ChoiceAxis, ...]:
+    hours = TIMEFRAME_NS[tf] // 3_600_000_000_000
+    rebalance = tuple(dict.fromkeys(max(1, h // hours) for h in REBALANCE_HOURS))
+    axes = [
+        _SMOOTH,
+        ChoiceAxis("universe_n", (5, 10, 20)),
+        ChoiceAxis("sizing", (*(f"vol_target:{w}" for w in _VOL_WINDOWS[tf]), "equal")),
+        ChoiceAxis("time_stop", _TIME_STOPS[tf]),
+        ChoiceAxis("rebalance", rebalance),
+        ChoiceAxis("band", BAND_BP),
+    ]
+    return (_SIDE, *axes) if side else tuple(axes)
+
+
+SPACES_V2: dict[str, Space] = {
+    f"{family}@{tf}": Space(
+        f"{family}@{tf}",
+        v1.params,
+        _v2_struct(tf, side=family != "volatility"),
+        v1.constraint,
+        template=family,
+        timeframe=tf,
+    )
+    for tf in V2_TIMEFRAMES
+    for family, v1 in SPACES.items()
+}
+
+
+def space_of(name: str) -> Space:
+    """The registered space a Point's `family` names (v1 family or v2 `family@timeframe`)."""
+    space = SPACES.get(name) or SPACES_V2.get(name)
+    if space is None:
+        raise KeyError(f"unknown space {name!r}")
+    return space
+
+
 def _checked(space: Space, point: Point) -> tuple[dict[str, float], dict[str, Choice]]:
     if point.family != space.family:
         raise ValueError(f"point family {point.family!r} does not match space family {space.family!r}")
@@ -185,16 +237,23 @@ def build_point(space: Space, point: Point) -> StrategySpec:
     if (why := space.violation(params)) is not None:
         raise ValueError(f"{space.family}: constraint violated: {why}")
     n = int(struct.get("universe_n", 10))
-    base = build(space.family, params, n=n)
+    base = build(space.template_family, params, n=n)
     body: dict[str, object] = base.model_dump(mode="json")
+    body["timeframe"] = space.timeframe
+    if "rebalance" in struct or "band" in struct:  # v2.2 B5 axes
+        execution = dict(base.execution.model_dump(mode="json"))
+        execution["rebalance_bars"] = int(struct.get("rebalance", 1))
+        execution["min_trade_weight"] = int(struct.get("band", 0)) / 10_000  # basis points of weight
+        body["execution"] = execution
     if struct.get("side") == "long_only":
         long = base.entry.long
         body["entry"] = {"long": None if long is None else long.model_dump(mode="json"), "short": None}
     if (k := int(struct.get("smooth", 0))) > 0:
         body["signal"] = {"op": "ema", "args": [body["signal"]], "window": k}
     sizing = str(struct.get("sizing", "vol_target:168"))
-    if sizing == "equal":
-        body["sizing"] = {"method": "equal", "target_ann_vol": 0.15, "max_leverage": 1.0, "vol_window": 168}
+    if sizing == "equal":  # the volatility window still sets the impact-cost estimate: sized per timeframe in v2
+        window = 168 if not space.template else _VOL_WINDOWS[space.timeframe][1]
+        body["sizing"] = {"method": "equal", "target_ann_vol": 0.15, "max_leverage": 1.0, "vol_window": window}
     else:
         method, _, window = sizing.partition(":")
         body["sizing"] = {"method": method, "target_ann_vol": 0.15, "max_leverage": 1.0, "vol_window": int(window)}

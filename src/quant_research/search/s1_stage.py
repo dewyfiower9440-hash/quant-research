@@ -16,7 +16,7 @@ from quant_research.search.cost_model import spec_ops
 from quant_research.search.s0_stage import Accepted, point_json
 from quant_research.search.s1 import S1Config, S1Result, evaluate_s1
 from quant_research.strategy.canonical import canonical_tree, expanded_trees
-from quant_research.strategy.space import SPACES, build_point
+from quant_research.strategy.space import build_point, space_of
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +91,7 @@ def run_s1(
     version = data_version(panel.files)
     lags = json.dumps(config.get("lag_versions", {}), sort_keys=True)
     for cand in accepted:
-        spec = build_point(SPACES[cand.point.family], cand.point)
+        spec = build_point(space_of(cand.point.family), cand.point)
         key = ledger.register_experiment(cand.spec_hash, spec.model_dump_json(), s1_config(config, cfg))
         signal = expanded_trees(spec)["signal"]
         feature = json.dumps(None if signal is None else canonical_tree(signal), sort_keys=True)

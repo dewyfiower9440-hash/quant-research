@@ -21,7 +21,7 @@ from quant_research.search.promotion import Selection, rank_corr
 from quant_research.search.s0_stage import point_json
 from quant_research.search.s1 import S1Result
 from quant_research.search.s1_stage import S1Scored
-from quant_research.strategy.space import SPACES, build_point
+from quant_research.strategy.space import build_point, space_of
 from quant_research.strategy.spec import StrategySpec
 
 S3_SCORE = "sr_daily"
@@ -67,7 +67,7 @@ def run_s2(
     out: list[S2Scored] = []
     for s in promoted(selection):
         kind = selection.kind(s.trial_id)
-        spec = build_point(SPACES[s.candidate.point.family], s.candidate.point)
+        spec = build_point(space_of(s.candidate.point.family), s.candidate.point)
         cfg = s2_engine_config(spec, config)
         tags: dict[str, object] = {
             "engine_used": cfg.engine,

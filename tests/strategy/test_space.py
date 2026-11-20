@@ -145,3 +145,87 @@ def test_a_point_outside_the_registered_axes_is_refused() -> None:
     wrong_family = Point.of("momentum", {"lookback": 24, "quantile": 0.8}, {})
     with pytest.raises(ValueError, match="family"):
         build_point(SPACES["trend"], wrong_family)
+
+
+def test_v2_spaces_cover_every_family_on_1h_4h_and_1d_and_leave_the_v1_registry_alone() -> None:
+    """v2.2 B5 (D5): timeframe, rebalance interval and no-trade band axes; v1 `SPACES` (Phase 4 prior) is
+    unchanged, so every existing caller and archived point keeps its meaning."""
+    from quant_research.strategy.space import SPACES_V2, space_of
+
+    assert set(SPACES) == set(FAMILIES)
+    assert set(SPACES_V2) == {f"{f}@{tf}" for f in FAMILIES for tf in ("1h", "4h", "1d")}
+    for name, space in SPACES_V2.items():
+        family, tf = name.split("@")
+        assert space.template_family == family and space.timeframe == tf
+        assert {"rebalance", "band"} <= {a.name for a in space.struct}
+        assert space_of(name) is space
+    assert space_of("trend") is SPACES["trend"]
+    with pytest.raises(KeyError, match="unknown space"):
+        space_of("trend@5m")
+
+
+def test_a_v2_point_builds_a_spec_with_its_timeframe_rebalance_and_band() -> None:
+    from quant_research.strategy.space import SPACES_V2, Point
+
+    space = SPACES_V2["momentum@4h"]
+    rebalance = dict((a.name, a.values()) for a in space.struct)["rebalance"]
+    assert rebalance == (1, 6, 18, 42)  # 1 h, 4 h -> 1 bar (deduplicated), 24 h, 72 h, 168 h on 4 h bars
+    point = Point.of(
+        "momentum@4h",
+        {"lookback": 48.0, "quantile": 0.8},
+        {
+            "side": "long_short",
+            "smooth": 0,
+            "universe_n": 10,
+            "sizing": "vol_target:42",
+            "time_stop": 0,
+            "rebalance": 6,
+            "band": 200,
+        },
+    )
+    spec = build_point(space, point)
+    assert spec.family == "momentum" and spec.timeframe == "4h"
+    assert (spec.execution.rebalance_bars, spec.execution.min_trade_weight) == (6, 0.02)
+    assert check(spec) == []
+
+
+@pytest.mark.parametrize("timeframe", ["1h", "4h", "1d"])
+def test_every_generated_v2_candidate_passes_s0_or_is_rejected_with_reasons(timeframe: str) -> None:
+    from quant_research.strategy.space import SPACES_V2
+
+    for family in FAMILIES:
+        cands = generate(SPACES_V2[f"{family}@{timeframe}"], seed=5, count=40)
+        assert len(cands) == 40
+        for c in cands:
+            assert (c.spec is None) == bool(c.reasons)
+            if c.spec is not None:
+                assert c.spec.timeframe == timeframe and check(c.spec) == []
+
+
+def test_equal_sizing_in_v2_uses_a_timeframe_sized_volatility_window() -> None:
+    """B5 review 6: 'equal' kept vol_window 168 bars on every timeframe (168 days at 1d), so the impact-cost
+    volatility was missing for the whole research window."""
+    from quant_research.strategy.space import SPACES_V2
+
+    for tf, window in (("1h", 96), ("4h", 24), ("1d", 40)):
+        space = SPACES_V2[f"momentum@{tf}"]
+        point = Point.of(
+            f"momentum@{tf}",
+            {"lookback": 48.0, "quantile": 0.8},
+            {
+                "side": "long_short",
+                "smooth": 0,
+                "universe_n": 10,
+                "sizing": "equal",
+                "time_stop": 0,
+                "rebalance": 1,
+                "band": 0,
+            },
+        )
+        assert build_point(space, point).sizing.vol_window == window
+    v1 = Point.of(
+        "momentum",
+        {"lookback": 48.0, "quantile": 0.8},
+        {"side": "long_short", "smooth": 0, "universe_n": 5, "sizing": "equal", "time_stop": 0},
+    )
+    assert build_point(SPACES["momentum"], v1).sizing.vol_window == 168  # v1 unchanged

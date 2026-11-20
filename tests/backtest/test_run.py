@@ -184,3 +184,24 @@ def test_missing_funding_data_is_flagged_not_silently_ignored(panel: Panel, env:
     flags = out.metrics["flags"]
     assert isinstance(flags, list) and any("funding_not_modelled" in str(f) for f in cast(list[object], flags))
     assert out.metrics["funding"] == 0.0
+
+
+def test_a_spec_on_a_panel_of_another_timeframe_is_refused(panel: Panel, env: tuple[Catalog, TrialLedger]) -> None:
+    """v2.2 B5: specs now come in 1h / 4h / 1d; the metrics (holding hours, bars per year) use the spec's
+    timeframe, so a spec on a panel of another timeframe would be silently mis-measured."""
+    catalog, ledger = env
+    out = run_backtest(_spec(timeframe="4h"), panel, catalog, ledger, RunConfig(engine="vector"))
+    assert out.status == "rejected" and out.reason is not None and "timeframe" in out.reason
+
+
+def test_the_rebalance_interval_and_band_reach_both_engines(panel: Panel, env: tuple[Catalog, TrialLedger]) -> None:
+    """v2.2 B5 (D5): a slower rebalance trades less; vector and event agree on it."""
+    catalog, ledger = env
+    fast = run_backtest(_spec(), panel, catalog, ledger, RunConfig(engine="vector"))
+    slow_exec = {"style": "taker", "max_participation": 0.01, "rebalance_bars": 24, "min_trade_weight": 0.02}
+    slow = run_backtest(_spec(execution=slow_exec), panel, catalog, ledger, RunConfig(engine="vector"))
+    slow_ev = run_backtest(_spec(execution=slow_exec), panel, catalog, ledger, RunConfig(engine="event"))
+    assert fast.status == slow.status == slow_ev.status == "done"
+    trades = (fast.metrics["trades"], slow.metrics["trades"])
+    assert isinstance(trades[0], int) and isinstance(trades[1], int) and trades[1] < trades[0]
+    assert slow.metrics["final_equity"] == pytest.approx(slow_ev.metrics["final_equity"], rel=1e-9)

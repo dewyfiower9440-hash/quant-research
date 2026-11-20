@@ -95,7 +95,7 @@ def main() -> int:
     from quant_research.search.s1 import S1Config
     from quant_research.search.s2_stage import fidelity_by_family
     from quant_research.strategy.ops import FUNDING, KLINES, MARK
-    from quant_research.strategy.space import SPACES
+    from quant_research.strategy.space import SPACES, space_of
 
     root = load_settings().data_root
     hour, day = 3_600 * 10**9, 86_400 * 10**9
@@ -174,9 +174,9 @@ def main() -> int:
                     seed = a.seed * 1_000 + len(batches)
                     searcher: Searcher
                     if name == "tpe":
-                        searcher = TpeSearcher(SPACES[family], seed=seed)
+                        searcher = TpeSearcher(space_of(family), seed=seed)
                     else:
-                        searcher = RandomSearcher(SPACES[family], seed)
+                        searcher = RandomSearcher(space_of(family), seed)
                     ok, why = gate()
                     if not ok:
                         batches.append({"family": family, "searcher": name, "refused": why})
@@ -281,8 +281,8 @@ def main() -> int:
             s1_cost = fit_cost(cost_samples(store)).get("S1", LinearCost(0.05, 0.0))
             # A12: below 60 s the planted-landscape comparison recovered nothing (0/3 at 3 s): skipped, not reported
             for family in families if a.compare_budget_s >= 60 else []:
-                land = planted_landscape(SPACES[family], seed=a.seed)
-                rep2 = compare(SPACES[family], land, s1_cost, rows=rows, budget_s=a.compare_budget_s, seeds=[1, 2, 3])
+                land = planted_landscape(space_of(family), seed=a.seed)
+                rep2 = compare(space_of(family), land, s1_cost, rows=rows, budget_s=a.compare_budget_s, seeds=[1, 2, 3])
                 synthetic.append(rep2.summary())
             totals: dict[str, object] = {
                 "run_id": run_id,

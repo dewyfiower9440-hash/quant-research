@@ -587,3 +587,17 @@ def test_liquidity_takes_each_symbols_newest_month_so_a_partly_downloaded_month_
     now = int(datetime(2026, 11, 20, tzinfo=UTC).timestamp()) * S
     liq = LakeFeed(tmp_path).liquidity(["AAAUSDT", "BBBUSDT"], now)
     assert liq == pytest.approx({"AAAUSDT": 1.0 * 1_440, "BBBUSDT": 2.0 * 1_440})  # BBB from its newest month
+
+
+def test_a_spec_with_a_rebalance_schedule_is_not_decided_by_paper(tmp_path: Path) -> None:
+    """B5 review 5: paper orders every tick at the latest target and does not implement `rebalance_bars` /
+    `min_trade_weight`; such a spec would trade far more than its backtest. It is left alone and reported."""
+    settings, ledger, policy, strat, cfg, q, _clock = _paper_setup(tmp_path)
+    body = strat.spec.model_dump(mode="json")
+    body["execution"] = {**body["execution"], "rebalance_bars": 24}
+    scheduled = Strategy(strat.spec_hash, StrategySpec.model_validate(body), strat.state)
+    feed = _FrameFeed(q, visible_until=NOW)
+    out = tick(settings, cfg, ledger, policy, now_ns=NOW, symbols=SYMBOLS, strategies=[scheduled], feed=feed)
+    assert out.get("unsupported_execution") == [strat.spec_hash]
+    assert out["submitted"] == 0 and ledger.open_orders() == []
+    ledger.close()

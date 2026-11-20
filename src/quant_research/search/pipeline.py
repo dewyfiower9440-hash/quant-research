@@ -33,7 +33,8 @@ from quant_research.search.s1 import S1Config
 from quant_research.search.s1_stage import S1Scored, reuse_s1, run_s1
 from quant_research.search.s2_stage import S2Scored, run_s2, s2_engine_config
 from quant_research.strategy.canonical import spec_hash
-from quant_research.strategy.space import SPACES, Point, build_point
+from quant_research.strategy.space import Point, build_point, space_of
+from quant_research.strategy.spec import TIMEFRAME_NS
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,9 @@ class SearchBudget:
     # A6: plus this random share of the other S2 survivors (S1-vs-S3 fidelity pairs). Off by default: it changes
     # the candidate sets of every caller (the null harness included); the batch tool turns it on
     s3_random_rate: float = 0.0
+    # v2.2 B5 (D5): the top-S3 slots go only to S2 survivors with mean gross exposure >= this (ADR-042 needs 5 %
+    # for a verdict, so a nearly-flat strategy would only spend an S3 and later a refused query); 0 = off
+    min_s3_exposure: float = 0.0
     time_budget_s: float | None = None  # predicted S1 time budget; shrinks s1_count when the cost model is known
     memory_limit_mb: float = 2_048.0
 
@@ -55,6 +59,7 @@ class SearchBudget:
             or self.s3_top < 0
             or not 0.0 <= self.promote_rate <= 1.0
             or not 0.0 <= self.s3_random_rate <= 1.0
+            or self.min_s3_exposure < 0.0
         ):
             raise ValueError(f"invalid search budget {self}")
 
@@ -128,6 +133,11 @@ def point_from_json(body: Mapping[str, object]) -> Point:
     return Point.of(str(body["family"]), params, struct)
 
 
+def _exposure(metrics: dict[str, object]) -> float:
+    value = metrics.get("gross_exposure")
+    return float(value) if isinstance(value, int | float) and value == value else 0.0
+
+
 def _sr(metrics: Mapping[str, object]) -> float:
     v = metrics.get("sr_daily")
     return float(v) if isinstance(v, int | float) and math.isfinite(float(v)) else -math.inf
@@ -168,9 +178,15 @@ def run_family_search(
 ) -> SearchResult:
     """Run one family's search batch. Raises MemoryBudgetExceeded before any trial when the predicted peak
     memory exceeds the budget; raises RuntimeError when the resource gate refuses."""
-    if family not in SPACES:
-        raise ValueError(f"unknown family {family!r}")
-    space = SPACES[family]
+    try:
+        space = space_of(family)  # v1 family or v2 "family@timeframe"
+    except KeyError as e:
+        raise ValueError(f"unknown family {family!r}") from e
+    if TIMEFRAME_NS[space.timeframe] != selection.config.timeframe_ns:  # S1 has no timeframe check of its own
+        raise ValueError(
+            f"timeframe: space {family} is {space.timeframe} but the panel bars are "
+            f"{selection.config.timeframe_ns // 10**9} s"
+        )
     reward_panel = selection  # replaced by the validation part when a bandit is given
     if bandit is not None:  # A4: S1/S2 on the fit part; the last `reward_split` of selection is the bandit's
         selection, reward_panel = split_for_reward(selection, reward_split)
@@ -229,11 +245,17 @@ def run_family_search(
             (s for s in s2 if s.outcome.status == "done"), key=lambda s: (-_sr(s.outcome.metrics), s.outcome.trial_id)
         )
         s3cfg = s3_config or RunConfig(engine="event", seed=seed)
-        rest = done[budget.s3_top :]
+        if budget.min_s3_exposure > 0:
+            exposed = [s for s in done if _exposure(s.outcome.metrics) >= budget.min_s3_exposure]
+            done = exposed + [s for s in done if s not in exposed]  # the flat ones may still be fidelity samples
+            top = exposed[: budget.s3_top]
+        else:
+            top = done[: budget.s3_top]
+        rest = [s for s in done if s not in top]
         draws = np.random.default_rng([seed, 3]).random(len(rest))
         sampled = [s for s, u in zip(rest, draws, strict=True) if float(u) < budget.s3_random_rate]
-        chosen = done[: budget.s3_top] + sampled
-        n_top = len(done[: budget.s3_top])
+        chosen = top + sampled
+        n_top = len(top)
         for i, s in enumerate(chosen):
             if i == n_top:  # from here on: the fidelity samples, timed apart from the search's own S3
                 cost["S3"] = time.perf_counter() - t3
@@ -296,7 +318,7 @@ def _run_s2_resumable(
     fresh_rand: list[S1Scored] = []
     reused: list[S2Scored] = []
     for s in [*sel.top, *sel.promoted]:
-        spec = build_point(SPACES[s.candidate.point.family], s.candidate.point)
+        spec = build_point(space_of(s.candidate.point.family), s.candidate.point)
         h, conf = experiment_config(spec, panel, catalog, s2_engine_config(spec, config))
         prior = existing_trial(ledger, experiment_key(h, conf), "S2", fold)
         if prior is None:
@@ -386,7 +408,7 @@ def _reward_run(
     if not done:
         return None
     best = done[0]
-    spec = build_point(SPACES[best.source.candidate.point.family], best.source.candidate.point)
+    spec = build_point(space_of(best.source.candidate.point.family), best.source.candidate.point)
     cfg = s2_engine_config(spec, config)
     vfold = f"{fold}:val" if fold is not None else "val"
     h, conf = experiment_config(spec, panel, catalog, cfg)

@@ -11,6 +11,7 @@ from quant_research.strategy.canonical import spec_hash
 from quant_research.strategy.ops import MAX_WINDOW, OPS
 from quant_research.strategy.s0 import check
 from quant_research.strategy.spec import MAX_SPEC_BYTES, Node, SpecError, StrategySpec, parse_spec
+from quant_research.strategy.templates import templates
 
 
 def base(**changes: object) -> dict[str, object]:
@@ -207,3 +208,17 @@ def test_grammar_property_valid_trees_pass_s0_and_hash_survives_a_json_round_tri
 def test_node_rejects_unknown_fields() -> None:
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         Node.model_validate({"op": "close", "lookahead": 1})
+
+
+def test_the_new_execution_fields_at_their_defaults_leave_old_spec_hashes_unchanged() -> None:
+    """v2.2 B5: rebalance_bars / min_trade_weight were added to Execution; a spec that does not use them must
+    keep the hash it had (trial reuse, de-duplication and archived runs key on it)."""
+    from quant_research.strategy.canonical import canonical_spec
+
+    spec = templates()["trend"]
+    assert canonical_spec(spec)["execution"] == {"style": "taker", "max_participation": 0.01}
+    body = spec.model_dump(mode="json")
+    body["execution"] = {"style": "taker", "max_participation": 0.01, "rebalance_bars": 24, "min_trade_weight": 0.0}
+    slower = StrategySpec.model_validate(body)
+    assert spec_hash(slower) != spec_hash(spec)
+    assert canonical_spec(slower)["execution"] == {"style": "taker", "max_participation": 0.01, "rebalance_bars": 24}

@@ -479,3 +479,67 @@ def test_predicted_costs_count_only_trials_created_in_this_batch(
 
     first, again = run(), run()
     assert first.predicted["S1"] > 0 and again.predicted.get("S1", 0.0) == 0.0  # everything reused the 2nd time
+
+
+def test_an_s2_survivor_below_the_minimum_exposure_is_not_an_s3_candidate(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """v2.2 B5 (D5): a strategy that is nearly always flat cannot pass the verdict's exposure precondition
+    (ADR-042), so S3 (and later a holdout query) is not spent on it; the top-S3 slot goes to the best survivor
+    with mean gross exposure >= `min_s3_exposure`. Off by default (0.0)."""
+    catalog, ledger = env
+    sel, conf = panels
+
+    def run(minimum: float, fold: str) -> SearchResult:
+        return run_family_search(
+            ledger,
+            "momentum",
+            RandomSearcher(SPACES["momentum"], seed=8),
+            selection=sel,
+            confirmation=conf,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=10, top_k=4, promote_rate=0.0, s3_top=1, min_s3_exposure=minimum),
+            seed=3,
+            fold=fold,
+        )
+
+    base = run(0.0, "b5-any")
+    assert base.counts()["s2_done"] >= 1 and len(base.s3) == 1  # precondition: an S3 ran without the minimum
+    assert run(1e9, "b5-none").s3 == []  # nobody reaches an absurd minimum: no S3
+    with pytest.raises(ValueError):
+        SearchBudget(min_s3_exposure=-0.1)
+
+
+def test_a_v2_space_runs_through_the_pipeline_and_a_timeframe_mismatch_is_refused_before_any_trial(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """B5 review 1 and 4: `run_family_search` still checked `family in SPACES` (v1 only), and S1 had no
+    timeframe check, so 4h / 1d points on a 1h panel would have been scored by S1 on the wrong bars."""
+    from quant_research.strategy.space import SPACES_V2
+
+    catalog, ledger = env
+    sel, conf = panels
+
+    def run(name: str) -> SearchResult:
+        return run_family_search(
+            ledger,
+            name,
+            RandomSearcher(SPACES_V2[name], seed=8),
+            selection=sel,
+            confirmation=conf,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=8, top_k=2, promote_rate=0.0, s3_top=1),
+            seed=3,
+            fold="b5-v2",
+        )
+
+    res = run("momentum@1h")
+    assert res.counts()["s1_trials"] >= 1 and res.family == "momentum@1h"
+    before = _count(ledger, "S0")
+    with pytest.raises(ValueError, match="timeframe"):
+        run("momentum@4h")
+    assert _count(ledger, "S0") == before  # refused before any trial

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from typing import cast
 
 from quant_research.strategy.ops import OPS
 from quant_research.strategy.spec import Node, StrategySpec
@@ -55,6 +56,12 @@ def expanded_trees(spec: StrategySpec) -> dict[str, Arg | None]:
 
 def canonical_spec(spec: StrategySpec) -> dict[str, object]:
     body = spec.model_dump(mode="json", exclude={"features", "signal", "entry"})
+    raw = body.get("execution")
+    if isinstance(raw, dict):  # v2.2 B5 fields at their defaults: the hash of every earlier spec stays
+        execution = cast(dict[str, object], raw)
+        for key, default in (("rebalance_bars", 1), ("min_trade_weight", 0.0)):
+            if execution.get(key) == default:
+                del execution[key]
     entry: dict[str, object] = {}
     for name, tree in expanded_trees(spec).items():
         canon = None if tree is None else canonical_tree(tree)

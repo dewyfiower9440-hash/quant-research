@@ -49,7 +49,7 @@ from quant_research.search.bandit import BanditPrior, FamilyBandit
 from quant_research.search.optimizers import TpeSearcher
 from quant_research.search.pipeline import SearchBudget, point_from_json, point_json, run_family_search
 from quant_research.search.s1 import S1Config
-from quant_research.strategy.space import SPACES, build_point
+from quant_research.strategy.space import build_point, space_of
 from quant_research.strategy.spec import StrategySpec
 from quant_research.strategy.templates import FAMILIES, GRID, REQUIRED_DATA, build
 
@@ -647,7 +647,7 @@ class Director:
     def _generate(self, cycle_id: int, seq: int) -> tuple[State, str, dict[str, object]]:
         _hid, family, variants = self._variants(cycle_id)
         if self.cfg.search == "space":
-            space = SPACES[family]
+            space = space_of(family)
             return (
                 S.SEARCH,
                 f"{family}: candidates come from the registered space",
@@ -701,7 +701,7 @@ class Director:
         if not ok:
             raise BudgetExceeded(f"resource / thermal gate: {why}")
         searcher = TpeSearcher(
-            SPACES[family], seed=int(np.random.default_rng([self.cfg.seed, cycle_id]).integers(2**31))
+            space_of(family), seed=int(np.random.default_rng([self.cfg.seed, cycle_id]).integers(2**31))
         )
         result = run_family_search(
             self.ledger,
@@ -767,7 +767,7 @@ class Director:
         search_ev = self._evidence(cycle_id, S.BACKTEST)
         if self.cfg.search == "space":
             point = point_from_json(cast(dict[str, object], search_ev["best_point"]))
-            spec = build_point(SPACES[family], point)
+            spec = build_point(space_of(family), point)
             best = -1
             label: dict[str, object] = {
                 "best_point": point_json(point),

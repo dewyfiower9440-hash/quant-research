@@ -347,6 +347,16 @@ def tick(
     if blind:  # no traded-volume data: such a strategy decides nothing (and keeps its positions), never by name
         summary["no_liquidity"] = blind
         hourly = [st for st in hourly if st.spec_hash not in blind]
+    # B5 review: paper orders at every tick and does not implement a rebalance schedule or a no-trade band, so a
+    # spec that uses them would trade far more than its backtest; it is not decided here (positions kept)
+    scheduled = [
+        st.spec_hash
+        for st in hourly
+        if st.spec.execution.rebalance_bars != 1 or st.spec.execution.min_trade_weight != 0.0
+    ]
+    if scheduled:
+        summary["unsupported_execution"] = scheduled
+        hourly = [st for st in hourly if st.spec_hash not in scheduled]
     other = {st.spec_hash for st in strategies} - {st.spec_hash for st in hourly}
     # each strategy's own position + its open orders' remainder (an order not yet settled is not planned
     # again, review 2 finding 4); approved non-hourly strategies are left alone (not decided, not flattened)

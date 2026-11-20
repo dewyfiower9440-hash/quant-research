@@ -36,7 +36,7 @@ from quant_research.research.ledger import TrialLedger
 from quant_research.search.optimizers import RandomSearcher, Searcher, TpeSearcher
 from quant_research.search.pipeline import SearchBudget, run_family_search
 from quant_research.search.s1 import S1Config
-from quant_research.strategy.space import SPACES, build_point
+from quant_research.strategy.space import build_point, space_of
 from quant_research.strategy.spec import StrategySpec
 from quant_research.validator.store import ValidatorStore
 from quant_research.validator.verdict import DecisionRule, Verdict, decide, sharpe, stationary_bootstrap_indices
@@ -365,11 +365,11 @@ SearcherFactory = Callable[[str, int], Searcher]
 
 
 def random_factory(family: str, seed: int) -> Searcher:
-    return RandomSearcher(SPACES[family], seed)
+    return RandomSearcher(space_of(family), seed)
 
 
 def tpe_factory(family: str, seed: int) -> Searcher:
-    return TpeSearcher(SPACES[family], seed=seed, n_startup_trials=5)
+    return TpeSearcher(space_of(family), seed=seed, n_startup_trials=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,7 +419,7 @@ def replicate(
     from quant_research.search.pipeline import point_from_json
 
     point = point_from_json(point_raw)  # type: ignore[arg-type]
-    spec = build_point(SPACES[family], point)
+    spec = build_point(space_of(family), point)
     verdict = holdout_evaluation(
         spec,
         splits.holdout,
@@ -584,7 +584,7 @@ def replicate_epoch(
     for sr3, family, o in offered:
         if queries >= k:
             break
-        spec = build_point(SPACES[family], point_from_json(o.metrics.get("point")))  # type: ignore[arg-type]
+        spec = build_point(space_of(family), point_from_json(o.metrics.get("point")))  # type: ignore[arg-type]
         verdict = holdout_evaluation(
             spec,
             splits.holdout,
