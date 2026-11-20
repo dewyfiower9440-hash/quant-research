@@ -388,19 +388,19 @@ class Director:
         cooled = sorted(self.memory.cooled_families(seq, self.cfg.run_id, LEAVE_COOLDOWN)) if self.cfg.memory else []
         # every grid point already has a finished selection trial: nothing new to test (Phase 4 widens the space)
         exhausted = (
-            [f for f in GRID if all(self._evaluated(k, "S2") is not None for k in self.grid_keys(f))]
+            [f for f in FAMILIES if all(self._evaluated(k, "S2") is not None for k in self.grid_keys(f))]
             if self.cfg.search == "grid"
             else []  # the registered space (>10^5 points per family) is never exhausted in practice
         )
         released: str | None = None
-        open_families = set(GRID) - set(blocked) - set(exhausted)
+        open_families = set(FAMILIES) - set(blocked) - set(exhausted)  # v1 families only (B6)
         if open_families and open_families <= set(cooled):
             # only cooldowns block: release the family that failed longest ago (a cooldown delays repeats, it is
             # not a verdict); the experiments differ anyway because evaluated grid points are excluded
             released = self._oldest_failure(sorted(open_families))
             cooled = [f for f in cooled if f != released]
         unavailable = set(blocked) | set(cooled) | set(exhausted)
-        if set(GRID) <= unavailable:  # quality guard (§10 PAUSED): idle cycles would only spend LLM calls
+        if set(FAMILIES) <= unavailable:  # quality guard (§10 PAUSED): idle cycles would only spend LLM calls
             return (
                 S.PAUSED,
                 "nothing left to research with the fixed grid and the available data",

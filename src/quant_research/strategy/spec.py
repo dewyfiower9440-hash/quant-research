@@ -62,7 +62,19 @@ class Execution(BaseModel):
     min_trade_weight: float = Field(default=0.0, ge=0, lt=1)
 
 
-Family = Literal["trend", "mean_reversion", "momentum", "funding_basis", "volatility"]  # v1 families (§7)
+Family = Literal[
+    "trend",
+    "mean_reversion",
+    "momentum",
+    "funding_basis",
+    "volatility",  # v1 families (§7)
+    "xs_reversal",
+    "funding_carry",
+    "premium_basis",
+    "low_vol",
+    "liquidity",
+    "breakout",  # v2.2 B6 (D6)
+]
 Timeframe = Literal["5m", "15m", "1h", "4h", "1d"]
 TIMEFRAME_NS: dict[str, int] = {
     "5m": 300 * 10**9,

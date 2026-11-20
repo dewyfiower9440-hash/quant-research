@@ -3,19 +3,12 @@ told back to the searcher once, resume without duplicates, memory refusal before
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from pathlib import Path
-
-import numpy as np
-import polars as pl
 import pytest
 
-from quant_research.backtest.panel import Panel, PanelConfig, assemble, decision_grid, settlements, slice_panel
+from quant_research.backtest.panel import Panel, slice_panel
 from quant_research.backtest.run import RunOutcome
-from quant_research.catalog.bootstrap import bootstrap
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
-from quant_research.research.store import ResearchStore
 from quant_research.search.archive import Archive
 from quant_research.search.bandit import BanditPrior, FamilyBandit
 from quant_research.search.cost_model import LinearMemory, MemoryBudgetExceeded
@@ -30,47 +23,6 @@ D = 24 * H
 T0 = 1_767_225_600 * 10**9
 DAYS = 30
 CONFIG: dict[str, object] = {"data_version": "d1", "lag_versions": {"klines": 1}, "seed": 0}
-
-
-@pytest.fixture(scope="module")
-def panels() -> tuple[Panel, Panel]:
-    rng = np.random.default_rng(8)
-    n = DAYS * 1_440
-    names = [f"S{k}USDT" for k in range(4)]
-    frames: list[pl.DataFrame] = []
-    for k, name in enumerate(names):
-        price = 100.0 * np.exp(np.cumsum(0.0004 * rng.standard_normal(n) + 0.00001 * (k - 1)))
-        frames.append(
-            pl.DataFrame(
-                {
-                    "symbol": [name] * n,
-                    "event_ns": T0 + np.arange(n) * M,
-                    "open": price,
-                    "high": price * 1.0005,
-                    "low": price * 0.9995,
-                    "close": price,
-                    "volume": np.full(n, 10.0),
-                    "quote_volume": np.full(n, 1_000.0 * (k + 1)),
-                    "available_ns": T0 + np.arange(n) * M + 2 * M,
-                }
-            )
-        )
-    cfg = PanelConfig(H)
-    frame = assemble(decision_grid(T0, T0 + (DAYS * 24 - 2) * H, cfg), names, pl.concat(frames), cfg)
-    full = Panel(frame, settlements(None, None), [("lake/rw.parquet", 1)], cfg)
-    return slice_panel(full, T0 + 7 * D, T0 + 20 * D, warmup_ns=7 * D), slice_panel(
-        full, T0 + 20 * D + H, T0 + 29 * D, warmup_ns=7 * D
-    )
-
-
-@pytest.fixture
-def env(tmp_path: Path) -> Generator[tuple[Catalog, TrialLedger]]:
-    catalog = Catalog.open(tmp_path / "c.db")
-    bootstrap(catalog)
-    store = ResearchStore.open(tmp_path / "r.db")
-    yield catalog, TrialLedger(store, env_id="ENV-T", code_sha="abc")
-    store.close()
-    catalog.close()
 
 
 def _count(ledger: TrialLedger, stage: str, fold: str | None = None) -> int:
@@ -543,3 +495,25 @@ def test_a_v2_space_runs_through_the_pipeline_and_a_timeframe_mismatch_is_refuse
     with pytest.raises(ValueError, match="timeframe"):
         run("momentum@4h")
     assert _count(ledger, "S0") == before  # refused before any trial
+
+
+def test_a_family_whose_data_is_not_in_the_panel_is_refused_before_any_trial(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """B6 review 5: premium_basis on a panel without the premium index spent its whole S1 budget on -inf scores."""
+    catalog, ledger = env
+    sel, conf = panels
+    with pytest.raises(ValueError, match="premium"):
+        run_family_search(
+            ledger,
+            "premium_basis",
+            RandomSearcher(SPACES["premium_basis"], seed=1),
+            selection=sel,
+            confirmation=conf,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=4, top_k=1, promote_rate=0.0, s3_top=0),
+            seed=1,
+        )
+    assert _count(ledger, "S0") == 0

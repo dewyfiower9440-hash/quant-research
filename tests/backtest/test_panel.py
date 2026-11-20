@@ -177,3 +177,23 @@ def test_under_seal_epoch_2_a_panel_may_not_read_the_historical_holdout(tmp_path
         assert ok.frame.height > 0  # 2026-01 lies in the second research window
     finally:
         catalog.close()
+
+
+def test_the_funding_feature_is_an_8h_equivalent_rate_while_settlements_keep_the_paid_rate() -> None:
+    """B6 review 2: symbols settle every 4 h or 8 h; ranking raw rates across them mis-orders the carry. The
+    feature column is rate * 8 / interval_hours; the cash flow (settlements) stays the rate actually paid."""
+    cfg = PanelConfig(60 * M)
+    kl = pl.concat([minutes("A", 6 * 60), minutes("B", 6 * 60)])
+    funding = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "event_ns": [T0 + 60 * M, T0 + 60 * M],
+            "funding_interval_hours": [4, 8],
+            "last_funding_rate": [0.0001, 0.0001],
+            "available_ns": [T0 + 61 * M, T0 + 61 * M],
+        }
+    )
+    frame = assemble(decision_grid(T0, T0 + 4 * 60 * M, cfg), ["A", "B"], kl, cfg, funding=funding)
+    last = frame.filter(pl.col("decision_ns") == frame["decision_ns"].max()).sort("symbol")
+    assert last["funding_rate"].to_list() == pytest.approx([0.0002, 0.0001])  # A pays every 4 h: twice per 8 h
+    assert settlements(funding, None)["rate"].to_list() == pytest.approx([0.0001, 0.0001])

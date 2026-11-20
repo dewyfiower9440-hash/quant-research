@@ -149,6 +149,11 @@ _UNIVERSE = ChoiceAxis("universe_n", (3, 5, 8))
 _SIZING = ChoiceAxis("sizing", ("vol_target:48", "vol_target:96", "vol_target:168", "vol_target:336", "equal"))
 _TIME_STOP = ChoiceAxis("time_stop", (0, 24, 72, 168))  # bars; 0 = no time stop
 _COMMON = (_SIDE, _SMOOTH, _UNIVERSE, _SIZING, _TIME_STOP)
+# B6 review: `rank_xs` ranks all members but only the top-n by liquidity are tradable; families whose extreme ranks
+# are the illiquid names (least traded, most volatile) need the whole member universe to trade both ends
+WIDE_UNIVERSE = (50, 100)
+WIDE_FAMILIES = ("liquidity", "low_vol")
+_WIDE_COMMON = (_SIDE, _SMOOTH, ChoiceAxis("universe_n", WIDE_UNIVERSE), _SIZING, _TIME_STOP)
 _QUANTILE = FloatAxis("quantile", 0.6, 0.95, 0.05)
 
 # Pre-registered initial priors (Phase 4 ADR); 1h bars.
@@ -166,6 +171,13 @@ SPACES: dict[str, Space] = {
         (_SMOOTH, _UNIVERSE, _SIZING, _TIME_STOP),
         _lt("short", "long"),
     ),
+    # v2.2 B6 (D6): new families (pre-registered priors, bars of the space's timeframe)
+    "xs_reversal": Space("xs_reversal", (IntAxis("lookback", 1, 48, 1), _QUANTILE), _COMMON),
+    "funding_carry": Space("funding_carry", (IntAxis("window", 8, 336, 8), _QUANTILE), _COMMON),
+    "premium_basis": Space("premium_basis", (IntAxis("window", 4, 168, 4), _QUANTILE), _COMMON),
+    "low_vol": Space("low_vol", (IntAxis("window", 24, 720, 24), _QUANTILE), _WIDE_COMMON),
+    "liquidity": Space("liquidity", (IntAxis("window", 24, 720, 24), _QUANTILE), _WIDE_COMMON),
+    "breakout": Space("breakout", (IntAxis("window", 24, 720, 24), FloatAxis("buffer", 0.0, 0.2, 0.05)), _COMMON),
 }
 
 
@@ -179,12 +191,12 @@ _VOL_WINDOWS: dict[str, tuple[int, ...]] = {"1h": (48, 96, 168, 336), "4h": (12,
 _TIME_STOPS: dict[str, tuple[int, ...]] = {"1h": (0, 24, 72, 168), "4h": (0, 6, 18, 42), "1d": (0, 5, 10, 20)}
 
 
-def _v2_struct(tf: Timeframe, *, side: bool) -> tuple[ChoiceAxis, ...]:
+def _v2_struct(tf: Timeframe, *, side: bool, universe: tuple[int, ...] = (5, 10, 20)) -> tuple[ChoiceAxis, ...]:
     hours = TIMEFRAME_NS[tf] // 3_600_000_000_000
     rebalance = tuple(dict.fromkeys(max(1, h // hours) for h in REBALANCE_HOURS))
     axes = [
         _SMOOTH,
-        ChoiceAxis("universe_n", (5, 10, 20)),
+        ChoiceAxis("universe_n", universe),
         ChoiceAxis("sizing", (*(f"vol_target:{w}" for w in _VOL_WINDOWS[tf]), "equal")),
         ChoiceAxis("time_stop", _TIME_STOPS[tf]),
         ChoiceAxis("rebalance", rebalance),
@@ -197,7 +209,7 @@ SPACES_V2: dict[str, Space] = {
     f"{family}@{tf}": Space(
         f"{family}@{tf}",
         v1.params,
-        _v2_struct(tf, side=family != "volatility"),
+        _v2_struct(tf, side=family != "volatility", universe=WIDE_UNIVERSE if family in WIDE_FAMILIES else (5, 10, 20)),
         v1.constraint,
         template=family,
         timeframe=tf,

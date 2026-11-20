@@ -120,7 +120,10 @@ def assemble(
         else:
             out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias(f"{prefix}close"))
     if funding is not None and funding.height:
-        rates = funding.select("symbol", pl.col("last_funding_rate").alias("funding_rate"), "available_ns")
+        rate = pl.col("last_funding_rate")
+        if "funding_interval_hours" in funding.columns:  # 8h-equivalent: 4 h and 8 h payers rank alike (B6 review)
+            rate = rate * 8.0 / pl.col("funding_interval_hours").cast(pl.Float64)
+        rates = funding.select("symbol", rate.alias("funding_rate"), "available_ns")
         out = _asof(out, rates, "available_ns").drop("available_ns")
     else:
         out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("funding_rate"))

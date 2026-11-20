@@ -61,7 +61,9 @@ def test_malformed_axes_are_rejected(make: Callable[[], object]) -> None:
 
 
 def test_every_v1_family_has_a_registered_space_much_larger_than_the_fixed_grid() -> None:
-    assert set(SPACES) == set(FAMILIES)
+    from quant_research.strategy.templates import ALL_FAMILIES
+
+    assert set(SPACES) == set(ALL_FAMILIES)
     for space in SPACES.values():
         assert space.size() > 1_000
         assert space.size() <= space.nominal_size()
@@ -151,9 +153,10 @@ def test_v2_spaces_cover_every_family_on_1h_4h_and_1d_and_leave_the_v1_registry_
     """v2.2 B5 (D5): timeframe, rebalance interval and no-trade band axes; v1 `SPACES` (Phase 4 prior) is
     unchanged, so every existing caller and archived point keeps its meaning."""
     from quant_research.strategy.space import SPACES_V2, space_of
+    from quant_research.strategy.templates import ALL_FAMILIES
 
-    assert set(SPACES) == set(FAMILIES)
-    assert set(SPACES_V2) == {f"{f}@{tf}" for f in FAMILIES for tf in ("1h", "4h", "1d")}
+    assert set(SPACES) == set(ALL_FAMILIES)
+    assert set(SPACES_V2) == {f"{f}@{tf}" for f in ALL_FAMILIES for tf in ("1h", "4h", "1d")}
     for name, space in SPACES_V2.items():
         family, tf = name.split("@")
         assert space.template_family == family and space.timeframe == tf
@@ -229,3 +232,21 @@ def test_equal_sizing_in_v2_uses_a_timeframe_sized_volatility_window() -> None:
         {"side": "long_short", "smooth": 0, "universe_n": 5, "sizing": "equal", "time_stop": 0},
     )
     assert build_point(SPACES["momentum"], v1).sizing.vol_window == 168  # v1 unchanged
+
+
+def test_rank_families_whose_extremes_are_illiquid_trade_a_wide_universe() -> None:
+    """B6 review 1: `rank_xs` ranks all members but only the top-n by liquidity are tradable, so 'long the least
+    liquid' never traded at n = 5..20. liquidity and low_vol use n in (50, 100)."""
+    from quant_research.strategy.space import SPACES_V2
+
+    for name in ("liquidity", "low_vol"):
+        for space in (SPACES[name], SPACES_V2[f"{name}@1d"]):
+            assert dict((a.name, a.values()) for a in space.struct)["universe_n"] == (50, 100)
+    assert dict((a.name, a.values()) for a in SPACES_V2["momentum@1d"].struct)["universe_n"] == (5, 10, 20)
+
+
+def test_templates_stay_the_v1_defaults_and_all_templates_add_the_new_families() -> None:
+    """B6 review 4: the Phase 2 smoke tool runs `templates()`; it must not start recording six more families."""
+    from quant_research.strategy.templates import ALL_FAMILIES, all_templates, templates
+
+    assert tuple(templates()) == FAMILIES and tuple(all_templates()) == ALL_FAMILIES

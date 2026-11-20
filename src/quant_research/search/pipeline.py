@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 import numpy as np
+import polars as pl
 
 from quant_research.backtest.panel import Panel, slice_panel
 from quant_research.backtest.run import RunConfig, RunOutcome, experiment_config, run_backtest
@@ -35,6 +36,7 @@ from quant_research.search.s2_stage import S2Scored, run_s2, s2_engine_config
 from quant_research.strategy.canonical import spec_hash
 from quant_research.strategy.space import Point, build_point, space_of
 from quant_research.strategy.spec import TIMEFRAME_NS
+from quant_research.strategy.templates import REQUIRED_DATA
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +135,26 @@ def point_from_json(body: Mapping[str, object]) -> Point:
     return Point.of(str(body["family"]), params, struct)
 
 
+# the panel column that carries each optional input a family needs (templates.REQUIRED_DATA names)
+DATA_COLUMNS: dict[str, tuple[str, str]] = {
+    "funding": ("funding_rate", "binance.um.bulk.funding"),
+    "premium": ("premium_close", "binance.um.bulk.premium_klines_1m"),
+}
+
+
+def missing_inputs(template_family: str, panel: Panel) -> tuple[str, ...]:
+    """Datasets the family needs whose column has no value among the panel's member rows."""
+    out: list[str] = []
+    members = panel.frame.filter(pl.col("member"))
+    for need in REQUIRED_DATA.get(template_family, ()):
+        if need not in DATA_COLUMNS:
+            continue
+        column, dataset = DATA_COLUMNS[need]
+        if column not in members.columns or members[column].drop_nulls().is_empty():
+            out.append(dataset)
+    return tuple(out)
+
+
 def _exposure(metrics: dict[str, object]) -> float:
     value = metrics.get("gross_exposure")
     return float(value) if isinstance(value, int | float) and value == value else 0.0
@@ -182,6 +204,8 @@ def run_family_search(
         space = space_of(family)  # v1 family or v2 "family@timeframe"
     except KeyError as e:
         raise ValueError(f"unknown family {family!r}") from e
+    if missing := missing_inputs(space.template_family, selection):  # B6 review: refuse before spending S1
+        raise ValueError(f"data: {family} needs {', '.join(missing)}, which has no rows in the selection panel")
     if TIMEFRAME_NS[space.timeframe] != selection.config.timeframe_ns:  # S1 has no timeframe check of its own
         raise ValueError(
             f"timeframe: space {family} is {space.timeframe} but the panel bars are "

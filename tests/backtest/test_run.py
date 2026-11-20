@@ -16,7 +16,7 @@ from quant_research.research.ledger import TrialLedger
 from quant_research.research.store import ResearchStore
 from quant_research.strategy.s0 import check
 from quant_research.strategy.spec import StrategySpec
-from quant_research.strategy.templates import templates
+from quant_research.strategy.templates import all_templates, templates
 
 M = 60 * 10**9
 H = 60 * M
@@ -94,15 +94,15 @@ def _count(ledger: TrialLedger, table: str) -> int:
 
 
 def test_templates_pass_s0() -> None:
-    assert {name: check(s) for name, s in templates().items()} == {name: [] for name in templates()}
+    assert {name: check(s) for name, s in all_templates().items()} == {name: [] for name in all_templates()}
 
 
-@pytest.mark.parametrize("name", sorted(templates()))
+@pytest.mark.parametrize("name", sorted(all_templates()))
 def test_each_template_runs_through_the_full_pipeline_and_both_engines_agree(
     name: str, panel: Panel, env: tuple[Catalog, TrialLedger]
 ) -> None:
     catalog, ledger = env
-    body = templates()[name].model_dump(mode="json")
+    body = all_templates()[name].model_dump(mode="json")
     body["universe"] = {"selector": "pit_top_liquidity", "n": 2, "rebalance": "1d"}
     spec = StrategySpec.model_validate(body)
     ev = run_backtest(spec, panel, catalog, ledger, RunConfig(engine="event"))
