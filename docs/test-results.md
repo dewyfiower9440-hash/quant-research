@@ -55,3 +55,12 @@
 | 2026-11-19 | 문서(계획 마감·Gotchas) | 3cf7d11 | 선언 게이트 | 705 passed, 92.91% | run 44517570761 success |
 | 2026-11-19 | Phase 5 귀무 측정 | — | tools/run_null_pipeline.py none/random 100회, none/tpe 100회 | 통과 3/100, 5/100 (FWER 0.04, Wilson [0.020, 0.077]) | 측정표 docs/measurements/phase5-null-pipeline.md |
 | 2026-11-19 | Phase 5 검정력 | — | tools/run_null_pipeline.py random·mechanism 알파, arm당 30회 | 회수율 0.067/0.033/0.000/0.033 (검정력 ≈ 0) | 측정표 docs/measurements/phase5-null-pipeline-alpha.md |
+| 2026-11-20 | v2.2 A0 | 01f2f8c | 선언 게이트(설계 delta, ADR-040~048) | — | run 44622826560 success |
+| 2026-11-20 | F-019·A1 | ac730ed…71c7260 | 선언 게이트(리뷰 1~4차 수정, 모의매매 피드 메모리) | — | run 44663936702 success (head 71c7260) |
+| 2026-11-20 | v2.2 A2 | a28235a | 선언 게이트(판정 규칙 v2) | — | run 44669238136 success |
+| 2026-11-20 | v2.2 A3 | 89dca8e | 선언 게이트(귀무·검정력 하네스 v2) | — | run 44674612084 success |
+| 2026-11-20 | v2.2 A3 후속·A4 | 9bd3346, 94e76b3 | 선언 게이트(단순 수익률 중심화, bandit 보상 분리) | — | run 44678021445 success (head 94e76b3) |
+| 2026-11-20 | v2.2 A6~A12 | e2d22aa, 3a785b5 | 선언 게이트 | — | run 44688270247 success (head 3a785b5) |
+| 2026-11-20 | v2.2 B1·B2 | df49c67 | 선언 게이트(S1 최소 표본, 봉인 창) | 793 passed, 94.16% | run 44694783250 success |
+| 2026-11-20 | v2.2 B2 2차 리뷰 | 6ef251e | 선언 게이트(창 끝 event 검사, 충실도 테스트) | 794 passed, 94.18% | run 44696488217 success |
+| 2026-11-20 | v2.2 A3 부호 뒤집기 귀무 | 89dca8e | tools/run_null_v2.py --nulls signflip --reps 200 | 측정 159, 통과 0 (FWER 0, Wilson [0, 0.024]) | 측정표 docs/measurements/phase5-null-v2-signflip.md |
