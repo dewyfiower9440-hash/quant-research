@@ -8,6 +8,10 @@ Kinds, in this order (cheap first):
 - bookDepth    daily, the BOOK_DEPTH_TOP symbols with the most membership months (design: "상위 20")
 - metrics      daily, every universe symbol, its membership months (+ warm-up)
 - spotKlines   monthly 1m, the spot pair of every universe symbol (1000SHIBUSDT -> SHIBUSDT), if listed
+- aggTrades    (only when named) monthly, the AGG_FLOW_TOP symbols, aggregated to 1m taker flow (bulk/flow.py);
+               the raw zip is deleted after aggregation (v2.2 B4 tier T5)
+v2.2 B4 tiers: `--top N` keeps the N symbols with the most membership months for every kind of the run,
+`--since YYYY-MM` skips earlier months (bookDepth tier T4 from 2023).
 Only finished months are taken (the current UTC month is skipped). Daily files are combined per
 symbol-month (bulk/extras.py). Same safety as tools/bulk_download.py: shares `run/bulk.lock` (so it never
 runs beside the klines download; a pilot uses run/bulk-extras-pilot.lock), thermal + resource gate
@@ -22,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import time
 import traceback
@@ -33,14 +38,32 @@ import httpx
 BOOK_DEPTH_TOP = 20
 EXIT_OK, EXIT_ERROR, EXIT_RUNNING, EXIT_PAUSED, EXIT_FAILED_FILES = 0, 1, 2, 3, 4
 ALL_KINDS = ["fundingRate", "bookDepth", "metrics", "spotKlines"]
+AGG_FLOW_TOP = 10
+
+
+def positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
+def year_month(text: str) -> str:
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", text):
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM, got {text!r}")
+    return text
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", type=Path, required=True)
-    ap.add_argument("--kinds", nargs="*", default=ALL_KINDS, choices=ALL_KINDS)
+    ap.add_argument("--kinds", nargs="*", default=ALL_KINDS, choices=[*ALL_KINDS, "aggTrades"])
+    ap.add_argument("--top", type=positive_int, default=None, help="tier: the N symbols with the most member months")
+    ap.add_argument("--since", type=year_month, default=None, help="tier: skip months before YYYY-MM")
     ap.add_argument("--symbols", nargs="*", default=None, help="futures symbols (pilot)")
-    ap.add_argument("--limit-months", type=int, default=None, help="pilot: newest N months per symbol and kind")
+    ap.add_argument(
+        "--limit-months", type=positive_int, default=None, help="pilot: newest N months per symbol and kind"
+    )
     ap.add_argument("--pause", type=float, default=0.05)
     ap.add_argument("--log-file", type=Path, default=None)
     ap.add_argument("--polars-threads", type=int, default=2)
@@ -51,11 +74,13 @@ def main() -> int:
     from quant_research.bulk.download import BulkTarget
     from quant_research.bulk.extras import (
         FIVE_MIN_NS,
+        Parser,
         download_month_group,
         parse_book_depth_csv,
         parse_funding_csv,
         parse_metrics_csv,
     )
+    from quant_research.bulk.flow import AGG_FLOW_DATASET, download_flow_month
     from quant_research.bulk.guard import Limits, Sample, combine, resource_gate
     from quant_research.bulk.klines import MINUTE_NS, parse_kline_csv
     from quant_research.bulk.s3 import listing, wanted_months
@@ -66,7 +91,8 @@ def main() -> int:
     from quant_research.catalog.universe_load import split_multiplier
     from quant_research.config import load_settings
 
-    kinds = {
+    kinds: dict[str, tuple[str, str, bool, Parser | None, int | None]] = {
+        "aggTrades": (AGG_FLOW_DATASET, "data/futures/um/monthly/aggTrades/{s}/", False, None, None),
         "fundingRate": (
             "binance.um.bulk.funding",
             "data/futures/um/monthly/fundingRate/{s}/",
@@ -100,7 +126,13 @@ def main() -> int:
     log = Log(a.log_file)
     settings = load_settings()
     root = settings.data_root
-    full_run = a.symbols is None and a.limit_months is None and sorted(a.kinds) == sorted(ALL_KINDS)
+    full_run = (
+        a.symbols is None
+        and a.limit_months is None
+        and a.top is None
+        and a.since is None
+        and sorted(a.kinds) == sorted(ALL_KINDS)
+    )
     marker = root / "bulk" / f"complete-extras-{a.universe.stem}.json"
     progress_path = root / "run" / "bulk-extras.progress.json"
     if full_run and marker.exists():
@@ -109,7 +141,8 @@ def main() -> int:
         return EXIT_OK
     # A full run shares the klines lock (never two bulk jobs at once). A pilot (--symbols/--limit-months,
     # a few files) uses its own lock so it can check a kind while the klines download runs.
-    lock_name = "bulk.lock" if full_run else "bulk-extras-pilot.lock"
+    pilot = a.symbols is not None or a.limit_months is not None  # a few files: may run beside the klines job
+    lock_name = "bulk-extras-pilot.lock" if pilot else "bulk.lock"  # tier runs (--top/--since/aggTrades) share it
     try:
         lock = InstanceLock(root / "run" / lock_name).__enter__()
     except AlreadyRunningError as e:
@@ -124,7 +157,13 @@ def main() -> int:
     symbols: list[str] = a.symbols or sorted(spans)
     current_month = datetime.now(UTC).strftime("%Y-%m")
     wants = {s: {m for m in wanted_months(spans[s], months, warmup) if m < current_month} for s in symbols}
-    depth_symbols = sorted(symbols, key=lambda s: (-len(wants[s]), s))[:BOOK_DEPTH_TOP]
+    if a.since:
+        wants = {s: {m for m in ms if m >= a.since} for s, ms in wants.items()}
+    by_months = sorted(symbols, key=lambda s: (-len(wants[s]), s))
+    if a.top:
+        symbols = sorted(by_months[: a.top])
+    depth_symbols = by_months[:BOOK_DEPTH_TOP] if not a.top else symbols
+    flow_symbols = by_months[:AGG_FLOW_TOP] if not a.top else symbols
     limits = Limits()
     state_path = root / "run" / "ssd_state.json"
     lake_dirs = [root / "lake" / spec[0] for spec in kinds.values()]
@@ -176,7 +215,7 @@ def main() -> int:
         with httpx.Client(timeout=60, headers={"User-Agent": "quant-research-bulk"}) as client:
             for kind in a.kinds:
                 dataset_id, prefix, daily, parse, grid = kinds[kind]
-                targets = depth_symbols if kind == "bookDepth" else symbols
+                targets = {"bookDepth": depth_symbols, "aggTrades": flow_symbols}.get(kind, symbols)
                 for n, sym in enumerate(targets, 1):
                     source_sym = split_multiplier(sym.removesuffix("USDT"))[0] + "USDT" if kind == "spotKlines" else sym
                     files = listing(client, prefix.format(s=source_sym))
@@ -190,16 +229,26 @@ def main() -> int:
                             )
                     chosen = sorted(by_month)[-a.limit_months :] if a.limit_months else sorted(by_month)
                     for month in chosen:
-                        done = download_month_group(
-                            by_month[month],
-                            data_root=root,
-                            catalog=catalog,
-                            client=client,
-                            parse=parse,
-                            grid_ns=grid,
-                            pause_s=a.pause,
-                            heavy_allowed=gate,
-                        )
+                        if parse is None:  # aggTrades: one monthly file, streamed and aggregated
+                            done = download_flow_month(
+                                by_month[month][0],
+                                data_root=root,
+                                catalog=catalog,
+                                client=client,
+                                work_dir=root / "bulk" / ("tmp-aggtrades-pilot" if pilot else "tmp-aggtrades"),
+                                heavy_allowed=gate,
+                            )
+                        else:
+                            done = download_month_group(
+                                by_month[month],
+                                data_root=root,
+                                catalog=catalog,
+                                client=client,
+                                parse=parse,
+                                grid_ns=grid,
+                                pause_s=a.pause,
+                                heavy_allowed=gate,
+                            )
                         if done.paused_reason:
                             log(f"PAUSED at {kind} {sym} {month}: {done.paused_reason}; rerun resumes")
                             progress("paused", kind, n, len(targets), sym, done.paused_reason)

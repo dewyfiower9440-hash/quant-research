@@ -179,7 +179,8 @@ def test_bootstrap_registers_t0_datasets_priors_and_seal_once(tmp_path: Path) ->
     bulk = c.seal("binance.um.bulk.klines_1m")
     assert (bulk.research_until_ns, bulk.holdout_until_ns) == (BULK_RESEARCH_UNTIL_NS, BULK_HOLDOUT_UNTIL_NS)
     assert c.lag_ns("binance.um.bulk.mark_klines_1m") == 60 * NS
-    assert (first.datasets_added, first.lag_policies_added, first.seal_epochs_added) == (n, n, n)
+    # epoch 1 per dataset plus epoch 2 (ADR-040) per bulk dataset (v2.2 B4)
+    assert (first.datasets_added, first.lag_policies_added, first.seal_epochs_added) == (n, n, n + len(BULK_DATASETS))
     assert (second.datasets_added, second.lag_policies_added, second.seal_epochs_added) == (0, 0, 0)
     assert c.lag_ns("binance.um.oi_hist") == 300 * NS  # unknown interval meaning: one extra interval
     assert c.lag_ns("binance.um.book_ticker_1s") == 0  # live-observed: received_at is used
@@ -201,3 +202,43 @@ def test_failed_commit_rolls_back_and_leaves_the_connection_usable(tmp_path: Pat
     with c.transaction():  # next transaction starts normally
         c.register_dataset(_dataset())
     c.close()
+
+
+def test_migration_9_widens_the_dataset_venues_and_keeps_every_row_and_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v2.2 B4 T7: external sources need venue 'external'; the CHECK lives in the table, so migration 0009 rebuilds
+    `dataset` with foreign keys off (marker line) and checks them before commit. An upgraded catalog keeps its
+    rows, its lag/seal references and its triggers, and foreign keys are on again afterwards."""
+    from quant_research.adapters import sqlite as sqlite_adapter
+    from quant_research.catalog.store import Dataset, LagPolicy, SealEpoch
+
+    real = sqlite_adapter.migrations
+
+    def up_to_8(package: str) -> list[tuple[int, str]]:
+        return [m for m in real(package) if m[0] <= 8]
+
+    monkeypatch.setattr(sqlite_adapter, "migrations", up_to_8)
+    old = _catalog(tmp_path)
+    old.register_dataset(Dataset("binance.x", "binance", "event", None, "old row"))
+    old.add_lag_policy(LagPolicy("binance.x", 5, "t"))
+    old.add_seal_epoch(SealEpoch("binance.x", 1, 10, 20, "t"))
+    assert old.schema_version() == 8
+    old.close()
+    monkeypatch.setattr(sqlite_adapter, "migrations", real)
+    c = _catalog(tmp_path)
+    try:
+        assert c.schema_version() >= 9
+        assert c.conn.execute("pragma foreign_keys").fetchone()[0] == 1
+        assert c.conn.execute("pragma foreign_key_check").fetchall() == []
+        row = c.conn.execute("select venue, description from dataset where dataset_id = 'binance.x'").fetchone()
+        assert tuple(row) == ("binance", "old row") and c.lag_ns("binance.x") == 5
+        c.register_dataset(Dataset("alternative.fng_1d", "external", "event", None, "t"))
+        with pytest.raises(sqlite3.IntegrityError):
+            c.register_dataset(Dataset("nope.x", "somewhere", "event", None, "t"))
+        with pytest.raises(sqlite3.IntegrityError):  # references are still enforced
+            c.add_lag_policy(LagPolicy("not.registered", 1, "t"))
+        triggers = {r[0] for r in c.conn.execute("select name from sqlite_master where type = 'trigger'")}
+        assert {"lag_policy_only_grows", "seal_policy_no_update", "seal_window_no_delete"} <= triggers
+    finally:
+        c.close()

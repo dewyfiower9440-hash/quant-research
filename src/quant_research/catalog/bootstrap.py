@@ -8,9 +8,11 @@ Idempotent: datasets/policies that already exist are left untouched (rows are im
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from quant_research.catalog.store import Catalog, Dataset, LagPolicy, SealEpoch
+from quant_research.catalog.epochs import register_epoch2
+from quant_research.catalog.store import Catalog, CatalogError, Dataset, LagPolicy, SealEpoch
 from quant_research.config import load_settings
 
 DAY_NS = 86_400 * 10**9
@@ -48,6 +50,8 @@ T0_DATASETS: tuple[Dataset, ...] = (
 
 
 ONE_MIN_MS = 60_000
+HOUR_MS = 3_600_000
+DAY_MS = 86_400_000
 # ADR-013: bulk history seal. Research until 2026-07-01 (after the June 2026 knowledge cutoff of the
 # research LLM, design v2.1 §9-6), sealed holdout 2026-07-01 .. 2026-11-01.
 BULK_RESEARCH_UNTIL_NS = 1_782_864_000 * 10**9  # 2026-07-01T00:00:00Z
@@ -79,7 +83,27 @@ BULK_DATASETS: tuple[Dataset, ...] = (
     Dataset(
         "binance.spot.bulk.klines_1m", "binance", "interval_start", ONE_MIN_MS, "data.binance.vision spot monthly 1m"
     ),
+    # v2.2 B4 tier T5: monthly aggTrades aggregated to 1m taker flow (bulk/flow.py); raw trades are not stored
+    Dataset(
+        "binance.um.bulk.agg_flow_1m",
+        "binance",
+        "interval_start",
+        ONE_MIN_MS,
+        "data.binance.vision monthly aggTrades -> 1m taker buy/sell qty and quote, trades, large (>=100k) quote",
+    ),
+    # v2.2 B4 tier T7: key-less external sources (bulk/external.py, docs/measurements/b4-t7-sources.md)
+    Dataset("alternative.fng_1d", "external", "event", None, "Alternative.me Crypto Fear & Greed, daily 00:00 UTC"),
+    Dataset("coinmetrics.asset_1d", "external", "interval_start", DAY_MS, "Coin Metrics Community 1d asset metrics"),
+    Dataset("deribit.dvol_1h", "external", "interval_start", HOUR_MS, "Deribit DVOL volatility index, 1h candles"),
 )
+# Publication times of the external daily values are not documented: conservative lags (v2.1 §5.4 priors).
+# Fear & Greed: the value stamped D 00:00 is taken as known at D+1 01:00; Coin Metrics: day D (interval start)
+# known at D+2 00:00 (interval + one more day); DVOL: an hourly candle known 5 min after it closes.
+BULK_LAG_NS: dict[str, int] = {
+    "alternative.fng_1d": (DAY_MS + HOUR_MS) * 1_000_000,
+    "coinmetrics.asset_1d": DAY_MS * 1_000_000,
+    "deribit.dvol_1h": 5 * ONE_MIN_MS * 1_000_000,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +120,18 @@ def initial_lag_ns(d: Dataset) -> int:
     if d.time_semantics in ("unknown_interval", "interval_start", "interval_end") and d.interval_ms:
         return d.interval_ms * 1_000_000
     return 0
+
+
+def tolerate_race(action: Callable[[], object], *, exists: Callable[[], bool]) -> bool:
+    """Run one registration insert; True if it ran. Two tools may bootstrap a new dataset at once: the later
+    insert fails although the row it wanted exists now, which is accepted (False); any other failure re-raises."""
+    try:
+        action()
+    except (sqlite3.IntegrityError, CatalogError):
+        if exists():
+            return False
+        raise
+    return True
 
 
 def bootstrap(c: Catalog) -> BootstrapResult:
@@ -126,20 +162,34 @@ def bootstrap(c: Catalog) -> BootstrapResult:
             datasets += 1
         except sqlite3.IntegrityError:
             pass
-        if c.conn.execute("select 1 from lag_policy where dataset_id = ?", (d.dataset_id,)).fetchone() is None:
-            c.add_lag_policy(LagPolicy(d.dataset_id, ONE_MIN_MS * 1_000_000, "v2.1 §5.4 prior: one decision bar (1m)"))
-            lags += 1
-        if c.conn.execute("select 1 from seal_policy where dataset_id = ?", (d.dataset_id,)).fetchone() is None:
-            c.add_seal_epoch(
-                SealEpoch(
-                    d.dataset_id,
-                    1,
-                    research_until_ns=BULK_RESEARCH_UNTIL_NS,
-                    holdout_until_ns=BULK_HOLDOUT_UNTIL_NS,
-                    rationale="ADR-013: research < 2026-07-01 (after LLM cutoff 2026-06), holdout to 2026-11-01",
-                )
+
+        def lag_exists(ds: str = d.dataset_id) -> bool:
+            return c.conn.execute("select 1 from lag_policy where dataset_id = ?", (ds,)).fetchone() is not None
+
+        def seal_exists(ds: str = d.dataset_id) -> bool:
+            return c.conn.execute("select 1 from seal_policy where dataset_id = ?", (ds,)).fetchone() is not None
+
+        if not lag_exists():
+            lag = BULK_LAG_NS.get(d.dataset_id, ONE_MIN_MS * 1_000_000)
+            why = (
+                "v2.2 B4 prior: undocumented publication (conservative)"
+                if d.dataset_id in BULK_LAG_NS
+                else ("v2.1 §5.4 prior: one decision bar (1m)")
             )
-            seals += 1
+            policy = LagPolicy(d.dataset_id, lag, why)
+            lags += tolerate_race(lambda p=policy: c.add_lag_policy(p), exists=lag_exists)
+        if not seal_exists():
+            epoch1 = SealEpoch(
+                d.dataset_id,
+                1,
+                research_until_ns=BULK_RESEARCH_UNTIL_NS,
+                holdout_until_ns=BULK_HOLDOUT_UNTIL_NS,
+                rationale="ADR-013: research < 2026-07-01 (after LLM cutoff 2026-06), holdout to 2026-11-01",
+            )
+            seals += tolerate_race(lambda e=epoch1: c.add_seal_epoch(e), exists=seal_exists)
+    # v2.2 B4 (ADR-040): a bulk dataset registered here starts on the ADR-013 epoch 1, under which research could
+    # read the historical holdout; move it to epoch 2 at once (no-op for datasets already there)
+    seals += len(register_epoch2(c, apply=True))
     return BootstrapResult(datasets, lags, seals)
 
 

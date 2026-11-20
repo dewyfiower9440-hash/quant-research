@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from quant_research.catalog.store import Catalog, SealEpoch, SealWindow
+from quant_research.catalog.store import Catalog, CatalogError, SealEpoch, SealWindow
 
 
 def _ns(year: int, month: int) -> int:
@@ -44,12 +44,21 @@ def epoch2_candidates(catalog: Catalog) -> list[str]:
     return out
 
 
-def register_epoch2(catalog: Catalog, *, apply: bool) -> list[str]:
-    """The datasets moved to epoch 2 (or that would be, with `apply=False`)."""
-    todo = epoch2_candidates(catalog)
-    if apply:
-        for ds in todo:
+def register_epoch2(catalog: Catalog, *, apply: bool, candidates: list[str] | None = None) -> list[str]:
+    """The datasets moved to epoch 2 by this call (or that would be, with `apply=False`). A candidate that another
+    process moved in the meantime (two tools running bootstrap at once) is skipped, not an error."""
+    todo = epoch2_candidates(catalog) if candidates is None else candidates
+    if not apply:
+        return todo
+    moved: list[str] = []
+    for ds in todo:
+        try:
             catalog.add_seal_windows(
                 SealEpoch(ds, 2, RESEARCH_UNTIL_NS, HOLDOUT_UNTIL_NS, RATIONALE), list(EPOCH2_WINDOWS)
             )
-    return todo
+        except CatalogError:
+            if catalog.seal(ds).epoch >= 2:
+                continue  # lost the race: the other process registered the same pre-registered windows
+            raise
+        moved.append(ds)
+    return moved

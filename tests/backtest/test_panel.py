@@ -150,7 +150,8 @@ def test_under_seal_epoch_2_a_panel_may_not_read_the_historical_holdout(tmp_path
     catalog = Catalog.open(tmp_path / "c.db")
     bootstrap(catalog)
     try:
-        assert "binance.um.bulk.klines_1m" in register_epoch2(catalog, apply=True)
+        assert catalog.seal("binance.um.bulk.klines_1m").epoch == 2  # bootstrap registers epoch 2 (B4)
+        assert register_epoch2(catalog, apply=True) == []  # nothing left to move
         june_2024 = 1_717_200_000 * 10**9  # 2024-06-01: inside the historical holdout
         frame = minutes("A", 30, start=june_2024)
         write_frame(

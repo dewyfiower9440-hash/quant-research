@@ -118,6 +118,11 @@ def write_frame(frame: pl.DataFrame, target: Path, *, symbol: str | None = None)
     os.replace(tmp, target)
 
 
+# datasets stored as <symbol>-<month>-<version>.parquet (bulk archives and the T7 external sources): readers use
+# the newest version of each (symbol, month), older versions stay on disk as history
+VERSIONED_FILE_PREFIXES = ("binance.um.bulk.", "binance.spot.bulk.", "alternative.", "coinmetrics.", "deribit.")
+
+
 def _latest_bulk_versions(files: list[Path]) -> list[Path]:
     """Bulk files are named <symbol>-<YYYY-MM>-<lastmodified>.parquet; older versions stay on disk as
     history (regenerated upstream files), the reader uses the newest per symbol and month."""
@@ -177,7 +182,7 @@ def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:
     """All compacted rows of a dataset. Bitemporal datasets collapse identical repeats to their first
     receipt and keep changed values under the same key as later versions."""
     files = sorted((data_root / "lake" / dataset_id).glob("*/*.parquet"))
-    if dataset_id.startswith(("binance.um.bulk.", "binance.spot.bulk.")):
+    if dataset_id.startswith(VERSIONED_FILE_PREFIXES):
         files = _latest_bulk_versions(files)
     if not files:
         return pl.DataFrame()
