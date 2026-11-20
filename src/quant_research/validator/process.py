@@ -168,25 +168,26 @@ def process_request(
     placeholder = Submission(
         req.request_id, req.spec_hash, req.rule_hash, req.experiment_key, req.in_sample_sr, (), EPOCH
     )
+
+    def close(why: str) -> Outcome:  # refused before any (new) holdout read, never retried
+        if known is None:
+            store.record_refused(placeholder, why)
+        else:
+            store.refuse(known[0], why)
+        return Outcome(req.request_id, "refused", None)
+
     try:
         spec = _spec(research_ro, req.experiment_key)
     except (ValidatorError, ValueError) as e:  # pydantic's ValidationError is a ValueError
-        store.record_refused(placeholder, f"unreadable request: {e}")
-        return Outcome(req.request_id, "refused", None)
+        return close(f"unreadable request: {e}")
     datasets = sorted(set(spec_datasets(spec)) | set(datasets_read))
-    if known is None:
-        k, used = store.budget(EPOCH)
-        why = None
-        if req.rule_hash != rule.hash():
-            why = f"request rule {req.rule_hash} is not the epoch's rule {rule.hash()}"
-        elif used >= k:
-            why = f"epoch {EPOCH} query budget k={k} is used up"
-        if why is not None:  # refused before any holdout read, never retried
-            store.record_refused(placeholder, why)
-            return Outcome(req.request_id, "refused", None)
-        sid = store.register(replace_datasets(placeholder, datasets))
-    else:
-        sid = known[0]  # left `registered` by a crash: evaluate again (same seed, same holdout)
+    k, used = store.budget(EPOCH)
+    if req.rule_hash != rule.hash():
+        return close(f"request rule {req.rule_hash} is not the epoch's rule {rule.hash()}")
+    if used >= k:  # also for a retried request: it would read and evaluate, then fail in judge() forever
+        return close(f"epoch {EPOCH} query budget k={k} is used up")
+    # a request left `registered` by a crash is evaluated again (same seed, same holdout)
+    sid = store.register(replace_datasets(placeholder, datasets)) if known is None else known[0]
     _log_reads(store, sid, datasets, H_HIST, "holdout_hist")
     verdict = holdout_evaluation(
         spec,

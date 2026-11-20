@@ -30,6 +30,8 @@ def month_floor(ns: int) -> int:
 
 def main() -> int:
     argparse.ArgumentParser(description=__doc__).parse_args()
+    import structlog
+
     from quant_research.backtest.panel import Panel, PanelConfig, slice_panel
     from quant_research.backtest.panel_store import PanelStore, Window, load_universe_panel
     from quant_research.capture.lock import AlreadyRunningError, InstanceLock
@@ -46,6 +48,7 @@ def main() -> int:
     from quant_research.validator.store import ValidatorStore, open_readonly
     from quant_research.validator.verdict import DecisionRule
 
+    log = structlog.get_logger("run_validator")
     root = load_settings().data_root
     try:
         lock = InstanceLock(root / "run" / "validator.lock").__enter__()
@@ -70,8 +73,8 @@ def main() -> int:
             universe = load_universe_panel(
                 pit, root, panels, window, PanelConfig(tf, latency_ns=latency_ns), top_m=None, rule=PIT_RULE
             )
-            if universe.missing:
-                print(json.dumps({"holdout": role, "members_without_klines": len(universe.missing)}))
+            if universe.missing:  # holdout-side information: the validator's log, not stdout (ack bits only)
+                log.warning("validator.members_without_klines", holdout=role, members=len(universe.missing))
             cache[key] = slice_panel(
                 universe.panel, target.first_ns, target.end_ns - tf, warmup_ns=target.first_ns - window.first_ns
             )

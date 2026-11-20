@@ -576,3 +576,8 @@
 - **B8 (validator 프로세스):** 위 ADR-041 보강. `validator/process.py`(제출·대기 요청·판정·거부·최종 비트), 도구 2개. 테스트: S3만 1회 제출, 실제 규칙에서 짧은 holdout은 거부되고 예산을 쓰지 않음, 판정 시 1비트만 ack에 남고 holdout trial은 research.db에 없음, 접근 로그 체인 검증, 다른 규칙 요청 거부, 기원별 최종 비트 표.
 - **A3 완료 (2026-11-20):** 귀무 3종 FWER 기준 충족, 검정력은 드리프트 z=6에서 61%, 메커니즘 0%(4계열 공간에 1봉 되돌림 계열 없음 → `xs_reversal` 포함 재측정이 후속). `docs/measurements/phase5-power-v2-summary.md`.
 - **B11 (모의매매 인프라 점검):** `tools/paper_smoke.py`. 실제 lake의 최근 12시간을 1시간마다 13틱 돌렸다. 더미 전략은 v1 trend, 동일 가중, top-5이고, 정책 키는 일회용, 원장은 `qr-data/paper/smoke-*`의 새 원장이다. 주문 28건을 내고 lake 호가로 체결했다. 대사 불일치 0, 원장 해시 체인 정상, 남은 미체결 1건은 마지막 틱의 주문(체결 구간을 lake가 아직 덮지 않음)이다. `docs/measurements/b11-paper-smoke.md`. 예약 작업 등록(`tools/register_paper_task.ps1`)과 실제 정책 키는 사용자 항목이다.
+- **B8·B11 재리뷰 반영:**
+  - 재시도 요청도 예산·규칙을 먼저 검사한다. 이미 등록된 요청을 닫을 때는 `refuse`, 등록 전이면 `record_refused`를 쓴다.
+  - 캠페인의 일시 예외는 MemoryError·PermissionError뿐이다. FileNotFoundError(데이터 없는 셀)는 셀 오류로 기록해 은퇴시킨다.
+  - `DecisionRule.stress_version = 2`를 두어 규칙 해시가 스트레스 정의를 식별하게 했다.
+  - validator 도구의 holdout 측 정보는 로그로 보낸다.

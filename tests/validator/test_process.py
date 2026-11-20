@@ -218,3 +218,30 @@ def test_a_flat_forward_holdout_is_judged_not_stuck(venv: Env, panels: tuple[Pan
 )
 def test_the_final_bit_follows_the_origin_rule(hist: bool, fwd: float | None, llm: bool, bit: bool) -> None:
     assert final_bit(hist, fwd, llm_origin=llm) is bit
+
+
+def test_a_retried_request_checks_the_budget_before_reading_again(venv: Env, panels: tuple[Panel, Panel]) -> None:
+    """Re-review 2: a request left registered by a crash skipped the budget check on retry; with k used up it read
+    and evaluated the holdout again and failed in judge(), forever."""
+    sel, conf = panels
+    rule = replace(LENIENT, k=1)
+    first = submit_candidate(venv.research, _s3_trial(venv, sel, 24), rule=rule, now_ns=1)
+    second = submit_candidate(venv.research, _s3_trial(venv, sel, 48), rule=rule, now_ns=2)
+
+    def crash_first(spec: StrategySpec, role: HoldoutRole, latency: int) -> Panel:
+        if spec == _spec(24) and latency > 0:
+            raise FileNotFoundError("stressed panel missing")
+        return conf
+
+    out = dict((r, s) for r, s, _p in venv.run(crash_first, rule))
+    assert out == {first: "error", second: "judged"}  # the second used the only query
+    reads = len(venv.vstore.access_log())
+    assert venv.run(_holdout(conf), rule) == [(first, "refused", None)]
+    assert len(venv.vstore.access_log()) == reads  # refused before any new holdout read
+    assert venv.status(first) == "refused" and venv.run(_holdout(conf), rule) == []
+
+
+def test_the_rule_hash_identifies_the_stress_definition() -> None:
+    """Re-review 3: lagx2 changed meaning but the rule hash did not; the hash must name the stress definition."""
+    assert DecisionRule().stress_version == 2
+    assert DecisionRule().hash() != replace(DecisionRule(), stress_version=1).hash()

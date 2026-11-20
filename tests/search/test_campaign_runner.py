@@ -240,3 +240,32 @@ def test_a_transient_failure_stops_the_campaign_without_retiring_the_cell(
     )
     assert out.status == "gate" and "MemoryError" in out.reason
     assert state.history == [] and state.retired == []
+
+
+def test_a_cell_without_data_is_recorded_as_error_not_a_campaign_stop(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    """Re-review 1: FileNotFoundError (no shard with member rows) is an OSError; treating it as transient stopped
+    the campaign on the same cell at every restart. It is a property of the cell: recorded as error, cell retired."""
+    catalog, ledger = env
+    state = CampaignState.new("f", CELLS, max_pulls=1)
+
+    def no_shard(cell: Cell) -> tuple[Panel, Panel]:
+        if cell == CELLS[0]:
+            raise FileNotFoundError("no shard with member rows for the window")
+        return panels
+
+    out = run_campaign(
+        state,
+        _bandit(state),
+        ledger=ledger,
+        catalog=catalog,
+        panels=no_shard,
+        config=CONFIG,
+        gate=lambda: (True, ""),
+        stop=lambda: False,
+        persist=lambda _s, _b: None,
+    )
+    causes = {str(h["cell"]): str(h["cause"]) for h in state.history}
+    assert causes[CELLS[0].key] == "error" and out.status == "exhausted"

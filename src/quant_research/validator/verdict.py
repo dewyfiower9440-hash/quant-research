@@ -42,6 +42,8 @@ class DecisionRule:
     min_mean_exposure: float = 0.05  # mean gross exposure / capital over the holdout run
     min_holdout_days: int = 600  # 250 d exceeded 1.5 x alpha/k (docs/measurements/phase5-verdict-calibration.md)
     require_psr: bool = True  # the skew/kurtosis-aware PSR must reject too
+    # the meaning of the lag stresses (null_pipeline.stress_latencies); 2 = lagx2 at least two bars (B8 review)
+    stress_version: int = 2
 
     def __post_init__(self) -> None:
         if (

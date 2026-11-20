@@ -236,7 +236,7 @@ def run_campaign(
             cause, summary, reward = run_batch(
                 state, cell, ledger=ledger, catalog=catalog, panels=panels, config=config
             )
-        except (MemoryError, OSError) as e:  # not a property of the cell: stop, nothing recorded, resumable
+        except (MemoryError, PermissionError) as e:  # not a property of the cell: stop, nothing recorded, resumable
             log.warning("campaign.batch_transient", cell=cell.key, error=f"{type(e).__name__}: {e}")
             return CampaignOutcome("gate", ran, f"transient {type(e).__name__}: {e}")
         except Exception as e:  # job-runner boundary: record, retire the cell, continue (never swallowed silently)
