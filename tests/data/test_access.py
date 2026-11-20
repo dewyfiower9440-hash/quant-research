@@ -322,3 +322,17 @@ def test_a_row_whose_event_lies_in_the_holdout_stays_hidden_even_once_available_
     )
     seen = PointInTime(windowed, role="research").rows_visible(frame, "trades")
     assert seen["value"].to_list() == [2.0]  # event 2.9 K in the holdout: hidden; event 0.9 K, available 1.1 K: hidden
+
+
+def test_a_holdout_event_received_early_by_a_lagging_clock_stays_hidden(windowed: Catalog) -> None:
+    """Second B2 review: a receive clock behind the exchange gives received < event, so a holdout event could be
+    'available' just before a research window ends; the event must also lie before the window's end."""
+    frame = pl.DataFrame(
+        {
+            "event_ns": [1 * K + 5, 10 * K + 5, K // 2],
+            "received_ns": [1 * K - 5, 10 * K - 5, K // 2 + 5],
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+    seen = PointInTime(windowed, role="research").rows_visible(frame, "trades")
+    assert seen["value"].to_list() == [3.0]

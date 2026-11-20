@@ -112,8 +112,9 @@ class PointInTime:
             inside = pl.lit(False)
             for lo, hi in self.catalog.research_windows(dataset_id):
                 in_window = (pl.col("available_ns") >= lo) & (pl.col("available_ns") < hi)
-                if "event_ns" in out.columns:
-                    in_window = in_window & (pl.col("event_ns").cast(pl.Int64).fill_null(lo) >= lo)
+                if "event_ns" in out.columns:  # a lagging receive clock can put available before the event
+                    event = pl.col("event_ns").cast(pl.Int64).fill_null(lo)
+                    in_window = in_window & (event >= lo) & (event < hi)
                 inside = inside | in_window
             out = out.filter(inside)
         return out

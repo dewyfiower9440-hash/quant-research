@@ -185,10 +185,26 @@ def test_stateful_specs_are_evaluated_by_the_event_engine_at_s2(env: tuple[Catal
     assert all("path dependent" not in (o.outcome.reason or "") for o in out)
 
 
-def test_fidelity_recomputes_the_s1_score_with_the_current_rule() -> None:
+def test_fidelity_recomputes_the_s1_score_with_the_current_rule(env: tuple[Catalog, TrialLedger]) -> None:
     """B1/B2 review finding 3: stored S1 'score' metrics of trials before B1 use the raw HAC t (3 events gave t =
-    35); the fidelity table recomputes the score from the stored fields so both rules are not mixed."""
-    from quant_research.search.s1 import S1Result
-
-    stored = {"horizon_bars": 24, "ic_samples": 500, "event_hac_t": 35.08, "event_samples": 3, "score": 35.08}
-    assert S1Result.from_metrics(stored).score() == float("-inf")  # what fidelity_by_family must use
+    35); the fidelity table recomputes the score from the stored fields, so a pre-B1 tiny-sample S1 trial (score
+    -inf under the current rule) is left out instead of entering the rank correlation with t = 35."""
+    _catalog, ledger = env
+    conn = ledger.store.conn
+    conn.execute("insert into experiment values ('x', 'h', '{}', '{}', 0)")
+    point = {"family": "momentum"}
+    s1_rows = [
+        ("tiny", {"horizon_bars": 24, "ic_samples": 500, "event_hac_t": 35.08, "event_samples": 3, "score": 35.08}),
+        ("a", {"horizon_bars": 24, "ic_samples": 500, "event_hac_t": 2.0, "event_samples": 100, "score": 1.5}),
+        ("b", {"horizon_bars": 24, "ic_samples": 500, "event_hac_t": 1.0, "event_samples": 100, "score": 0.8}),
+        ("c", {"horizon_bars": 24, "ic_samples": 500, "event_hac_t": -1.0, "event_samples": 100, "score": -0.8}),
+    ]
+    for spec, m in s1_rows:
+        for stage, metrics in (("S1", {**m, "point": point}), ("S3", {"sr_daily": 0.1})):
+            conn.execute(
+                "insert into trial(experiment_key, spec_hash, stage, status, metrics_json, env_id, code_sha, "
+                "started_ns, finished_ns) values ('x', ?, ?, 'done', ?, 'e', 'c', 0, 1)",
+                (spec, stage, json.dumps(metrics)),
+            )
+    (fam,) = fidelity_by_family(ledger)
+    assert fam.family == "momentum" and fam.pairs == 3  # the 3-event trial is not paired
