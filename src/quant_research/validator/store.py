@@ -92,13 +92,31 @@ class ValidatorStore:
             raise
 
     # ------------------------------------------------------------------ budget
-    def ensure_budget(self, epoch: int, k: int) -> None:
-        """Register the epoch's k once; a later call with a different k is refused (pre-registration)."""
-        row = self.conn.execute("select k from query_budget where epoch = ?", (epoch,)).fetchone()
+    def ensure_budget(self, epoch: int, k: int, *, rule_hash: str) -> None:
+        """Register the epoch's k and decision rule once; a later call with a different k or rule is refused
+        (pre-registration). Every submission and verdict of the epoch must carry this rule hash."""
+        row = self.conn.execute("select k, rule_hash from query_budget where epoch = ?", (epoch,)).fetchone()
         if row is None:
-            self.conn.execute("insert into query_budget(epoch, k, used) values (?, ?, 0)", (epoch, k))
+            self.conn.execute(
+                "insert into query_budget(epoch, k, used, rule_hash) values (?, ?, 0, ?)", (epoch, k, rule_hash)
+            )
         elif int(row[0]) != k:
             raise ValidatorError(f"epoch {epoch} budget is pre-registered as k={int(row[0])}, not {k}")
+        elif row[1] is None:  # a row from before migration 0003: bind it once, only if nothing was spent
+            used = int(self.conn.execute("select used from query_budget where epoch = ?", (epoch,)).fetchone()[0])
+            if used:
+                raise ValidatorError(f"epoch {epoch}: {used} queries already spent under an unrecorded rule")
+            self.conn.execute("update query_budget set rule_hash = ? where epoch = ?", (rule_hash, epoch))
+        elif row[1] != rule_hash:
+            raise ValidatorError(f"epoch {epoch} budget is pre-registered under rule {row[1]}, not {rule_hash}")
+
+    def budget_rule(self, epoch: int) -> str:
+        row = self.conn.execute("select rule_hash from query_budget where epoch = ?", (epoch,)).fetchone()
+        if row is None:
+            raise ValidatorError(f"no query budget registered for epoch {epoch}")
+        if row[0] is None:
+            raise ValidatorError(f"epoch {epoch} budget has no registered decision rule (call ensure_budget)")
+        return str(row[0])
 
     def budget(self, epoch: int) -> tuple[int, int]:
         row = self.conn.execute("select k, used from query_budget where epoch = ?", (epoch,)).fetchone()
@@ -118,6 +136,10 @@ class ValidatorStore:
         """Pre-register a submission (spec + rule) before any holdout read. Duplicate request ids are refused."""
         if self.conn.execute("select 1 from submission where request_id = ?", (s.request_id,)).fetchone():
             raise ValidatorError(f"request {s.request_id} is already registered")
+        if s.rule_hash != self.budget_rule(s.epoch):
+            raise ValidatorError(
+                f"request {s.request_id}: rule {s.rule_hash} is not the rule epoch {s.epoch} was registered with"
+            )
         cur = self.conn.execute(
             "insert into submission(request_id, spec_hash, rule_hash, experiment_key, in_sample_sr, dataset_ids_json, "
             "epoch, registered_ns) values (?,?,?,?,?,?,?,?)",
@@ -210,6 +232,15 @@ class ValidatorStore:
         sub, status = self.submission(submission_id)
         if status != "registered":
             raise ValidatorError(f"submission {submission_id} is {status}, not registered")
+        if sub.rule_hash != self.budget_rule(sub.epoch):  # e.g. registered before the epoch's rule was bound
+            raise ValidatorError(
+                f"submission {submission_id}: rule {sub.rule_hash} is not the rule of epoch {sub.epoch}"
+            )
+        if detail.get("rule_hash") != sub.rule_hash:
+            raise ValidatorError(
+                f"submission {submission_id}: the verdict was computed under rule {detail.get('rule_hash')}, "
+                f"not the pre-registered {sub.rule_hash}"
+            )
         with self.transaction():
             index = self._consume(sub.epoch)
             cur = self.conn.execute(

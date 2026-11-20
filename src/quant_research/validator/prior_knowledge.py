@@ -20,12 +20,15 @@ from quant_research.research.ledger import TrialLedger
 
 
 def parse_cutoff(text: str | None) -> date | None:
-    """ISO date ('2025-03-01') or month ('2025-03'); None when unknown."""
+    """ISO date ('2025-03-01') or month ('2025-03' = the LAST day of that month: a month-level cutoff may cover
+    any day of it); None when unknown."""
     if not text:
         return None
     try:
         if len(text) == 7:
-            return datetime.strptime(text, "%Y-%m").replace(tzinfo=UTC).date()
+            first = datetime.strptime(text, "%Y-%m").replace(tzinfo=UTC).date()
+            next_month = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+            return date.fromordinal(next_month.toordinal() - 1)
         return date.fromisoformat(text)
     except ValueError:
         return None

@@ -16,18 +16,22 @@ from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
 from quant_research.research.store import ResearchStore
 from quant_research.search.pipeline import SearchBudget
+from quant_research.strategy.templates import templates
 from quant_research.validator.null_pipeline import (
     HarnessResult,
     Replication,
     SyntheticSpec,
     families_round_robin,
+    holdout_evaluation,
     hourly_closes,
+    incomplete_verdict,
     random_factory,
     register_and_judge,
     replicate,
     split_three,
     synthetic_panel,
     synthetic_returns,
+    synthetic_splits,
 )
 from quant_research.validator.store import ValidatorStore
 from quant_research.validator.verdict import DecisionRule, Verdict
@@ -112,8 +116,7 @@ def test_one_replication_runs_search_and_holdout_verdict_with_stress_reruns(
     env: tuple[Catalog, TrialLedger], base: Panel
 ) -> None:
     catalog, ledger = env
-    syn = synthetic_panel(base, SyntheticSpec(), seed=4)
-    sp = split_three(syn, warmup_days=5, sel_days=14, conf_days=8)
+    sp = synthetic_splits(base, SyntheticSpec(), seed=4, warmup_days=5, sel_days=14, conf_days=8)
     rule = DecisionRule(bootstrap_reps=200)
     rep = replicate(
         sp,
@@ -143,11 +146,72 @@ def test_harness_verdicts_are_booked_in_a_validator_db(tmp_path: Path) -> None:
     store = ValidatorStore.open(tmp_path / "v.db")
     try:
         rule = DecisionRule()
-        v = Verdict(False, ("H0 not rejected",), {"p": 0.3})
+        v = Verdict(False, ("H0 not rejected",), {"p": 0.3, "rule_hash": rule.hash()})
         assert register_and_judge(store, 1, "h1", rule, v, epoch=1, k=100, in_sample_sr=0.1) is False
         assert store.ack(1) is False and store.budget(1) == (100, 1)
         empty = HarnessResult("x", ())
         assert empty.summary()["replications"] == 0
         assert Replication(1, "trend", "tpe", 0, None, False, ("no S3 candidate",)).passed is False
+    finally:
+        store.close()
+
+
+def test_lag_stress_reruns_use_a_holdout_assembled_at_the_stressed_latency(
+    env: tuple[Catalog, TrialLedger], base: Panel
+) -> None:
+    """Review finding 2: the lag stress changed only `config.latency_ns` and reused the frame assembled at the
+    base latency, so 'lag+1' and 'lagx2' always equalled the base SR. The holdout is rebuilt per latency."""
+    catalog, ledger = env
+    sp = synthetic_splits(base, SyntheticSpec(), seed=4, warmup_days=5, sel_days=14, conf_days=8)
+    assert sp.holdout_at_latency is not None
+    late = sp.holdout_at_latency(H)
+    assert late.frame["close"].equals(sp.holdout.frame["close"])  # the same synthetic market ...
+    assert not late.frame["exec_open"].equals(sp.holdout.frame["exec_open"])  # ... filled one bar later
+    body = templates()["mean_reversion"].model_dump(mode="json")
+    body["universe"] = {"selector": "pit_top_liquidity", "n": 3, "rebalance": "1d"}
+    from quant_research.strategy.spec import StrategySpec
+
+    v = holdout_evaluation(
+        StrategySpec.model_validate(body),
+        sp.holdout,
+        catalog,
+        ledger,
+        DecisionRule(bootstrap_reps=200),
+        in_sample_sr=0.0,
+        seed=1,
+        panel_at_latency=sp.holdout_at_latency,
+    )
+    stressed = v.detail["stressed_sr"]
+    assert isinstance(stressed, dict)
+    base_sr = float(str(v.detail["sr_holdout"]))
+    lag1, lag2 = float(str(stressed["lag+1"])), float(str(stressed["lagx2"]))  # pyright: ignore[reportUnknownArgumentType]
+    assert lag1 != base_sr and lag2 != base_sr
+
+
+def test_holdout_evaluation_refuses_a_lag_stress_without_a_rebuilt_panel(
+    env: tuple[Catalog, TrialLedger], base: Panel
+) -> None:
+    catalog, ledger = env
+    sp = split_three(synthetic_panel(base, SyntheticSpec(), seed=4), warmup_days=5, sel_days=14, conf_days=8)
+    with pytest.raises(ValueError, match="rebuilt at the stressed latency"):
+        holdout_evaluation(
+            templates()["trend"],
+            sp.holdout,
+            catalog,
+            ledger,
+            DecisionRule(bootstrap_reps=200),
+            in_sample_sr=0.0,
+            seed=1,
+        )
+
+
+def test_an_incomplete_holdout_verdict_carries_the_rule_hash_and_can_be_booked(tmp_path: Path) -> None:
+    """Review 2 finding 7: the 'holdout run did not complete' verdict had no rule hash, so judge() refused it."""
+    store = ValidatorStore.open(tmp_path / "v.db")
+    try:
+        rule = DecisionRule(bootstrap_reps=200)
+        v = incomplete_verdict(rule, status="failed", reason="no data")
+        assert v.passed is False and v.detail["rule_hash"] == rule.hash()
+        assert register_and_judge(store, 1, "h", rule, v, epoch=1, k=20, in_sample_sr=0.1) is False
     finally:
         store.close()

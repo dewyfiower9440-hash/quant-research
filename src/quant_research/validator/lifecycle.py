@@ -153,15 +153,17 @@ class LifecycleLedger:
         return None if row is None else cast(StrategyState, str(row[0]))
 
     def move(self, t: Transition) -> int:
-        current = self.state(t.spec_hash)
-        if current != t.from_state:
-            raise IllegalLifecycleTransition(f"{t.spec_hash}: current state is {current}, not {t.from_state}")
         check_transition(t.from_state, t.to_state, t.signer)
         if not t.evidence_ref:
             raise IllegalLifecycleTransition("a transition needs an evidence reference")
         now = self.now_ns()
-        self.conn.execute("begin immediate")
+        self.conn.execute(
+            "begin immediate"
+        )  # the state check runs under the write lock (two writers: validator, paper)
         try:
+            current = self.state(t.spec_hash)
+            if current != t.from_state:
+                raise IllegalLifecycleTransition(f"{t.spec_hash}: current state is {current}, not {t.from_state}")
             cur = self.conn.execute(
                 "insert into strategy_transition(spec_hash, from_state, to_state, reason, evidence_ref, signer, at_ns) "
                 "values (?,?,?,?,?,?,?)",

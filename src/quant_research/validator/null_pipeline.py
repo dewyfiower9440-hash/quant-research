@@ -85,8 +85,11 @@ def synthetic_returns(closes: F64, spec: SyntheticSpec, rng: np.random.Generator
     return out
 
 
-def synthetic_panel(base: Panel, spec: SyntheticSpec, *, seed: int, start_price: float = 100.0) -> Panel:
-    """A panel on the SAME decision grid as `base`, rebuilt from synthetic hourly bars (one bar = one hour)."""
+def synthetic_panel(
+    base: Panel, spec: SyntheticSpec, *, seed: int, start_price: float = 100.0, latency_ns: int | None = None
+) -> Panel:
+    """A panel on the SAME decision grid as `base`, rebuilt from synthetic hourly bars (one bar = one hour).
+    The same seed gives the same synthetic market at any `latency_ns` (the lag stress re-assembles it)."""
     symbols, grid, closes = hourly_closes(base)
     rng = np.random.default_rng(seed)
     rets = synthetic_returns(closes, spec, rng)
@@ -112,14 +115,17 @@ def synthetic_panel(base: Panel, spec: SyntheticSpec, *, seed: int, start_price:
             )
         )
     minutes = pl.concat(frames)
-    cfg = PanelConfig(tf, decision_delay_ns=0, latency_ns=base.config.latency_ns)
+    lat = base.config.latency_ns if latency_ns is None else latency_ns
+    cfg = PanelConfig(tf, decision_delay_ns=0, latency_ns=lat)
     decisions = decision_grid(int(grid[0]), int(grid[-1]), cfg)
     frame = assemble(decisions, symbols, minutes, cfg).with_columns(
         # one synthetic bar per hour by construction: every execution interval is complete
         pl.lit(True).alias("complete"),
         pl.lit(tf // MINUTE_NS).alias("exec_minutes"),
     )
-    return Panel(frame, settlements(None, None), [("synthetic", seed)], cfg, evaluate_from_ns=base.evaluate_from_ns)
+    # the synthetic spec is part of the data identity (a reused S1 result must come from the same market)
+    files = [(f"synthetic:{spec.alpha}:{spec.strength}:{spec.block_len}:{spec.shuffle}", seed)]
+    return Panel(frame, settlements(None, None), files, cfg, evaluate_from_ns=base.evaluate_from_ns)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +133,8 @@ class Splits:
     selection: Panel
     confirmation: Panel
     holdout: Panel
+    # the holdout re-assembled at another decision -> order latency (lag stress); None: not rebuildable
+    holdout_at_latency: Callable[[int], Panel] | None = None
 
 
 def split_three(panel: Panel, *, warmup_days: int, sel_days: int, conf_days: int) -> Splits:
@@ -151,6 +159,20 @@ def _pnl(ledger: TrialLedger, out: RunOutcome) -> F64:
     return unblob(bytes(row[0])) if row is not None else np.zeros(0)
 
 
+def synthetic_splits(
+    base: Panel, spec: SyntheticSpec, *, seed: int, warmup_days: int, sel_days: int, conf_days: int
+) -> Splits:
+    """`split_three` of a synthetic panel, with the holdout rebuildable at any latency (same seed -> same market)."""
+    days = {"warmup_days": warmup_days, "sel_days": sel_days, "conf_days": conf_days}
+    sp = split_three(synthetic_panel(base, spec, seed=seed), **days)
+
+    def holdout_at(latency_ns: int) -> Panel:
+        syn = synthetic_panel(base, spec, seed=seed, latency_ns=latency_ns)
+        return split_three(syn, **days).holdout
+
+    return Splits(sp.selection, sp.confirmation, sp.holdout, holdout_at)
+
+
 def holdout_evaluation(
     spec: StrategySpec,
     holdout: Panel,
@@ -160,8 +182,13 @@ def holdout_evaluation(
     *,
     in_sample_sr: float,
     seed: int,
+    panel_at_latency: Callable[[int], Panel] | None = None,
 ) -> Verdict:
-    """The validator's judgement of one candidate on the synthetic holdout: base run + stress re-runs."""
+    """The validator's judgement of one candidate on the synthetic holdout: base run + stress re-runs.
+    The lag stresses need the holdout ASSEMBLED at the stressed latency (the execution prices are computed at
+    assembly time; changing only the config would re-run the base fills, review finding 2)."""
+    if rule.lag_stresses and panel_at_latency is None:
+        raise ValueError("the lag stress needs the holdout rebuilt at the stressed latency (panel_at_latency)")
     base_cfg = RunConfig(engine="event", seed=seed)
     base = run_backtest(spec, holdout, catalog, ledger, base_cfg, stage="reference", fold="holdout")
     pnl = _pnl(ledger, base) if base.status == "done" else np.zeros(0)
@@ -175,18 +202,21 @@ def holdout_evaluation(
         ("lag+1", lag + holdout.config.timeframe_ns),
         ("lagx2", max(2 * lag, holdout.config.timeframe_ns)),
     ):
-        panel_l = Panel(
-            holdout.frame,
-            holdout.funding,
-            holdout.files,
-            replace(holdout.config, latency_ns=lat),
-            holdout.evaluate_from_ns,
-        )
+        if panel_at_latency is None:  # refused before the base run already; kept for the type checker
+            raise ValueError("the lag stress needs the holdout rebuilt at the stressed latency (panel_at_latency)")
+        panel_l = panel_at_latency(lat)
         out = run_backtest(spec, panel_l, catalog, ledger, base_cfg, stage="reference", fold=f"holdout-{name}")
         stressed[name] = sharpe(_pnl(ledger, out)) if out.status == "done" else None
     if pnl.shape[0] < 3:
-        return Verdict(False, ("holdout run did not complete",), {"status": base.status, "reason": base.reason})
+        return incomplete_verdict(rule, status=base.status, reason=base.reason)
     return decide(pnl, in_sample_sr, rule, stressed_sr=stressed)
+
+
+def incomplete_verdict(rule: DecisionRule, *, status: str, reason: str | None) -> Verdict:
+    """A failed verdict for a holdout run that did not complete; it carries the rule hash so it can be booked."""
+    return Verdict(
+        False, ("holdout run did not complete",), {"status": status, "reason": reason, "rule_hash": rule.hash()}
+    )
 
 
 SearcherFactory = Callable[[str, int], Searcher]
@@ -247,7 +277,16 @@ def replicate(
 
     point = point_from_json(point_raw)  # type: ignore[arg-type]
     spec = build_point(SPACES[family], point)
-    verdict = holdout_evaluation(spec, splits.holdout, catalog, ledger, rule, in_sample_sr=sr3, seed=seed)
+    verdict = holdout_evaluation(
+        spec,
+        splits.holdout,
+        catalog,
+        ledger,
+        rule,
+        in_sample_sr=sr3,
+        seed=seed,
+        panel_at_latency=splits.holdout_at_latency,
+    )
     return Replication(seed, family, searcher.name, res.counts()["s2_done"], sr3, verdict.passed, verdict.reasons)
 
 
@@ -302,7 +341,7 @@ def register_and_judge(
     """Book-keeping of one harness verdict in a (temporary) validator.db: budget, verdict, ack."""
     from quant_research.validator.store import Submission
 
-    store.ensure_budget(epoch, k)
+    store.ensure_budget(epoch, k, rule_hash=rule.hash())
     sid = store.register(
         Submission(request_id, spec_hash, rule.hash(), f"null:{request_id}", in_sample_sr, ("synthetic",), epoch)
     )

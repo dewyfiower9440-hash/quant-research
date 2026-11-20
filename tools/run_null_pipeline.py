@@ -64,8 +64,7 @@ def main() -> int:
         families_round_robin,
         random_factory,
         replicate,
-        split_three,
-        synthetic_panel,
+        synthetic_splits,
         tpe_factory,
     )
     from quant_research.validator.store import ValidatorStore
@@ -117,8 +116,7 @@ def main() -> int:
                 fams = families_round_robin(families, a.reps)
                 for i in range(a.reps):
                     seed = a.seed * 10_000 + i
-                    syn = synthetic_panel(base, spec, seed=seed)
-                    splits = split_three(syn, warmup_days=30, sel_days=90, conf_days=30)
+                    splits = synthetic_splits(base, spec, seed=seed, warmup_days=30, sel_days=90, conf_days=30)
                     rep_dir = work / f"{alpha}-{arm}-{i}"
                     rep_dir.mkdir(parents=True, exist_ok=True)
                     cat = Catalog.open(rep_dir / "c.db")
@@ -138,7 +136,7 @@ def main() -> int:
                             seed=seed,
                         )
                         reps.append(r)
-                        vstore.ensure_budget(1, rule.k)
+                        vstore.ensure_budget(1, rule.k, rule_hash=rule.hash())
                         peak = max(peak, memory_sample()["private"])
                         print(
                             json.dumps(

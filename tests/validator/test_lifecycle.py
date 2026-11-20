@@ -96,9 +96,11 @@ def test_slippage_and_gap_ratios() -> None:
 
 
 def test_final_judgement_starts_after_the_latest_known_cutoff() -> None:
-    assert parse_cutoff("2025-03") == date(2025, 3, 1) and parse_cutoff("2025-03-15") == date(2025, 3, 15)
+    # a month cutoff covers the whole month (review: "2025-03" must not open the window on 2025-03-02)
+    assert parse_cutoff("2025-03") == date(2025, 3, 31) and parse_cutoff("2025-03-15") == date(2025, 3, 15)
+    assert parse_cutoff("2024-02") == date(2024, 2, 29) and parse_cutoff("2025-12") == date(2025, 12, 31)
     assert parse_cutoff("garbage") is None and parse_cutoff(None) is None
-    assert final_judgement_from(["2025-03", "2025-01-10"]) == date(2025, 3, 2)
+    assert final_judgement_from(["2025-03", "2025-01-10"]) == date(2025, 4, 1)
     assert final_judgement_from(["2025-03", None]) is None  # an unknown cutoff forbids any claim
     assert final_judgement_from([]) is None
 
