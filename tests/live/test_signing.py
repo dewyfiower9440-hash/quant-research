@@ -25,20 +25,25 @@ def test_signed_package_round_trips_and_every_refusal_path_is_covered() -> None:
     signer = Ed25519Signer.generate()
     verifier = signer.verifier()
     pkg = sign_package(signer, "strategy", 1, 0, 1_000, {"spec_hash": "abc", "params": {"fast": 24}})
-    verify_package(pkg, verifier, now_ns=10, current_version=None)
+    verify_package(pkg, verifier, now_ns=10, current_version=None, expected_kind="strategy")
     back = SignedPackage.from_json(pkg.to_json())
     assert back == pkg
-    verify_package(back, verifier, now_ns=10, current_version=0)
+    verify_package(back, verifier, now_ns=10, current_version=0, expected_kind="strategy")
     tampered = SignedPackage.from_json(pkg.to_json().replace('"fast":24', '"fast":25'))
     with pytest.raises(SignatureError, match="does not verify"):
-        verify_package(tampered, verifier, now_ns=10, current_version=None)
+        verify_package(tampered, verifier, now_ns=10, current_version=None, expected_kind="strategy")
     other = Ed25519Signer.generate().verifier()
     with pytest.raises(SignatureError, match="signed by"):
-        verify_package(pkg, other, now_ns=10, current_version=None)
+        verify_package(pkg, other, now_ns=10, current_version=None, expected_kind="strategy")
     with pytest.raises(SignatureError, match="expired"):
-        verify_package(pkg, verifier, now_ns=1_000, current_version=None)
+        verify_package(pkg, verifier, now_ns=1_000, current_version=None, expected_kind="strategy")
     with pytest.raises(SignatureError, match="rollback"):
-        verify_package(pkg, verifier, now_ns=10, current_version=1)
+        verify_package(pkg, verifier, now_ns=10, current_version=1, expected_kind="strategy")
+    with pytest.raises(SignatureError, match="kind"):  # a valid strategy package presented as a policy
+        verify_package(pkg, verifier, now_ns=10, current_version=None, expected_kind="policy")
+    future = sign_package(signer, "strategy", 2, 10**12, 2 * 10**12, {"spec_hash": "abc"})
+    with pytest.raises(SignatureError, match="future"):  # issued after now + the allowed clock skew
+        verify_package(future, verifier, now_ns=10, current_version=None, expected_kind="strategy")
     with pytest.raises(SignatureError):
         sign_package(signer, "policy", 0, 0, 1, {})
     with pytest.raises(SignatureError):
@@ -49,7 +54,7 @@ def test_signed_package_round_trips_and_every_refusal_path_is_covered() -> None:
         pkg.kind, pkg.version, pkg.issued_ns, pkg.expires_ns, pkg.body, "zz", pkg.signer_fingerprint
     )
     with pytest.raises(SignatureError, match="hex"):
-        verify_package(bad_hex, verifier, now_ns=10, current_version=None)
+        verify_package(bad_hex, verifier, now_ns=10, current_version=None, expected_kind="strategy")
     assert len(signer.public_bytes()) == 32 and len(verifier.fingerprint) == 16
 
 

@@ -129,8 +129,20 @@ def sign_package(
     )
 
 
-def verify_package(pkg: SignedPackage, verifier: Ed25519Verifier, *, now_ns: int, current_version: int | None) -> None:
-    """Raise SignatureError unless signature, signer, expiry and monotone version all hold."""
+MAX_CLOCK_SKEW_NS = 60 * 10**9
+
+
+def verify_package(
+    pkg: SignedPackage,
+    verifier: Ed25519Verifier,
+    *,
+    now_ns: int,
+    current_version: int | None,
+    expected_kind: str,
+    max_skew_ns: int = MAX_CLOCK_SKEW_NS,
+) -> None:
+    """Raise SignatureError unless signature, signer, kind, issue time, expiry and monotone version all hold
+    (a valid package of another kind, or one issued in the future, is refused: review, low)."""
     if pkg.signer_fingerprint != verifier.fingerprint:
         raise SignatureError(f"package signed by {pkg.signer_fingerprint}, expected {verifier.fingerprint}")
     try:
@@ -139,6 +151,10 @@ def verify_package(pkg: SignedPackage, verifier: Ed25519Verifier, *, now_ns: int
         raise SignatureError("signature is not hex") from e
     if not verifier.verify(pkg.message(), signature):
         raise SignatureError("signature does not verify (body altered or wrong key)")
+    if pkg.kind != expected_kind:
+        raise SignatureError(f"package kind {pkg.kind!r} is not the expected {expected_kind!r}")
+    if pkg.issued_ns > now_ns + max_skew_ns:
+        raise SignatureError(f"package {pkg.kind} v{pkg.version} is issued in the future ({pkg.issued_ns} > {now_ns})")
     if pkg.expires_ns <= now_ns:
         raise SignatureError(f"package {pkg.kind} v{pkg.version} expired")
     if current_version is not None and pkg.version <= current_version:

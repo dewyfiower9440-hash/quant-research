@@ -37,10 +37,14 @@ def live_client_id(venue: Venue, account: str, spec_hash: str, symbol: str, deci
     return cid
 
 
-def next_action(state: OrderState, *, ack_timed_out: bool, want_cancel: bool) -> Action:
-    """What the executor may do with an order in `state` (§11: uncertain -> query only, never resubmit)."""
+def next_action(state: OrderState, *, ack_timed_out: bool, want_cancel: bool, send_attempted: bool) -> Action:
+    """What the executor may do with an order in `state` (§11: uncertain -> query only, never resubmit).
+
+    `send_attempted` is persisted BEFORE the network call: once the request may have left the process, a
+    PENDING_SUBMIT order is only queried (a crash between send and ack, then a restart, must not resubmit;
+    whether the venue would refuse the duplicate client id is not relied on)."""
     if state == "PENDING_SUBMIT":
-        return "query" if ack_timed_out else "submit"
+        return "query" if ack_timed_out or send_attempted else "submit"
     if state == "UNCERTAIN":
         return "query"
     if state in ("ACKED", "PARTIALLY_FILLED"):

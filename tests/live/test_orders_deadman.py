@@ -31,11 +31,14 @@ def test_client_ids_fit_each_venue_and_are_deterministic() -> None:
 
 
 def test_uncertain_orders_are_only_queried_and_transitions_are_checked() -> None:
-    assert next_action("PENDING_SUBMIT", ack_timed_out=False, want_cancel=False) == "submit"
-    assert next_action("PENDING_SUBMIT", ack_timed_out=True, want_cancel=False) == "query"
-    assert next_action("UNCERTAIN", ack_timed_out=True, want_cancel=True) == "query"  # never resubmit
-    assert next_action("ACKED", ack_timed_out=False, want_cancel=True) == "cancel"
-    assert next_action("FILLED", ack_timed_out=False, want_cancel=True) == "none"
+    fresh = {"ack_timed_out": False, "want_cancel": False, "send_attempted": False}
+    assert next_action("PENDING_SUBMIT", **fresh) == "submit"  # never sent: the one submission
+    assert next_action("PENDING_SUBMIT", ack_timed_out=True, want_cancel=False, send_attempted=True) == "query"
+    # review (low): a crash after the request left the process but before the ack -> restart -> query, never resubmit
+    assert next_action("PENDING_SUBMIT", ack_timed_out=False, want_cancel=False, send_attempted=True) == "query"
+    assert next_action("UNCERTAIN", ack_timed_out=True, want_cancel=True, send_attempted=True) == "query"
+    assert next_action("ACKED", ack_timed_out=False, want_cancel=True, send_attempted=True) == "cancel"
+    assert next_action("FILLED", ack_timed_out=False, want_cancel=True, send_attempted=True) == "none"
     check_move("UNCERTAIN", "ACKED")
     with pytest.raises(OrderRuleError):
         check_move("FILLED", "ACKED")
