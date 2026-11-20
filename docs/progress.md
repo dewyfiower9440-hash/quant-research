@@ -541,3 +541,9 @@
 - **구현 파일:** `live/signing.py`(ed25519, `cryptography==50.0.2`), `live/orders.py`, `live/deadman.py`, `live/testnet.py`(요청 형식, `unverified`), `docs/live-rehearsal.md`(사용자 결정 7개와 리허설 7단계). ADR-039.
 - **테스트:** signing 2, orders·deadman·testnet 5.
 - **하지 않은 것(설계대로):** 키·실거래 호스트·법률 확인·실주문·테스트넷 호출.
+
+# v2.2 재구축 (`docs/plans/2026-11-20-v22-rebuild.md`)
+## 상태: **IN_PROGRESS** (2026-11-20)
+- **A0 (01f2f8c, CI 44622826560):** v2.2 설계 개정판(`docs/plans/2026-11-20-autonomous-quant-research-v2.2.md`), ADR-040~048 사전 등록. 2020-01~2024-11 데이터는 아직 연구 역할로 읽지 않았다.
+- **A1 (모의매매 피드 메모리):** `paper/feed.py` `LakeFeed`가 lake 파일 하나씩 부분 1분봉으로 줄여 프로세스 수명 동안 캐시하고 병합한다. 원시 호가는 미체결 주문의 체결 창(가장 이른 도착 −5분 ~ 현재)만 읽는다. `tick(feed=...)`은 `MarketFeed` 프로토콜을 받는다. 실측(실제 lake, 45일 창 = 수집된 231파일 628MB, 8심볼): 최초 8.0초·캐시 재호출 0.14초, 프로세스 private 237MB(`POLARS_MAX_THREADS=2`; 기본 스레드 수는 약 1GB), 메모리에 동시에 올린 원시 행 최대 180,000(파일 1개). 종전 방식은 231파일 전체를 한 번에 concat. 예약 작업은 스레드 2개를 먼저 정하는 `python -m quant_research.paper`(`paper/__main__.py`)로 실행. 계획과의 차이: 캐시는 디스크(`paper/cache`)가 아니라 프로세스 메모리(부분 봉은 45일 8심볼 약 8만 행) — 쓰기 경로를 늘리지 않기 위해.
+- **독립 리뷰(Phase 4~7 변경분, `code-reviewer`):** High 5·Medium 6·Low 9건 보고. 확인·수정은 다음 단계(리뷰 수정)에서 테스트 먼저.

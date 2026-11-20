@@ -272,3 +272,21 @@
 - **수정:** `search/s2_stage.run_s2`가 spec에 시간 손절·ATR 손절이 있으면 이벤트 엔진으로 자동 전환하고 `engine_used`를 metrics에 남긴다. 테스트 `test_stateful_specs_are_evaluated_by_the_event_engine_at_s2`(수정 전 코드로는 거부 사유에 "path dependent"가 남아 실패).
 - **영향:** S2 비용이 늘었다(이벤트 엔진). 2차 배치(`search-s7-20261119-r2`)로 측정표를 다시 만들었다. 1차 배치의 trial은 그대로 남아 N_total에 포함된다(재평가는 새 trial, §9-2).
 - **상태:** 해결(2026-11-19).
+
+## F-019 (2026-11-20, 독립 리뷰) Phase 4~7 변경분 리뷰에서 확인된 결함 (`code-reviewer` 2회: 3bc2950..1345643, A1 diff)
+- **증상과 원인(모두 코드 추적 또는 실행으로 확인, 테스트로 재현 후 수정):**
+  1. 모의매매 루프가 매 tick 같은 policy.json을 다시 적용 → 두 번째부터 "rollback refused", tick 미실행. 원인: 이미 적용된 정책을 건너뛰지 않음.
+  2. holdout lag 스트레스가 config만 바꾸고 base latency로 조립된 frame을 재사용 → lag+1·lagx2 SR이 항상 base와 같음(6 spec 실측). 원인: 체결 가격은 조립 시점에 계산된다.
+  3. 같은 fold로 재시작하면 S0가 모든 제안을 duplicate로 거부 → S1·S2 0건, best_s2 None. 기존 resume 테스트는 trial 수만 보고 반환값을 버려 통과했다.
+  4. 여러 전략이 심볼별 포지션 하나를 공유 → 반대 방향 전략이 서로 되돌림, 빠진 전략의 포지션을 남이 청산.
+  5. 한 tick의 주문을 모두 tick 시작 노출로 검사(8×4,000이 gross 20,000 통과), 미체결 주문 미포함, 주문 속도 한도 0 고정, 손실 창이 누적 실현 손익 하나.
+  6. 체결 도착 시각 = 결정 시각 + 지연 → 10:05 주문이 09:01 호가로 체결(약 1시간 과거 체결).
+  7. client id의 seq가 필터를 통과한 순번 → 다른 심볼이 빠지면 id가 바뀜.
+  8. validator 예산 k가 판정 규칙과 묶이지 않음(k=1 규칙으로 k=20 예산 사용 가능).
+  9. 낮음: 정책 키 없을 때 빈 HMAC 키(fail-open), 월 단위 LLM cutoff를 그 달 1일로 해석, lifecycle 상태 확인이 쓰기 잠금 밖, ack의 venue id 갱신이 트랜잭션 밖, S2 resume 조회가 이벤트 엔진 전환을 무시, live PENDING_SUBMIT가 크래시 후 재제출 가능, 서명 패키지 kind·미래 발행 시각 미검사.
+  10. A1 리뷰: 새 체결 창 테스트와 기존 tick 테스트가 주문이 0건이라 핵심 단언이 실행되지 않음(데이터 60시간 < 48시간 z-score 웜업 + 결정 창 1일).
+- **수정:** 1 `load_policy`가 적용 중인 정책과 같으면 건너뜀, 키 없으면 `RefuseAllVerifier`. 2 `synthetic_splits`·`holdout_evaluation(panel_at_latency=)`로 지연별 재조립, 없으면 거부. 3 `S0Outcome.duplicate_of` + `reuse_s1`(같은 fold·data_version·S1 설정의 done trial 재사용), 테스트가 재시작 best_s2 = 1회차를 단언. 4 `ledger.strategy_positions`·`plan_portfolio`(전략별 포지션, 승인 해제 전략은 자기 해시로 청산, 전략당 자본 균등). 5 `risk.limits.approve_in_order`(누적 노출), `account_exposure`(미체결 포함, 최근 1분 주문 수, 실현+미실현 손실 창). 6 도착 = max(제출, 결정) + 지연. 7 심볼별 seq 0 고정. 8 마이그레이션 0003: `query_budget.rule_hash`, register·judge가 규칙 해시 대조. 9 각 항목 수정(월 말일, `begin immediate` 안에서 상태 확인, `_move(also=)`, `s2_engine_config` 공용, `send_attempted`, `expected_kind`·시계 오차 60초). 10 테스트 데이터 100시간·평균회귀·equal sizing으로 주문이 실제로 생기게 하고 전제를 단언. 추가로 lifecycle 연결(Validated→Paper, 일 1회 `paper_health`로 CUSUM 저하 판정, 기대치는 제출 실험의 S3 일수익률).
+- **이월(계획 단계로):** holdout 접근 로그 강제·1비트 격리(별도 ack 파일)·해시 체인 꼬리 절단 앵커 → B8(validator 프로세스). 단일 질의 FWER 측정(복제당 질의 1회는 종단 FWER가 아님) → A3. ONC 범위(k≥2, ≤30) 보고서 명시 → A12. 전략별 슬리피지·gap 비율 기록 → B11.
+- **상태:** 수정(2026-11-20), 각 영역 테스트 통과. 게이트·CI는 커밋 시 기록.
+- **2차 리뷰(수정 diff 전체, 2026-11-20) 추가 확인·수정:** (a) lake 지연(시간 세그먼트, 시간 종료 1분 뒤부터 압축, 10분 주기 → 61~71분) 때문에 벽시계 기준 취소가 모든 모의 주문을 체결 전에 취소 → `MarketFeed.coverage_ns()`가 체결 창 전체를 덮을 때 한 번만 체결 시뮬레이션하고 남은 수량 취소(같은 호가를 tick마다 다시 쓰던 문제도 해소), (b) `daily_returns_from_fills`가 창 이전 체결을 버리고(부호 반전) 결측 종가로 이동분을 잃음 → 첫날은 기준일(보유만 쌓음), 마지막 종가 승계, (c) 미체결 주문을 다시 계획해 노출 이중 계산 → 계획에 미체결 잔량 포함, 이미 있는 client id는 위험 검사에서 제외, (d) 빈 패널 가드가 발동 불가(심볼 × 결정 cross join) → 결정 시각까지 오는 봉이 없는 심볼은 가격 제외, 전부 묵으면 결정 안 함, (e) health·승격·자본이 매매 대상(시간봉)과 다른 목록 → 같은 목록, (f) 미완료 holdout verdict에 rule_hash 없음 → `incomplete_verdict`, (g) S1 재사용 키에 slice 창·합성 spec 없음 → metrics `window`, 합성 패널 파일 식별자에 spec, (h) rule NULL 예산 행 재등록 경로 없음 → 사용 0일 때 1회 바인딩. 테스트 가짜 피드는 tick 시각 이후 호가를 볼 수 없게(`visible_until`) 고쳤다.
+- **3·4차 리뷰(2026-11-20) 추가 수정:** (a) 최신 lake 파일만으로 체결 창 커버를 판단하면, 압축이 실패한 앞 시간 세그먼트를 건너뛴 경우 호가 0건으로 거짓 취소 → `LakeFeed.covers(window)`: 창과 겹치는 모든 raw 세그먼트가 lake 파일(같은 stem) 또는 catalog `compacted_segment` 기록을 가져야 함(0행 세그먼트는 lake 파일 없이 기록만 남는다: 수집기 재시작의 헤더만 있는 세그먼트), (b) `reuse_s1`이 가장 오래된 trial만 비교 → 창이 일치하는 첫 trial, (c) `reduce_only`를 미체결 포함 수량으로 판단 → 체결 수량으로, (d) 일일 health가 lake 지연으로 잘린 전날로 실행될 수 있음 → `health_due`가 전날 마지막 시간 커버를 확인, (e) `judge`가 제출 규칙과 epoch 규칙을 대조. 3차 수정은 테스트를 수정과 함께 추가해 실패 확인을 따로 하지 않았고, 4차(0행 세그먼트)는 실패를 먼저 확인했다.
