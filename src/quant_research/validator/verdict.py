@@ -19,6 +19,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
+from quant_research.search.multiplicity import psr, sharpe_stats
 from quant_research.validator.store import rule_hash
 
 F64 = NDArray[np.float64]
@@ -35,6 +36,12 @@ class DecisionRule:
     bootstrap_reps: int = 2000
     seed: int = 0
     fail_on_cost_stress: bool = True  # the sign must survive every cost multiplier too
+    # v2.2 A2 (ADR-042): preconditions; below them the holdout gives NO verdict and spends no query
+    min_active_days: int = 60  # days with non-zero pnl
+    min_entries: int = 30  # independent entries (a held position's rebalances are not new trades)
+    min_mean_exposure: float = 0.05  # mean gross exposure / capital over the holdout run
+    min_holdout_days: int = 600  # 250 d exceeded 1.5 x alpha/k (docs/measurements/phase5-verdict-calibration.md)
+    require_psr: bool = True  # the skew/kurtosis-aware PSR must reject too
 
     def __post_init__(self) -> None:
         if (
@@ -43,6 +50,10 @@ class DecisionRule:
             or not 0 <= self.c <= 1
             or self.block_len < 1
             or self.bootstrap_reps < 100
+            or self.min_active_days < 0
+            or self.min_entries < 0
+            or self.min_mean_exposure < 0
+            or self.min_holdout_days < 3
         ):
             raise ValueError(f"invalid decision rule {self}")
 
@@ -137,6 +148,29 @@ class Verdict:
     passed: bool
     reasons: tuple[str, ...]  # why it failed (empty when passed); internal
     detail: dict[str, object]  # internal report: never returned to research
+    insufficient: bool = False  # a precondition failed: no verdict, the query is not spent (ADR-042)
+
+
+def preconditions(pnl: F64, rule: DecisionRule, *, entries: float | None, mean_exposure: float | None) -> list[str]:
+    """Why this holdout run cannot be judged (empty: it can). Unknown entries / exposure count as failing.
+    `mean_exposure` is the mean TARGET gross weight (backtest metric `gross_exposure`), not the realised one
+    (A2 review: a short time stop can hold 0 while the target stays on; `min_active_days` covers most of it)."""
+    out: list[str] = []
+    days = int(pnl.shape[0])
+    if days < rule.min_holdout_days:
+        out.append(f"holdout days {days} < {rule.min_holdout_days}")
+    active = int(np.count_nonzero(pnl))
+    if active < rule.min_active_days:
+        out.append(f"active pnl days {active} < {rule.min_active_days}")
+    if entries is None:
+        out.append("entries unknown")
+    elif entries < rule.min_entries:
+        out.append(f"entries {entries:g} < {rule.min_entries}")
+    if mean_exposure is None:
+        out.append("mean gross exposure unknown")
+    elif mean_exposure < rule.min_mean_exposure:
+        out.append(f"mean gross exposure {mean_exposure:.4f} < {rule.min_mean_exposure}")
+    return out
 
 
 def decide(
@@ -146,13 +180,31 @@ def decide(
     *,
     stressed_sr: Mapping[str, float | None] | None = None,
     breakeven: float | None = None,
+    entries: float | None,
+    mean_exposure: float | None,
 ) -> Verdict:
     """The one-bit decision. `stressed_sr` maps a stress name (cost x2.0, cost x3.0, lag+1, lagx2) to the SR of the
     re-evaluated strategy on the holdout (None: the re-evaluation was impossible -> counts as not maintained)."""
-    test = sr_test(np.asarray(holdout_pnl, dtype=np.float64), rule)
+    pnl = np.asarray(holdout_pnl, dtype=np.float64)
+    missing = preconditions(pnl, rule, entries=entries, mean_exposure=mean_exposure)
+    if missing:
+        detail0: dict[str, object] = {
+            "insufficient": True,
+            "rule_hash": rule.hash(),
+            "days": int(pnl.shape[0]),
+            "active_days": int(np.count_nonzero(pnl)),
+            "entries": entries,
+            "mean_exposure": mean_exposure,
+        }
+        return Verdict(False, tuple(missing), detail0, insufficient=True)
+    test = sr_test(pnl, rule)
     reasons: list[str] = []
     if not test.reject:
         reasons.append(f"H0 SR<=0 not rejected at alpha/k={rule.alpha_per_query:.5f} (p={test.p_value:.4f})")
+    stats = sharpe_stats(pnl)
+    psr_value = psr(stats.sr, 0.0, stats.skew, stats.kurt, stats.t) if math.isfinite(stats.sr) else 0.0
+    if rule.require_psr and not psr_value > 1 - rule.alpha_per_query:
+        reasons.append(f"PSR {psr_value:.5f} <= 1 - alpha/k (skew {stats.skew:.2f}, kurtosis {stats.kurt:.2f})")
     floor = rule.c * in_sample_sr
     if math.isnan(test.sr) or test.sr < floor:
         reasons.append(f"point estimate {test.sr:.4f} < c*SR_in = {floor:.4f}")
@@ -173,6 +225,13 @@ def decide(
         "stressed_sr": stresses,
         "breakeven_cost_multiple": breakeven,
         "rule_hash": rule.hash(),
-        "days": int(np.asarray(holdout_pnl).shape[0]),
+        "days": int(pnl.shape[0]),
+        "active_days": int(np.count_nonzero(pnl)),
+        "entries": entries,
+        "mean_exposure": mean_exposure,
+        "psr": psr_value,
+        "skew": stats.skew,
+        "kurtosis": stats.kurt,
+        "insufficient": False,
     }
     return Verdict(not reasons, tuple(reasons), detail)

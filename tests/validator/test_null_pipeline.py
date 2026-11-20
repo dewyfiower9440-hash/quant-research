@@ -117,7 +117,8 @@ def test_one_replication_runs_search_and_holdout_verdict_with_stress_reruns(
 ) -> None:
     catalog, ledger = env
     sp = synthetic_splits(base, SyntheticSpec(), seed=4, warmup_days=5, sel_days=14, conf_days=8)
-    rule = DecisionRule(bootstrap_reps=200)
+    # a 13-day synthetic holdout: the sample preconditions are relaxed so the replication is judged here
+    rule = DecisionRule(bootstrap_reps=200, min_holdout_days=3, min_active_days=0, min_entries=0, min_mean_exposure=0.0)
     rep = replicate(
         sp,
         catalog,
@@ -150,7 +151,7 @@ def test_harness_verdicts_are_booked_in_a_validator_db(tmp_path: Path) -> None:
         assert register_and_judge(store, 1, "h1", rule, v, epoch=1, k=100, in_sample_sr=0.1) is False
         assert store.ack(1) is False and store.budget(1) == (100, 1)
         empty = HarnessResult("x", ())
-        assert empty.summary()["replications"] == 0
+        assert empty.summary()["replications"] == 0 and empty.summary()["measurable"] is False
         assert Replication(1, "trend", "tpe", 0, None, False, ("no S3 candidate",)).passed is False
     finally:
         store.close()
@@ -176,7 +177,8 @@ def test_lag_stress_reruns_use_a_holdout_assembled_at_the_stressed_latency(
         sp.holdout,
         catalog,
         ledger,
-        DecisionRule(bootstrap_reps=200),
+        # the 13-day synthetic holdout tests the lag mechanics only: the sample preconditions are relaxed here
+        DecisionRule(bootstrap_reps=200, min_holdout_days=3, min_active_days=0, min_entries=0, min_mean_exposure=0.0),
         in_sample_sr=0.0,
         seed=1,
         panel_at_latency=sp.holdout_at_latency,
@@ -215,3 +217,29 @@ def test_an_incomplete_holdout_verdict_carries_the_rule_hash_and_can_be_booked(t
         assert register_and_judge(store, 1, "h", rule, v, epoch=1, k=20, in_sample_sr=0.1) is False
     finally:
         store.close()
+
+
+def test_an_insufficient_verdict_is_refused_without_spending_a_query(tmp_path: Path) -> None:
+    store = ValidatorStore.open(tmp_path / "v.db")
+    try:
+        rule = DecisionRule(bootstrap_reps=200)
+        v = Verdict(False, ("active pnl days 9 < 60",), {"rule_hash": rule.hash(), "insufficient": True}, True)
+        assert register_and_judge(store, 3, "h", rule, v, epoch=1, k=20, in_sample_sr=0.1) is False
+        assert store.budget(1) == (20, 0)  # nothing spent
+        assert store.submission(1)[1] == "refused" and store.ack(3) is None  # no bit to research either
+    finally:
+        store.close()
+
+
+def test_the_harness_separates_insufficient_replications_from_failed_ones() -> None:
+    """A2 review: with the 600-day minimum a short synthetic holdout is insufficient; counting it as 'not passed'
+    reported FWER 0 as if the criterion were met."""
+    reps = (
+        Replication(1, "trend", "random", 3, 0.1, False, ("holdout days 31 < 600",), insufficient=True),
+        Replication(2, "trend", "random", 3, 0.1, True, ()),
+        Replication(3, "trend", "random", 3, 0.1, False, ("H0 not rejected",)),
+    )
+    s = HarnessResult("x", reps).summary()
+    assert s["judged"] == 2 and s["insufficient"] == 1 and s["pass_rate"] == 0.5 and s["measurable"] is True
+    none = HarnessResult("y", reps[:1]).summary()
+    assert none["measurable"] is False and none["judged"] == 0

@@ -209,7 +209,16 @@ def holdout_evaluation(
         stressed[name] = sharpe(_pnl(ledger, out)) if out.status == "done" else None
     if pnl.shape[0] < 3:
         return incomplete_verdict(rule, status=base.status, reason=base.reason)
-    return decide(pnl, in_sample_sr, rule, stressed_sr=stressed)
+    entries = base.metrics.get("entries")
+    exposure = base.metrics.get("gross_exposure")
+    return decide(
+        pnl,
+        in_sample_sr,
+        rule,
+        stressed_sr=stressed,
+        entries=float(entries) if isinstance(entries, int | float) else None,
+        mean_exposure=float(exposure) if isinstance(exposure, int | float) else None,
+    )
 
 
 def incomplete_verdict(rule: DecisionRule, *, status: str, reason: str | None) -> Verdict:
@@ -239,6 +248,7 @@ class Replication:
     s3_sr: float | None
     passed: bool
     reasons: tuple[str, ...]
+    insufficient: bool = False  # the holdout run could not be judged (ADR-042): neither a pass nor a fail
 
 
 def replicate(
@@ -287,7 +297,16 @@ def replicate(
         seed=seed,
         panel_at_latency=splits.holdout_at_latency,
     )
-    return Replication(seed, family, searcher.name, res.counts()["s2_done"], sr3, verdict.passed, verdict.reasons)
+    return Replication(
+        seed,
+        family,
+        searcher.name,
+        res.counts()["s2_done"],
+        sr3,
+        verdict.passed,
+        verdict.reasons,
+        insufficient=verdict.insufficient,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,12 +315,17 @@ class HarnessResult:
     replications: tuple[Replication, ...]
 
     @property
+    def judged(self) -> tuple[Replication, ...]:
+        """Replications that produced a verdict (insufficient ones are neither passes nor fails)."""
+        return tuple(r for r in self.replications if not r.insufficient)
+
+    @property
     def n(self) -> int:
-        return len(self.replications)
+        return len(self.judged)
 
     @property
     def pass_rate(self) -> float:
-        return sum(r.passed for r in self.replications) / self.n if self.n else math.nan
+        return sum(r.passed for r in self.judged) / self.n if self.n else math.nan
 
     def wilson_ci(self, z: float = 1.96) -> tuple[float, float]:
         n, p = self.n, self.pass_rate
@@ -316,13 +340,16 @@ class HarnessResult:
         lo, hi = self.wilson_ci()
         return {
             "label": self.label,
-            "replications": self.n,
+            "replications": len(self.replications),
+            "judged": self.n,
+            "insufficient": len(self.replications) - self.n,
+            "measurable": self.n > 0,  # all insufficient: the harness measured NOTHING (not an FWER of 0)
             "pass_rate": self.pass_rate,
             "wilson_95": [lo, hi],
             "by_searcher": {
-                s: sum(r.passed for r in self.replications if r.searcher == s)
-                / max(1, sum(1 for r in self.replications if r.searcher == s))
-                for s in sorted({r.searcher for r in self.replications})
+                s: sum(r.passed for r in self.judged if r.searcher == s)
+                / max(1, sum(1 for r in self.judged if r.searcher == s))
+                for s in sorted({r.searcher for r in self.judged})
             },
         }
 
@@ -345,6 +372,9 @@ def register_and_judge(
     sid = store.register(
         Submission(request_id, spec_hash, rule.hash(), f"null:{request_id}", in_sample_sr, ("synthetic",), epoch)
     )
+    if verdict.insufficient:  # no verdict: the submission is refused and the query is not spent (ADR-042)
+        store.refuse(sid, "; ".join(verdict.reasons))
+        return False
     store.judge(sid, verdict.passed, verdict.detail)
     return verdict.passed
 
