@@ -16,7 +16,9 @@ These numbers rank candidates for S2; they are NOT evidence of an edge (costs un
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -62,6 +64,31 @@ class S1Result:
     def score(self) -> float:
         """Ranking key for S2 promotion: HAC t of the net event return (undefined -> -inf)."""
         return -math.inf if self.event_hac_t is None else self.event_hac_t
+
+    @classmethod
+    def from_metrics(cls, m: Mapping[str, object]) -> S1Result:
+        """The result of a finished S1 trial (resume: reused instead of evaluated again)."""
+
+        def opt(key: str) -> float | None:
+            v = m.get(key)
+            return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+        def count(key: str) -> int:
+            v = m.get(key)
+            return int(v) if isinstance(v, int | float) and not isinstance(v, bool) else 0
+
+        flags = m.get("flags")
+        return cls(
+            count("horizon_bars"),
+            opt("ic_mean"),
+            opt("ic_hac_t"),
+            count("ic_samples"),
+            opt("event_mean"),
+            opt("event_mean_net"),
+            opt("event_hac_t"),
+            count("event_samples"),
+            tuple(str(f) for f in cast(list[object], flags)) if isinstance(flags, list) else (),
+        )
 
     def metrics(self) -> dict[str, object]:
         return {

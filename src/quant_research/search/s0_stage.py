@@ -36,6 +36,9 @@ class S0Outcome:
     rejected: int
     accepted: list[Accepted] = field(default_factory=lambda: list[Accepted]())
     statuses: list[str] = field(default_factory=lambda: list[str]())  # per candidate: done | rejected | duplicate
+    # duplicates of a spec that passed S0 before (this batch or an earlier one), with that first S0 trial:
+    # their S1 result can be reused when it was computed on the same data (resume, review finding 3)
+    duplicate_of: list[Accepted] = field(default_factory=lambda: list[Accepted]())
 
 
 def point_json(point: Point) -> dict[str, object]:
@@ -64,6 +67,7 @@ def run_s0(
     origin: TrialOrigin | None = None,
 ) -> S0Outcome:
     accepted: list[Accepted] = []
+    dups: list[Accepted] = []
     statuses: list[str] = []
     duplicates = rejected = 0
     with ledger.store.transaction():
@@ -90,4 +94,6 @@ def run_s0(
                     statuses.append("done")
             if cand.spec is not None and first is None:
                 accepted.append(Accepted(cand.point, h, key, trial.trial_id))
-    return S0Outcome(len(candidates), len(accepted), duplicates, rejected, accepted, statuses)
+            elif cand.spec is not None and first is not None:
+                dups.append(Accepted(cand.point, h, key, first))
+    return S0Outcome(len(candidates), len(accepted), duplicates, rejected, accepted, statuses, dups)

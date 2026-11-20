@@ -20,6 +20,7 @@ from quant_research.search.promotion import Selection, rank_corr
 from quant_research.search.s0_stage import point_json
 from quant_research.search.s1_stage import S1Scored
 from quant_research.strategy.space import SPACES, build_point
+from quant_research.strategy.spec import StrategySpec
 
 S3_SCORE = "sr_daily"
 
@@ -43,6 +44,14 @@ def promoted(selection: Selection) -> list[S1Scored]:
     return [*selection.top, *selection.promoted]
 
 
+def s2_engine_config(spec: StrategySpec, config: RunConfig) -> RunConfig:
+    """The vector engine refuses path-dependent exits (time stop / ATR stop); such specs go to the event engine
+    at S2 so the search space's `time_stop` axis is evaluated instead of rejected (ADR-020 rule). The resume
+    lookup must use the same config, or it never finds those trials (review)."""
+    stateful = spec.exit.time_stop_bars is not None or spec.exit.stop_loss_atr is not None
+    return replace(config, engine="event") if stateful and config.engine == "vector" else config
+
+
 def run_s2(
     ledger: TrialLedger,
     selection: Selection,
@@ -57,10 +66,7 @@ def run_s2(
     for s in promoted(selection):
         kind = selection.kind(s.trial_id)
         spec = build_point(SPACES[s.candidate.point.family], s.candidate.point)
-        # the vector engine refuses path-dependent exits (time stop / ATR stop); such specs go to the event
-        # engine at S2 so the search space's `time_stop` axis is evaluated instead of rejected (ADR-020 rule)
-        stateful = spec.exit.time_stop_bars is not None or spec.exit.stop_loss_atr is not None
-        cfg = replace(config, engine="event") if stateful and config.engine == "vector" else config
+        cfg = s2_engine_config(spec, config)
         tags: dict[str, object] = {
             "engine_used": cfg.engine,
             "point": point_json(s.candidate.point),

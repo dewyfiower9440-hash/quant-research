@@ -19,7 +19,7 @@ from quant_research.search.archive import Archive
 from quant_research.search.bandit import BanditPrior, FamilyBandit
 from quant_research.search.cost_model import LinearMemory, MemoryBudgetExceeded
 from quant_research.search.optimizers import RandomSearcher, TpeSearcher
-from quant_research.search.pipeline import SearchBudget, point_from_json, point_json, run_family_search
+from quant_research.search.pipeline import SearchBudget, SearchResult, point_from_json, point_json, run_family_search
 from quant_research.search.s1 import S1Config
 from quant_research.strategy.space import SPACES
 
@@ -125,8 +125,8 @@ def test_resume_in_the_same_fold_reuses_finished_s2_and_s3_trials(
     catalog, ledger = env
     sel, conf = panels
 
-    def run() -> int:
-        res = run_family_search(
+    def run() -> SearchResult:
+        return run_family_search(
             ledger,
             "momentum",
             RandomSearcher(SPACES["momentum"], seed=5),  # same seed -> same proposals (a restart replays)
@@ -139,14 +139,19 @@ def test_resume_in_the_same_fold_reuses_finished_s2_and_s3_trials(
             seed=2,
             fold="cycle7",
         )
-        return len(res.s2)
 
     first = run()
     s2_after_first, s3_after_first = _count(ledger, "S2", "cycle7"), _count(ledger, "S3", "cycle7")
-    assert first == s2_after_first
-    run()  # the restart: S0/S1 are re-evaluations (new trials by design), S2/S3 are reused
+    s1_after_first = _count(ledger, "S1", "cycle7")
+    assert len(first.s2) == s2_after_first and first.best_s2() is not None
+    second = run()  # the restart: S0 refusals are new trials (duplicates), S1/S2/S3 results are reused
     assert _count(ledger, "S2", "cycle7") == s2_after_first and _count(ledger, "S3", "cycle7") == s3_after_first
+    assert _count(ledger, "S1", "cycle7") == s1_after_first  # same fold + data version: no second evaluation
     assert _count(ledger, "S0") == 16
+    # review finding 3: the restart used to end with 0 candidates (every proposal an S0 duplicate)
+    b1, b2 = first.best_s2(), second.best_s2()
+    assert b2 is not None and b1 is not None and b2.outcome.trial_id == b1.outcome.trial_id
+    assert len(second.s1) == len(first.s1) and len(second.s2) == len(first.s2)
     dup = ledger.store.conn.execute(
         "select experiment_key, count(*) from trial where stage in ('S2','S3') and fold = 'cycle7' "
         "group by experiment_key, stage having count(*) > 1"
@@ -192,3 +197,67 @@ def test_memory_refusal_happens_before_any_trial(env: tuple[Catalog, TrialLedger
     with pytest.raises(ValueError):
         SearchBudget(promote_rate=1.5)
     assert point_from_json(point_json(searcher.ask())).family == "trend"
+
+
+def test_a_duplicate_on_another_window_is_evaluated_again_not_reused(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """Review 2 finding 8: the reuse key ignored the slice window (slice_panel keeps the file list), so the same
+    fold label on another selection window reused S1 results computed on other data."""
+    catalog, ledger = env
+    sel, conf = panels
+    grid = sel.frame["decision_ns"].unique().sort().to_list()
+    shorter = slice_panel(sel, int(grid[len(grid) // 3]), int(grid[-1]))
+
+    def run(panel: Panel) -> SearchResult:
+        return run_family_search(
+            ledger,
+            "momentum",
+            RandomSearcher(SPACES["momentum"], seed=5),
+            selection=panel,
+            confirmation=conf,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=6, top_k=1, promote_rate=0.0, s3_top=0),
+            seed=2,
+            fold="same-label",
+        )
+
+    first = run(sel)
+    before = _count(ledger, "S1", "same-label")
+    second = run(shorter)
+    assert len(second.s1) == len(first.s1) and len(first.s1) > 0
+    assert _count(ledger, "S1", "same-label") == before + len(second.s1)  # every one evaluated again
+
+
+def test_reuse_finds_the_trial_of_the_same_window_among_several(
+    env: tuple[Catalog, TrialLedger], panels: tuple[Panel, Panel]
+) -> None:
+    """Review 3: the reuse lookup took the OLDEST trial and compared its window, so after W1 and W2 a restart on
+    W2 evaluated everything again."""
+    catalog, ledger = env
+    sel, conf = panels
+    grid = sel.frame["decision_ns"].unique().sort().to_list()
+    w2 = slice_panel(sel, int(grid[len(grid) // 3]), int(grid[-1]))
+
+    def run(panel: Panel) -> SearchResult:
+        return run_family_search(
+            ledger,
+            "momentum",
+            RandomSearcher(SPACES["momentum"], seed=5),
+            selection=panel,
+            confirmation=conf,
+            catalog=catalog,
+            config=CONFIG,
+            s1=S1Config(horizon_bars=4),
+            budget=SearchBudget(s1_count=6, top_k=1, promote_rate=0.0, s3_top=0),
+            seed=2,
+            fold="two-windows",
+        )
+
+    run(sel)
+    run(w2)
+    before = _count(ledger, "S1", "two-windows")
+    again = run(w2)
+    assert len(again.s1) > 0 and _count(ledger, "S1", "two-windows") == before  # W2's own trials reused

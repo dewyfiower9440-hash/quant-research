@@ -27,10 +27,11 @@ from quant_research.search.cost_model import LinearCost, LinearMemory, guard_mem
 from quant_research.search.multiplicity import expected_max_sr, sr_variance
 from quant_research.search.optimizers import Searcher, propose
 from quant_research.search.promotion import Selection, select_for_s2
-from quant_research.search.s0_stage import S0Outcome, run_s0
+from quant_research.search.s0_stage import Accepted, S0Outcome, run_s0
 from quant_research.search.s1 import S1Config
-from quant_research.search.s1_stage import S1Scored, run_s1
-from quant_research.search.s2_stage import S2Scored, run_s2
+from quant_research.search.s1_stage import S1Scored, reuse_s1, run_s1
+from quant_research.search.s2_stage import S2Scored, run_s2, s2_engine_config
+from quant_research.strategy.canonical import spec_hash
 from quant_research.strategy.space import SPACES, Point, build_point
 
 
@@ -172,15 +173,23 @@ def run_family_search(
     cost["S0"] = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    scored = run_s1(ledger, s0.accepted, selection, config, s1, origin=origin, fold=fold)
-    # tell the searcher once per proposal, in proposal order: S0 refusals / duplicates -> None, else S1 score
-    scores = iter(scored)
+    new_hashes = {a.spec_hash for a in s0.accepted}
+    seen: set[str] = set()
+    dups: list[Accepted] = []
+    for d in s0.duplicate_of:  # a spec repeated within this batch is evaluated once, as the new one
+        if d.spec_hash not in new_hashes and d.spec_hash not in seen:
+            seen.add(d.spec_hash)
+            dups.append(d)
+    reused, again = reuse_s1(ledger, dups, selection, config, s1, fold=fold)
+    scored = [*run_s1(ledger, [*s0.accepted, *again], selection, config, s1, origin=origin, fold=fold), *reused]
+    by_hash = {s.candidate.spec_hash: s for s in scored}
+    # tell the searcher once per proposal, in proposal order: refusals -> None, else the (new or reused) S1 score
     for cand, status in zip(cands, s0.statuses, strict=True):
-        if status != "done":
+        hit = by_hash.get(spec_hash(cand.spec)) if cand.spec is not None and status != "rejected" else None
+        if hit is None:
             searcher.tell(cand.point, None)
             continue
-        s = next(scores)
-        sc = s.result.score()
+        sc = hit.result.score()
         searcher.tell(cand.point, sc if math.isfinite(sc) else None)
     cost["S1"] = time.perf_counter() - t1
 
@@ -251,7 +260,7 @@ def _run_s2_resumable(
     reused: list[S2Scored] = []
     for s in [*sel.top, *sel.promoted]:
         spec = build_point(SPACES[s.candidate.point.family], s.candidate.point)
-        h, conf = experiment_config(spec, panel, catalog, config)
+        h, conf = experiment_config(spec, panel, catalog, s2_engine_config(spec, config))
         prior = existing_trial(ledger, experiment_key(h, conf), "S2", fold)
         if prior is None:
             (fresh_top if s in sel.top else fresh_rand).append(s)

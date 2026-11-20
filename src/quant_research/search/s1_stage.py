@@ -7,10 +7,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from typing import cast
 
 from quant_research.backtest.panel import Panel
 from quant_research.backtest.run import data_version
-from quant_research.research.ledger import TrialLedger, TrialOrigin
+from quant_research.research.ledger import TrialLedger, TrialOrigin, experiment_key
 from quant_research.search.cost_model import spec_ops
 from quant_research.search.s0_stage import Accepted, point_json
 from quant_research.search.s1 import S1Config, S1Result, evaluate_s1
@@ -27,6 +28,53 @@ class S1Scored:
 
 def s1_config(config: Mapping[str, object], cfg: S1Config) -> dict[str, object]:
     return {**config, "stage": "S1", "s1": asdict(cfg)}
+
+
+def panel_window(panel: Panel) -> list[int]:
+    """[first, last] decision of a panel plus its evaluate-from boundary (0 when none)."""
+    col = panel.frame["decision_ns"]
+    lo, hi = col.min(), col.max()
+    return [
+        int(lo) if isinstance(lo, int) else 0,
+        int(hi) if isinstance(hi, int) else 0,
+        int(panel.evaluate_from_ns or 0),
+    ]
+
+
+def reuse_s1(
+    ledger: TrialLedger,
+    candidates: Sequence[Accepted],
+    panel: Panel,
+    config: Mapping[str, object],
+    cfg: S1Config,
+    *,
+    fold: str | None = None,
+) -> tuple[list[S1Scored], list[Accepted]]:
+    """(reused, to evaluate): a candidate whose spec already has a done S1 trial in this fold on the same data
+    version (feature_eval.data_version) and S1 config is reused; any other is evaluated again (a new trial)."""
+    version = data_version(panel.files)
+    window = panel_window(panel)
+    reused: list[S1Scored] = []
+    fresh: list[Accepted] = []
+    for cand in candidates:
+        key = experiment_key(cand.spec_hash, s1_config(config, cfg))
+        rows = ledger.store.conn.execute(
+            "select t.trial_id, t.metrics_json from trial t join feature_eval f using (trial_id) "
+            "where t.experiment_key = ? and t.stage = 'S1' and t.status = 'done' "
+            "and ((? is null and t.fold is null) or t.fold = ?) and f.data_version = ? order by t.trial_id",
+            (key, fold, fold, version),
+        ).fetchall()
+        match = None  # same files AND the same slice (slice_panel keeps the file list): the first such trial
+        for trial_id, raw in rows:
+            metrics = cast(dict[str, object], json.loads(str(raw)))
+            if metrics.get("window") == window:
+                match = (int(trial_id), metrics)
+                break
+        if match is None:
+            fresh.append(cand)
+            continue
+        reused.append(S1Scored(cand, S1Result.from_metrics(match[1]), match[0]))
+    return reused, fresh
 
 
 def run_s1(
@@ -52,6 +100,7 @@ def run_s1(
             trial.metrics = {
                 **result.metrics(),
                 "point": point_json(cand.point),
+                "window": panel_window(panel),  # the reuse key with data_version (resume)
                 "rows": panel.frame.height,  # cost model inputs (search.cost_model)
                 "ops": spec_ops(spec),
             }
