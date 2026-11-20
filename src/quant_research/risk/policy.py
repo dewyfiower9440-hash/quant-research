@@ -41,6 +41,14 @@ class FakeVerifier:
         return hmac.compare_digest(self.sign(message), signature)
 
 
+class RefuseAllVerifier:
+    """No key configured: nothing verifies, so no policy is ever in force and every order is refused (fail
+    closed; an empty HMAC key would accept anything signed with the empty key)."""
+
+    def verify(self, message: bytes, signature: bytes) -> bool:
+        return False
+
+
 @dataclass(frozen=True, slots=True)
 class Policy:
     version: int

@@ -25,7 +25,7 @@ if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path 
 $user = "$env:USERDOMAIN\$env:USERNAME"
 $log = Join-Path $LogDir 'paper.log'
 $action = New-ScheduledTaskAction -Execute $python `
-    -Argument "-m quant_research.paper.run --interval-minutes $IntervalMinutes" `
+    -Argument "-m quant_research.paper --interval-minutes $IntervalMinutes" `
     -WorkingDirectory $Project
 $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $user
 $repeating = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $RepeatMinutes)

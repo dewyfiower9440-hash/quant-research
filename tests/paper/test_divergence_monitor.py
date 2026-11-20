@@ -9,7 +9,14 @@ import numpy as np
 import pytest
 
 from quant_research.paper.divergence import DecisionRecord, decompose, pre_seal_summary
-from quant_research.paper.monitor import apply_health, assess
+from quant_research.paper.monitor import (
+    StrategyFill,
+    apply_health,
+    assess,
+    check_paper_health,
+    daily_returns_from_fills,
+    promote_validated,
+)
 from quant_research.validator.lifecycle import DegradationRule, IllegalLifecycleTransition, LifecycleLedger, Transition
 from quant_research.validator.store import ValidatorStore
 
@@ -84,5 +91,52 @@ def test_health_degrades_a_paper_strategy_but_never_promotes(tmp_path: Path) -> 
             led.move(Transition("h", "Degraded", "Active", "nope", "paper:run", "paper"))
         with pytest.raises(IllegalLifecycleTransition):
             led.move(Transition("h", "Degraded", "Validated", "back", "verdict:2", "paper"))  # only the validator
+    finally:
+        store.close()
+
+
+D = 86_400 * 10**9
+
+
+def test_daily_returns_mark_each_strategys_fills_to_the_daily_closes() -> None:
+    """The first day is the baseline (its close values what is held); returns start on the second day."""
+    fills = [StrategyFill(at_ns=D + D // 2, symbol="BTCUSDT", signed_qty=1.0, price=100.0, fee=0.1)]
+    closes = {0: {"BTCUSDT": 98.0}, D: {"BTCUSDT": 101.0}, 2 * D: {"BTCUSDT": 99.0}, 3 * D: {"BTCUSDT": 99.0}}
+    r = daily_returns_from_fills(fills, closes, capital=1_000.0)
+    assert r == pytest.approx([(101.0 - 100.0 - 0.1) / 1_000.0, (99.0 - 101.0) / 1_000.0, 0.0])
+    assert daily_returns_from_fills([], closes, capital=1_000.0) == [0.0, 0.0, 0.0]
+
+
+def test_daily_returns_keep_positions_opened_before_the_window_and_carry_missing_closes() -> None:
+    """Review 2 findings 2 and 3: fills before the first close were dropped (a long position bought before the
+    45-day window counted as flat, the sign of the return flipped), and a symbol missing from one day's closes
+    lost the whole move across that day."""
+    before = [StrategyFill(at_ns=-5 * D, symbol="BTCUSDT", signed_qty=1.0, price=50.0, fee=0.0)]
+    closes = {0: {"BTCUSDT": 100.0}, D: {"BTCUSDT": 110.0}, 2 * D: {"BTCUSDT": 121.0}}
+    assert daily_returns_from_fills(before, closes, capital=1_000.0) == pytest.approx([0.01, 0.011])
+    gap = {0: {"BTCUSDT": 100.0}, D: {}, 2 * D: {"BTCUSDT": 150.0}}  # no close on the middle day
+    assert sum(daily_returns_from_fills(before, gap, capital=1_000.0)) == pytest.approx(0.05)
+    assert daily_returns_from_fills(before, {0: {"BTCUSDT": 100.0}}, capital=1_000.0) == []  # baseline only
+    with pytest.raises(ValueError, match="capital"):
+        daily_returns_from_fills(before, closes, capital=0.0)
+
+
+def test_the_paper_process_promotes_validated_strategies_once_and_degrades_on_shortfall(tmp_path: Path) -> None:
+    """Review finding 11: Validated strategies were paper-traded without the Validated -> Paper move, and the
+    degradation monitor was never called from the paper loop."""
+    store = ValidatorStore.open(tmp_path / "v.db")
+    try:
+        led = LifecycleLedger(store.conn, now_ns=lambda: 1)
+        led.move(Transition("h", None, "Candidate", "s", "trial:1", "research"))
+        led.move(Transition("h", "Candidate", "Validated", "v", "verdict:1", "validator"))
+        assert promote_validated(led, ["h"], evidence_ref="paper:run-1") == ["h"]
+        assert led.state("h") == "Paper"
+        assert promote_validated(led, ["h"], evidence_ref="paper:run-1") == []  # already Paper: no second move
+        rng = np.random.default_rng(3)
+        fine = list(0.001 + 0.01 * rng.standard_normal(40))
+        assert check_paper_health(led, "h", fine, expected=(0.001, 0.01), evidence_ref="paper:run-1") is None
+        losing = list(-0.03 + 0.01 * rng.standard_normal(40))
+        assert check_paper_health(led, "h", losing, expected=(0.001, 0.01), evidence_ref="paper:run-1") == "Degraded"
+        assert check_paper_health(led, "h", losing, expected=None, evidence_ref="x") is None  # no expectation: no claim
     finally:
         store.close()

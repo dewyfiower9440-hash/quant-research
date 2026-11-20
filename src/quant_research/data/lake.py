@@ -10,7 +10,7 @@ import gzip
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -155,10 +155,16 @@ class BulkRead:
     files: list[tuple[str, int]]
 
 
-def read_lake_file(path: Path) -> pl.DataFrame:
-    """One immutable lake file as written, for audits (bulk vs REST validation). Research code reads
-    through the point-in-time API instead."""
-    return pl.read_parquet(path)
+def read_lake_rows(path: Path, columns: Sequence[str], predicate: pl.Expr) -> pl.DataFrame:
+    """Only the rows of one lake file that match `predicate` (pushed down to the Parquet scan, so a short
+    window of a large file is read without materialising the whole file)."""
+    return pl.scan_parquet(path).select(list(columns)).filter(predicate).collect()
+
+
+def read_lake_file(path: Path, columns: Sequence[str] | None = None) -> pl.DataFrame:
+    """One immutable lake file as written, for audits (bulk vs REST validation) and the paper feed (one
+    file at a time, only the needed columns). Research code reads through the point-in-time API instead."""
+    return pl.read_parquet(path, columns=list(columns) if columns is not None else None)
 
 
 def load_dataset(data_root: Path, dataset_id: str) -> pl.DataFrame:

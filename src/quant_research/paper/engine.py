@@ -56,11 +56,14 @@ def plan_orders(
     prices: Mapping[str, float],  # symbol -> reference price for sizing
     min_notional: float,
     qty_step: float = 1e-6,
+    filled: Mapping[str, float] | None = None,  # symbol -> FILLED quantity (reduce_only); default = positions
 ) -> list[OrderIntent]:
     """Orders that move each symbol from its current quantity to the target notional (taker, reduce-only when
-    the trade only shrinks the position). Changes below the minimum notional are skipped."""
+    the trade only shrinks the position). Changes below the minimum notional are skipped. One order per symbol
+    and decision, so its client id uses a fixed sequence 0: it does not depend on which OTHER symbols trade
+    (review finding 7). An order of that id that was canceled is not retried within the decision; the next
+    decision plans again from the filled position."""
     out: list[OrderIntent] = []
-    seq = 0
     for symbol in sorted(set(targets) | set(positions)):
         price = prices.get(symbol)
         if price is None or price <= 0:
@@ -71,11 +74,12 @@ def plan_orders(
         if qty * price < min_notional or qty <= 0:
             continue
         side: Side = "buy" if delta > 0 else "sell"
-        cur = positions.get(symbol, 0.0)
+        # reduce-only is judged on what is FILLED, not on open orders that may still be canceled (review 3)
+        cur = (positions if filled is None else filled).get(symbol, 0.0)
         reduce_only = cur != 0 and (cur > 0) != (delta > 0) and abs(delta) <= abs(cur) + 1e-12
         out.append(
             OrderIntent(
-                client_id(run_id, spec_hash, symbol, decision_ns, seq),
+                client_id(run_id, spec_hash, symbol, decision_ns, 0),
                 run_id,
                 spec_hash,
                 venue,
@@ -87,7 +91,41 @@ def plan_orders(
                 decision_ns,
             )
         )
-        seq += 1
+    return out
+
+
+def plan_portfolio(
+    *,
+    run_id: str,
+    venue: str,
+    decision_ns: int,
+    targets: Mapping[str, Mapping[str, float]],  # spec_hash -> symbol -> target signed notional
+    positions: Mapping[tuple[str, str], float],  # (spec_hash, symbol) -> that strategy's signed quantity
+    prices: Mapping[str, float],
+    min_notional: float,
+    filled: Mapping[tuple[str, str], float] | None = None,  # (spec_hash, symbol) -> filled qty (reduce_only)
+) -> list[OrderIntent]:
+    """Every strategy trades against ITS OWN position (review finding 4: a shared per-symbol position made two
+    strategies on one symbol undo each other). A strategy with a position but no target (no longer approved)
+    is flattened under its own spec hash."""
+    out: list[OrderIntent] = []
+    holders = {h for (h, _s), q in positions.items() if abs(q) > 1e-12}
+    for spec_hash in sorted(set(targets) | holders):
+        own = {s: q for (h, s), q in positions.items() if h == spec_hash}
+        own_filled = None if filled is None else {s: q for (h, s), q in filled.items() if h == spec_hash}
+        out.extend(
+            plan_orders(
+                run_id=run_id,
+                spec_hash=spec_hash,
+                venue=venue,
+                decision_ns=decision_ns,
+                targets=targets.get(spec_hash, {}),
+                positions=own,
+                prices=prices,
+                min_notional=min_notional,
+                filled=own_filled,
+            )
+        )
     return out
 
 

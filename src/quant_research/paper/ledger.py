@@ -178,7 +178,15 @@ class PaperLedger:
             )
         return cast(OrderRow, self.order(intent.client_id))
 
-    def _move(self, client_id: str, dst: OrderState, kind: str, payload: Mapping[str, object]) -> OrderRow:
+    def _move(
+        self,
+        client_id: str,
+        dst: OrderState,
+        kind: str,
+        payload: Mapping[str, object],
+        *,
+        also: tuple[str, tuple[object, ...]] | None = None,
+    ) -> OrderRow:
         cur = self.order(client_id)
         if cur is None:
             raise LedgerError(f"unknown order {client_id}")
@@ -189,12 +197,19 @@ class PaperLedger:
             self.conn.execute(
                 "update order_ set state = ?, updated_ns = ? where client_id = ?", (dst, self.now_ns(), client_id)
             )
+            if also is not None:
+                self.conn.execute(also[0], also[1])
         return cast(OrderRow, self.order(client_id))
 
     def ack(self, client_id: str, venue_order_id: str) -> OrderRow:
-        row = self._move(client_id, "ACKED", "ack", {"venue_order_id": venue_order_id})
-        self.conn.execute("update order_ set venue_order_id = ? where client_id = ?", (venue_order_id, client_id))
-        return row
+        """ACKED and the venue id in ONE transaction (review: a crash between them left an ACKED order without id)."""
+        return self._move(
+            client_id,
+            "ACKED",
+            "ack",
+            {"venue_order_id": venue_order_id},
+            also=("update order_ set venue_order_id = ? where client_id = ?", (venue_order_id, client_id)),
+        )
 
     def reject(self, client_id: str, why: str) -> OrderRow:
         return self._move(client_id, "REJECTED", "reject", {"why": why})
@@ -266,6 +281,54 @@ class PaperLedger:
         return (
             None if row is None else Position(str(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]))
         )
+
+    def strategy_positions(self) -> dict[tuple[str, str], float]:
+        """(spec_hash, symbol) -> signed quantity from the fills of that strategy's orders (the account-level
+        `position` table nets all strategies; each strategy plans against its own quantity)."""
+        out: dict[tuple[str, str], float] = {}
+        for spec_hash, symbol, side, qty in self.conn.execute(
+            "select o.spec_hash, o.symbol, o.side, f.qty from fill f join order_ o using (client_id) order by f.fill_id"
+        ):
+            key = (str(spec_hash), str(symbol))
+            out[key] = out.get(key, 0.0) + (float(qty) if side == "buy" else -float(qty))
+        return {k: v for k, v in out.items() if abs(v) > 1e-12}
+
+    def strategy_open_qty(self) -> dict[tuple[str, str], float]:
+        """(spec_hash, symbol) -> signed remaining quantity of that strategy's open orders (planned, not filled)."""
+        out: dict[tuple[str, str], float] = {}
+        for spec_hash, symbol, side, qty, filled in self.conn.execute(
+            "select spec_hash, symbol, side, qty, filled_qty from order_ "
+            "where state in ('PENDING_SUBMIT','ACKED','PARTIALLY_FILLED','UNCERTAIN')"
+        ):
+            key = (str(spec_hash), str(symbol))
+            rest = float(qty) - float(filled)
+            out[key] = out.get(key, 0.0) + (rest if side == "buy" else -rest)
+        return out
+
+    def strategy_fills(self, spec_hash: str) -> list[tuple[int, str, float, float, float]]:
+        """(at_ns, symbol, signed qty, price, fee) of one strategy's fills, in time order."""
+        return [
+            (int(at), str(sym), float(q) if side == "buy" else -float(q), float(px), float(fee))
+            for at, sym, side, q, px, fee in self.conn.execute(
+                "select f.at_ns, o.symbol, o.side, f.qty, f.price, f.fee from fill f join order_ o using (client_id) "
+                "where o.spec_hash = ? order by f.at_ns, f.fill_id",
+                (spec_hash,),
+            )
+        ]
+
+    def realized_since(self, since_ns: int) -> float:
+        """Account-level realized P&L net of fees booked at or after `since_ns` (journal position events)."""
+        total = 0.0
+        for (payload,) in self.conn.execute(
+            "select payload_json from journal where kind = 'position' and at_ns >= ?", (since_ns,)
+        ):
+            body = cast(dict[str, float], json.loads(str(payload)))
+            total += float(body.get("realized", 0.0)) - float(body.get("fee", 0.0))
+        return total
+
+    def orders_since(self, since_ns: int) -> int:
+        row = self.conn.execute("select count(*) from order_ where created_ns >= ?", (since_ns,)).fetchone()
+        return int(row[0])
 
     def positions(self) -> dict[str, Position]:
         rows = self.conn.execute("select symbol, qty, avg_price, realized_pnl, fees from position").fetchall()

@@ -9,7 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from quant_research.paper.engine import CLIENT_ID_MAX, Quote, client_id, plan_orders, simulate_fills, slippage_bps, vwap
+from quant_research.paper.engine import (
+    CLIENT_ID_MAX,
+    Quote,
+    client_id,
+    plan_orders,
+    plan_portfolio,
+    simulate_fills,
+    slippage_bps,
+    vwap,
+)
 from quant_research.paper.ledger import LedgerError, OrderIntent, PaperLedger
 
 
@@ -142,3 +151,101 @@ def test_taker_fills_partially_across_quotes_and_maker_needs_a_trade_through() -
     sell_maker = simulate_fills(_intent("sm", "sell", 1.0, limit=99.8), quotes, arrive_ns=0, max_wait_ns=10_000)
     assert [(f.at_ns, f.price) for f in sell_maker] == [(3_000, 99.8)]  # only bid 100.0 > 99.8 trades through
     assert vwap([]) is None and slippage_bps([], 1.0, "buy") is None
+
+
+def test_client_id_of_a_symbol_does_not_depend_on_which_other_symbols_trade() -> None:
+    """Review finding 7: the sequence number counted the orders that passed the filters, so ETH's id changed
+    when BTC dropped out of the list (resubmission under a new id, or a silent no-op on a canceled one)."""
+    prices = {"BTCUSDT": 50_000.0, "ETHUSDT": 2_000.0}
+
+    def plan(targets: dict[str, float]) -> list[OrderIntent]:
+        return plan_orders(
+            run_id="r",
+            spec_hash="s",
+            venue="binance",
+            decision_ns=10,
+            targets=targets,
+            positions={},
+            prices=prices,
+            min_notional=10.0,
+        )
+
+    both = plan({"BTCUSDT": 1_000.0, "ETHUSDT": 1_000.0})
+    eth_only = plan({"ETHUSDT": 1_000.0})
+    eth_a = next(o for o in both if o.symbol == "ETHUSDT")
+    assert eth_a.client_id == eth_only[0].client_id
+
+
+def test_each_strategy_trades_against_its_own_position_and_dropped_strategies_are_flattened() -> None:
+    """Review finding 4: positions were per symbol across strategies, so two strategies on one symbol undid each
+    other every tick, and a strategy that left the approved list had its position closed by the others."""
+    prices = {"BTCUSDT": 50_000.0}
+    first = plan_portfolio(
+        run_id="r",
+        venue="binance",
+        decision_ns=10,
+        targets={"A": {"BTCUSDT": 5_000.0}, "B": {"BTCUSDT": -5_000.0}},
+        positions={},
+        prices=prices,
+        min_notional=10.0,
+    )
+    assert sorted((o.spec_hash, o.side, round(o.qty, 6)) for o in first) == [("A", "buy", 0.1), ("B", "sell", 0.1)]
+    held = {("A", "BTCUSDT"): 0.1, ("B", "BTCUSDT"): -0.1}  # both filled
+    again = plan_portfolio(
+        run_id="r",
+        venue="binance",
+        decision_ns=20,
+        targets={"A": {"BTCUSDT": 5_000.0}, "B": {"BTCUSDT": -5_000.0}},
+        positions=held,
+        prices=prices,
+        min_notional=10.0,
+    )
+    assert again == []  # each is at its own target: no flip-flop
+    dropped = plan_portfolio(
+        run_id="r",
+        venue="binance",
+        decision_ns=30,
+        targets={"A": {"BTCUSDT": 5_000.0}},  # B is no longer approved
+        positions=held,
+        prices=prices,
+        min_notional=10.0,
+    )
+    assert [(o.spec_hash, o.side, round(o.qty, 6), o.reduce_only) for o in dropped] == [("B", "buy", 0.1, True)]
+
+
+def test_strategy_positions_and_loss_windows_come_from_the_ledger(ledger: PaperLedger) -> None:
+    ledger.submit(OrderIntent("a1", "run", "A", "binance", "BTCUSDT", "buy", 2.0, None, False, 1_000))
+    ledger.ack("a1", "v1")
+    ledger.fill("a1", 2.0, 100.0, fee=0.2, liquidity="taker", at_ns=1)
+    ledger.submit(OrderIntent("b1", "run", "B", "binance", "BTCUSDT", "sell", 0.5, None, False, 1_000))
+    ledger.ack("b1", "v2")
+    ledger.fill("b1", 0.5, 90.0, fee=0.05, liquidity="taker", at_ns=2)
+    assert ledger.strategy_positions() == {("A", "BTCUSDT"): 2.0, ("B", "BTCUSDT"): -0.5}
+    assert ledger.position("BTCUSDT").qty == pytest.approx(1.5)  # type: ignore[union-attr]  # the account nets
+    realized = ledger.realized_since(0)  # account level: 0.5 closed at 90 vs avg 100 = -5, fees 0.25
+    assert realized == pytest.approx(-5.25)
+    assert ledger.realized_since(10**18) == 0.0
+    assert ledger.orders_since(0) == 2 and ledger.orders_since(10**18) == 0
+
+
+def test_ack_records_the_venue_id_in_the_same_transaction(ledger: PaperLedger) -> None:
+    ledger.submit(_intent("k1"))
+    row = ledger.ack("k1", "venue-1")
+    assert row.venue_order_id == "venue-1" and row.state == "ACKED"
+
+
+def test_reduce_only_is_judged_on_the_filled_position_not_on_open_orders() -> None:
+    """Review 3: with 0 filled and an open buy of 1, target 0 planned a sell of 1 marked reduce-only; if the buy
+    is canceled, that 'reduce-only' sell opens a short."""
+    orders = plan_orders(
+        run_id="r",
+        spec_hash="s",
+        venue="binance",
+        decision_ns=20,
+        targets={"BTCUSDT": 0.0},
+        positions={"BTCUSDT": 1.0},  # filled 0 + open buy 1
+        prices={"BTCUSDT": 100.0},
+        min_notional=10.0,
+        filled={"BTCUSDT": 0.0},
+    )
+    assert len(orders) == 1 and orders[0].side == "sell" and orders[0].reduce_only is False

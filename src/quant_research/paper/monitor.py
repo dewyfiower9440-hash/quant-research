@@ -5,7 +5,7 @@ and nothing here can move a strategy back towards Active (only the validator can
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,6 +20,8 @@ from quant_research.validator.lifecycle import (
     gap_degraded,
     slippage_degraded,
 )
+
+DAY_NS = 86_400 * 10**9
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,3 +67,79 @@ def apply_health(ledger: LifecycleLedger, spec_hash: str, health: Health, *, evi
         return None
     ledger.move(Transition(spec_hash, state, "Degraded", "; ".join(health.reasons), evidence_ref, "paper"))
     return "Degraded"
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyFill:
+    at_ns: int
+    symbol: str
+    signed_qty: float  # + buy, - sell
+    price: float
+    fee: float
+
+
+def daily_returns_from_fills(
+    fills: Sequence[StrategyFill], closes: Mapping[int, Mapping[str, float]], *, capital: float
+) -> list[float]:
+    """Mark-to-market daily returns of ONE strategy. `closes`: UTC day start -> that day's closing mid per
+    symbol. The FIRST day is the baseline: every fill up to its end only builds the holdings (fills before the
+    window included, review 2 finding 2), and its closes value them. Each later day's return is the change in
+    value of the holdings at the start of the day, plus the day's fills marked to the day's close, minus fees,
+    over the strategy's capital. A symbol missing from a day's closes keeps its last known close (finding 3)."""
+    if capital <= 0:
+        raise ValueError(f"capital must be > 0, got {capital}")
+    days = sorted(closes)
+    if not days:
+        return []
+    ordered = sorted(fills, key=lambda f: f.at_ns)
+    held: dict[str, float] = {}
+    i = 0
+    first_end = days[1] if len(days) > 1 else days[0] + DAY_NS
+    while i < len(ordered) and ordered[i].at_ns < first_end:  # the baseline: holdings only
+        held[ordered[i].symbol] = held.get(ordered[i].symbol, 0.0) + ordered[i].signed_qty
+        i += 1
+    last: dict[str, float] = dict(closes[days[0]])
+    out: list[float] = []
+    for k in range(1, len(days)):
+        day = days[k]
+        end = days[k + 1] if k + 1 < len(days) else day + DAY_NS
+        close = {**last, **closes[day]}
+        pnl = sum(q * (close[s] - last[s]) for s, q in held.items() if s in close and s in last)
+        while i < len(ordered) and ordered[i].at_ns < end:
+            f = ordered[i]
+            pnl += f.signed_qty * (close.get(f.symbol, f.price) - f.price) - f.fee
+            held[f.symbol] = held.get(f.symbol, 0.0) + f.signed_qty
+            i += 1
+        out.append(pnl / capital)
+        last = close
+    return out
+
+
+def promote_validated(ledger: LifecycleLedger, spec_hashes: Sequence[str], *, evidence_ref: str) -> list[str]:
+    """Validated -> Paper (signer 'paper') for the strategies the paper process starts trading; returns the
+    moved ones. A strategy already in Paper is left alone."""
+    moved: list[str] = []
+    for h in spec_hashes:
+        if ledger.state(h) == "Validated":
+            ledger.move(Transition(h, "Validated", "Paper", "paper trading started", evidence_ref, "paper"))
+            moved.append(h)
+    return moved
+
+
+def check_paper_health(
+    ledger: LifecycleLedger,
+    spec_hash: str,
+    daily_returns: Sequence[float],
+    *,
+    expected: tuple[float, float] | None,
+    evidence_ref: str,
+    rule: DegradationRule | None = None,
+) -> StrategyState | None:
+    """The daily degradation check of one Paper strategy (review finding 11: it was never called). Without an
+    expected (mean, sd) of the daily returns nothing is claimed. Slippage and gap ratios are not yet recorded
+    per strategy (empty: those rules cannot fire here)."""
+    if expected is None:
+        return None
+    mean, sd = expected
+    health = assess(daily_returns, mean, sd, [], [], 0, 0, rule or DegradationRule())
+    return apply_health(ledger, spec_hash, health, evidence_ref=evidence_ref)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research.risk.limits import Exposure, Limits, check_order, kill_switch
+from quant_research.risk.limits import Exposure, Limits, approve_in_order, check_order, kill_switch
 from quant_research.risk.policy import FakeVerifier, Policy, PolicyError, PolicyStore, parse_policy, policy_bytes
 
 LIMITS = Limits(
@@ -104,3 +104,22 @@ def test_policy_requires_signature_monotone_version_and_expiry() -> None:
         Policy(0, LIMITS, 0, 1)
     other = FakeVerifier(b"another-key")
     assert other.verify(msg, signer.sign(msg)) is False
+
+
+def test_orders_of_one_tick_are_checked_against_the_exposure_after_the_ones_before_them() -> None:
+    """Review finding 5a/c: every order was checked against the exposure at the start of the tick, so 8 orders of
+    4,000 passed a 20,000 gross limit together; the order-rate limit never counted the tick's own orders."""
+    limits = Limits(20_000.0, 8_000.0, 3.0, 5_000.0, 5_000.0, 5_000.0, 6, 5_000.0)
+    e = Exposure(
+        equity=10_000.0, gross_notional=0.0, per_symbol={}, daily_pnl=0, weekly_pnl=0, total_pnl=0, orders_last_minute=0
+    )
+    orders = [(f"S{i}USDT", 4_000.0) for i in range(8)]
+    verdicts = approve_in_order(orders, e, limits)
+    assert [not v for v in verdicts] == [True] * 5 + [False] * 3  # the sixth would make 24,000 > 20,000
+    assert "gross notional after" in verdicts[5][0]
+    many = [(f"T{i}USDT", 100.0) for i in range(8)]
+    rate = approve_in_order(many, e, limits)
+    assert [not v for v in rate] == [True] * 6 + [False] * 2 and "orders in the last minute" in rate[6][-1]
+    at_limit = Exposure(10_000.0, 20_000.0, {"S0USDT": 4_000.0}, 0, 0, 0, 0)
+    reduce = approve_in_order([("S0USDT", -4_000.0)], at_limit, limits)
+    assert reduce == [[]]  # a reducing order is allowed at the gross limit

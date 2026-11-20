@@ -7,8 +7,8 @@ open ones are cancelled (§11 "장애 시 안전 정지")."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,3 +90,22 @@ def check_order(symbol: str, signed_notional: float, e: Exposure, limits: Limits
     if e.orders_last_minute >= limits.max_orders_per_minute:
         problems.append(f"{e.orders_last_minute} orders in the last minute >= max {limits.max_orders_per_minute}")
     return problems
+
+
+def approve_in_order(orders: Sequence[tuple[str, float]], e: Exposure, limits: Limits) -> list[list[str]]:
+    """Violations per order (symbol, signed notional), each checked against the exposure AFTER the approved
+    orders before it (review finding 5: checking every order of a tick against the starting exposure let
+    8 x 4,000 pass a 20,000 gross limit together, and the order-rate limit never saw the tick's own orders).
+    Refused orders change nothing."""
+    out: list[list[str]] = []
+    cur = e
+    for symbol, notional in orders:
+        problems = check_order(symbol, notional, cur, limits)
+        out.append(problems)
+        if not problems:
+            per = dict(cur.per_symbol)
+            before = per.get(symbol, 0.0)
+            per[symbol] = before + notional
+            gross = cur.gross_notional - abs(before) + abs(per[symbol])
+            cur = replace(cur, per_symbol=per, gross_notional=gross, orders_last_minute=cur.orders_last_minute + 1)
+    return out
