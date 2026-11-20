@@ -69,6 +69,8 @@ class SyntheticSpec:
             raise ValueError(f"unknown null {self.null!r}; one of {get_args(NullKind)}")
         if self.alpha not in get_args(Alpha):
             raise ValueError(f"unknown alpha {self.alpha!r}; one of {get_args(Alpha)}")
+        if not math.isfinite(self.strength) or (self.alpha == "mechanism" and abs(self.strength) >= 1.0):
+            raise ValueError(f"invalid strength {self.strength} for alpha {self.alpha!r}")
         if self.block_len < 1:
             raise ValueError(f"block_len must be >= 1, got {self.block_len}")
         if self.hours is not None and self.hours < 2:
@@ -111,7 +113,8 @@ def realizable_z(alpha: Alpha, rets: F64) -> float:
     (A3 review: the old formulas assumed independent symbols and an oracle that knows which hours drift).
     random -> long all symbols equally (the drifting hours are not observable); mechanism -> per symbol, fade the
     last hour (position -sign(r_{t-1})), equal weight; none -> the long-all z (a reference)."""
-    pnl = (-np.sign(rets[:-1]) * rets[1:]).mean(axis=1) if alpha == "mechanism" else rets.mean(axis=1)
+    simple = np.expm1(rets)  # the engine's returns (re-review: z on log returns differs)
+    pnl = (-np.sign(simple[:-1]) * simple[1:]).mean(axis=1) if alpha == "mechanism" else simple.mean(axis=1)
     sd = float(np.std(pnl, ddof=1))
     return float(np.mean(pnl)) / sd * math.sqrt(pnl.shape[0]) if sd > 0 else 0.0
 
@@ -126,9 +129,11 @@ def calibrate_strength(
     seed: int = 0,
     block_len: int = 24,
     iters: int = 40,
+    null: NullKind = "bootstrap",
 ) -> float:
     """The strength at which the tradable strategy of `realizable_z` reaches `z` on average over `draws` synthetic
-    holdouts of `holdout_hours` (bisection; ADR-043: the alpha strength comes from a detectability target)."""
+    holdouts of `holdout_hours` built with `null` (bisection; ADR-043). The z is the GROSS (before cost) hourly
+    z of that strategy (long all / fade the last hour), not a daily net SR. An unreachable target is refused."""
     if alpha == "none" or z <= 0:
         return 0.0
 
@@ -138,7 +143,9 @@ def calibrate_strength(
                 alpha,
                 synthetic_returns(
                     closes,
-                    SyntheticSpec(alpha=alpha, strength=strength, block_len=block_len, hours=holdout_hours + 1),
+                    SyntheticSpec(
+                        alpha=alpha, strength=strength, block_len=block_len, hours=holdout_hours + 1, null=null
+                    ),
                     np.random.default_rng(seed + i),
                 ),
             )
@@ -149,6 +156,9 @@ def calibrate_strength(
     lo, hi = 0.0, (0.9 if alpha == "mechanism" else 0.01)
     while alpha == "random" and mean_z(hi) < z and hi < 1.0:  # widen until the target is bracketed
         hi *= 2
+    at_lo, at_hi = mean_z(lo), mean_z(hi)
+    if not at_lo < z <= at_hi:
+        raise ValueError(f"calibration cannot reach z={z} for {alpha} (z at {lo}: {at_lo:.2f}, at {hi}: {at_hi:.2f})")
     for _ in range(iters):
         mid = 0.5 * (lo + hi)
         if mean_z(mid) < z:
@@ -173,8 +183,11 @@ def synthetic_returns(closes: F64, spec: SyntheticSpec, rng: np.random.Generator
     logp = np.log(np.where(np.isnan(closes), np.nan, closes))
     rets = np.diff(logp, axis=0)
     rets = np.nan_to_num(rets, nan=0.0)
-    # every null starts from DEMEANED returns: resampling raw returns planted each symbol's drift of the base
-    # period into the whole synthetic market (A3 review finding 1)
+    # every null starts from CENTRED SIMPLE returns (the engine trades simple returns): resampling raw returns
+    # planted each symbol's drift (A3 review 1), and centring log returns still left a sigma^2/2 arithmetic drift
+    # that a high-vs-low volatility long/short harvests (re-review); resampling and the sign flip act on simple
+    # returns, converted back to log returns for the price path
+    rets = np.expm1(rets)
     rets = rets - rets.mean(axis=0)
     source = rets.shape[0]
     t = source if spec.hours is None else spec.hours - 1
@@ -188,6 +201,7 @@ def synthetic_returns(closes: F64, spec: SyntheticSpec, rng: np.random.Generator
     if spec.null == "signflip":
         signs = np.where(rng.random(t // spec.block_len + 1) < 0.5, -1.0, 1.0)
         out *= np.repeat(signs, spec.block_len)[:t, None]
+    out = np.log1p(np.maximum(out, -0.99))  # back to log returns (a -100 % hour cannot exist)
     if spec.alpha == "random" and spec.strength:
         picks = rng.integers(0, 5, size=t)  # a random fifth of the hours carries a drift
         hours = np.equal(picks, 0)

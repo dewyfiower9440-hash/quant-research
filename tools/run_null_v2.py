@@ -6,12 +6,13 @@
         [--jsonl PATH]
 
 Each replication is ONE synthetic epoch: a market of warm-up 30 + selection 90 + confirmation 30 + holdout
-`--holdout-days` days is rebuilt from the real research panel (8 symbols, 1h, 2025-01..06, research role) with the
-chosen null; every family is searched on its own TEMPORARY research.db / catalog / validator.db; the positive
-confirmation survivors are submitted to the verdict rule v2 in SR order until k queries are spent (insufficient
-ones spend nothing). FWER = share of null epochs with at least one pass (Wilson 95 %). With --z > 0 the planted
-alpha's strength is derived from the oracle z (power). Every replication is appended to --jsonl as it finishes,
-so a long run can be stopped and its partial results read. Makes no claim about any real strategy."""
+`--holdout-days` days is rebuilt from the real research panel (8 symbols, 1h, 2025-01..06, research role) with
+the chosen null (centred simple returns); every family is searched on its own TEMPORARY research.db / catalog /
+validator.db; the positive confirmation survivors are submitted to the verdict rule v2 in SR order until k queries
+are spent (insufficient ones spend nothing). FWER = share of null epochs with at least one pass (Wilson 95 %).
+With --z > 0 the planted alpha's strength is calibrated per null so that long-all / fade-last-hour reaches that
+gross hourly z (power). Every replication is appended to --jsonl as it finishes, so a long run can be stopped
+and its partial results read. Makes no claim about any real strategy."""
 
 from __future__ import annotations
 
@@ -39,7 +40,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--nulls", default="signflip", help="comma list of bootstrap, permute, signflip")
     ap.add_argument("--alpha", default="none", choices=["none", "random", "mechanism"])
-    ap.add_argument("--z", type=float, default=0.0, help="oracle z of the planted alpha (0 = the null)")
+    ap.add_argument(
+        "--z", type=float, default=0.0, help="target gross hourly z of a tradable strategy on the alpha (0 = null)"
+    )
     ap.add_argument("--arm", default="random", choices=["random", "tpe"])
     ap.add_argument("--reps", type=int, default=50)
     ap.add_argument("--holdout-days", type=int, default=700)
@@ -52,6 +55,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("docs/measurements/phase5-null-v2.md"))
     ap.add_argument("--jsonl", type=Path, default=None)
     a = ap.parse_args()
+    if a.reps < 1 or a.z < 0:
+        ap.error("--reps must be >= 1 and --z >= 0")
     if a.alpha == "none" and a.z > 0:
         ap.error("--z > 0 needs a planted --alpha (random or mechanism)")
     if a.alpha != "none" and a.z <= 0:
@@ -74,6 +79,7 @@ def main() -> int:
     from quant_research.validator.null_pipeline import (
         EpochReplication,
         EpochResult,
+        NullKind,
         SyntheticSpec,
         calibrate_strength,
         hourly_closes,
@@ -88,9 +94,19 @@ def main() -> int:
 
     root = load_settings().data_root
     hour = 3_600 * 10**9
-    nulls = [parse_null(s) for s in a.nulls.split(",") if s]  # a typo is refused, never run as another null
+    nulls: list[NullKind] = [parse_null(s) for s in a.nulls.split(",") if s]  # a typo is refused
     families = [f for f in a.families.split(",") if f]
     rule = DecisionRule(k=a.k)  # v2: alpha 0.05, k (20 = ADR-022), preconditions, PSR (ADR-042)
+    if a.holdout_days < rule.min_holdout_days:  # every submission would be insufficient: a meaningless FWER 0
+        ap.error(f"--holdout-days must be >= the rule's minimum {rule.min_holdout_days}")
+    from quant_research.capture.run import git_sha, repo_root
+
+    code_sha = git_sha(repo_root())
+    import hashlib
+
+    sources = ["null_pipeline.py", "verdict.py", "store.py"]
+    folder = repo_root() / "src" / "quant_research" / "validator"
+    code_sha += "+src:" + hashlib.sha256(b"".join((folder / f).read_bytes() for f in sources)).hexdigest()[:12]
     t0 = time.monotonic()
     catalog = Catalog.open(root / "meta" / "catalog.db")
     try:
@@ -110,7 +126,10 @@ def main() -> int:
     rets = np.nan_to_num(np.diff(np.log(closes), axis=0))
     sigma_h = float(np.median(np.std(rets, axis=0)))
     hours = (WARMUP + SEL + CONF + a.holdout_days) * 24 + 24
-    strength = calibrate_strength(a.alpha, a.z, closes, holdout_hours=a.holdout_days * 24, seed=a.seed)
+    strengths = {  # calibrated per null: the same strength means a different z under each null (re-review)
+        null: calibrate_strength(a.alpha, a.z, closes, holdout_hours=a.holdout_days * 24, seed=a.seed, null=null)
+        for null in nulls
+    }
     factory = {"random": random_factory, "tpe": tpe_factory}[a.arm]
     budget = SearchBudget(s1_count=a.s1_count, top_k=a.top_k, promote_rate=0.05, s3_top=a.s3_top)
     load_s = time.monotonic() - t0
@@ -119,6 +138,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="qr-null-"))
     try:
         for null in nulls:
+            strength = strengths[null]
             spec = SyntheticSpec(alpha=a.alpha, strength=strength, null=null, hours=hours)  # type: ignore[arg-type]
             reps: list[EpochReplication] = []
             for i in range(a.reps):
@@ -162,6 +182,10 @@ def main() -> int:
                     "holdout_days": a.holdout_days,
                     "seed": seed,
                     "rule_hash": rule.hash(),
+                    "code_sha": code_sha,
+                    "families": families,
+                    "budget": {"s1_count": a.s1_count, "top_k": a.top_k, "s3_top": a.s3_top, "promote_rate": 0.05},
+                    "block_len": spec.block_len,
                     "rep": i,
                     "candidates": r.candidates,
                     "queries": r.queries,
@@ -183,7 +207,8 @@ def main() -> int:
         "arm": a.arm,
         "alpha": a.alpha,
         "z": a.z,
-        "strength": strength,
+        "strength": strengths,
+        "z_meaning": "gross hourly z (simple returns) of long-all / fade-last-hour on the synthetic holdout",
         "sigma_h": sigma_h,
         "holdout_days": a.holdout_days,
         "k": a.k,

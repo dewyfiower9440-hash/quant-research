@@ -262,18 +262,23 @@ def test_synthetic_markets_can_be_longer_than_the_base_and_three_nulls_are_avail
     for null in ("bootstrap", "permute", "signflip"):
         r = synthetic_returns(closes, SyntheticSpec(null=null, hours=hours), np.random.default_rng(5))
         assert r.shape == (hours - 1, closes.shape[1])
-        # every value comes from the demeaned base sample (up to its sign): no invented returns
-        assert np.isin(np.round(np.abs(r), 12), np.round(np.abs(raw - raw.mean(axis=0)), 12)).all()
+        # every value comes from the centred base sample (up to its sign): no invented returns
+        centred_simple = np.expm1(raw) - np.expm1(raw).mean(axis=0)
+        assert np.isin(np.round(np.abs(np.expm1(r)), 12), np.round(np.abs(centred_simple), 12)).all()
     flip = synthetic_returns(closes, SyntheticSpec(null="signflip", hours=hours), np.random.default_rng(6))
     assert abs(float(np.mean(flip))) < abs(float(np.mean(raw))) + 2e-5  # the sign flip removes the market drift
     perm = synthetic_returns(closes, SyntheticSpec(null="permute", block_len=24), np.random.default_rng(7))
-    centred = raw[:, 0] - raw[:, 0].mean()
-    assert perm.shape == raw.shape and np.allclose(np.sort(perm[:, 0]), np.sort(centred))  # a reordering
+    centred = np.expm1(raw[:, 0]) - np.expm1(raw[:, 0]).mean()
+    assert perm.shape == raw.shape and np.allclose(np.sort(np.expm1(perm[:, 0])), np.sort(centred))  # a reordering
     assert not np.array_equal(perm[:, 0], raw[:, 0])
     with pytest.raises(ValueError):
         SyntheticSpec(hours=1)
     with pytest.raises(ValueError, match="null"):
         SyntheticSpec(null="permutation")  # type: ignore[arg-type]  # a typo must not silently run the bootstrap
+    with pytest.raises(ValueError, match="strength"):
+        SyntheticSpec(alpha="mechanism", strength=1.0)  # |coef| >= 1 makes the AR path explode
+    with pytest.raises(ValueError, match="strength"):
+        SyntheticSpec(alpha="random", strength=float("nan"))
 
 
 def test_every_null_is_demeaned_so_the_base_drift_is_not_planted(base: Panel) -> None:
@@ -282,8 +287,12 @@ def test_every_null_is_demeaned_so_the_base_drift_is_not_planted(base: Panel) ->
     _, _, closes = hourly_closes(base)
     raw = np.nan_to_num(np.diff(np.log(closes), axis=0))
     perm = synthetic_returns(closes, SyntheticSpec(null="permute"), np.random.default_rng(7))
-    assert np.allclose(perm.mean(axis=0), 0.0, atol=1e-15)  # a full permutation pass of demeaned returns
-    assert np.allclose(np.sort(perm[:, 0]), np.sort(raw[:, 0] - raw[:, 0].mean()))
+    simple = np.expm1(perm)  # the engine trades SIMPLE returns: those are centred (re-review: a log-centred null
+    assert np.allclose(simple.mean(axis=0), 0.0, atol=1e-15)  # kept a sigma^2/2 arithmetic drift per symbol)
+    centred = np.expm1(raw) - np.expm1(raw).mean(axis=0)
+    assert np.allclose(np.sort(simple[:, 0]), np.sort(centred[:, 0]))
+    flip = np.expm1(synthetic_returns(closes, SyntheticSpec(null="signflip", hours=20_001), np.random.default_rng(8)))
+    assert np.all(np.abs(flip.mean(axis=0)) < 4 * flip.std(axis=0) / np.sqrt(flip.shape[0]))  # mean 0 in simple space
 
 
 def test_alpha_strength_is_calibrated_so_a_tradable_strategy_reaches_the_target_z(base: Panel) -> None:
@@ -293,14 +302,14 @@ def test_alpha_strength_is_calibrated_so_a_tradable_strategy_reaches_the_target_
     _, _, closes = hourly_closes(base)
     hours = 24 * 300
     for alpha in ("random", "mechanism"):
-        s = calibrate_strength(alpha, 3.0, closes, holdout_hours=hours, draws=16, seed=1, iters=25)  # type: ignore[arg-type]
+        s = calibrate_strength(alpha, 3.0, closes, holdout_hours=hours, draws=16, seed=1, iters=25, null="signflip")  # type: ignore[arg-type]
         assert s > 0
         zs = [
             realizable_z(
                 alpha,
                 synthetic_returns(
                     closes,
-                    SyntheticSpec(alpha=alpha, strength=s, hours=hours + 1),  # type: ignore[arg-type]
+                    SyntheticSpec(alpha=alpha, strength=s, hours=hours + 1, null="signflip"),  # type: ignore[arg-type]
                     np.random.default_rng(100 + i),
                 ),
             )
@@ -308,6 +317,8 @@ def test_alpha_strength_is_calibrated_so_a_tradable_strategy_reaches_the_target_
         ]
         assert 2.3 < float(np.mean(zs)) < 3.7  # the target on fresh draws (sd of the mean of 16 z's ~0.25)
     assert calibrate_strength("none", 3.0, closes, holdout_hours=hours, draws=2, seed=1) == 0.0
+    with pytest.raises(ValueError, match="cannot reach"):  # an unreachable target is refused, not returned
+        calibrate_strength("mechanism", 500.0, closes, holdout_hours=hours, draws=2, seed=1, iters=5)
     assert parse_null("signflip") == "signflip"
     with pytest.raises(ValueError, match="unknown null"):
         parse_null("sign_flip")
