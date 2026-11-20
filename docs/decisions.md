@@ -467,3 +467,17 @@
 - **기준 사례:** 계열마다 그 효과만 심은 합성 패널에서 S1 이벤트 수익의 HAC t > 3, 같은 템플릿이 랜덤 워크에서는 |t| < 3(`tests/strategy/test_families.py`). 성과 증거가 아니라 구현이 의도한 방향의 신호를 읽는다는 확인이다.
 - **리뷰 반영(B6):** `rank_xs`는 전체 구성원 안에서 순위를 매기지만 거래는 유동성 상위 n개만 가능하다. 그래서 순위 끝이 비유동 종목인 `liquidity`·`low_vol`은 유니버스 n을 (50, 100)으로 둔다(`WIDE_FAMILIES`). n이 5~20이면 "최저 거래대금 매수"가 한 번도 체결되지 않았다. 패널의 펀딩 피처는 8시간 환산 요율(rate × 8 / 지급 주기)이고, 결제 현금흐름은 실제 지급 요율 그대로다. `templates()`는 v1 5계열만 돌려준다(스모크 도구·Director). 새 계열 포함은 `all_templates()`다. 패널에 필요한 데이터(펀딩·프리미엄)가 없으면 탐색을 trial 전에 거부한다(`pipeline.missing_inputs`).
 - **수용한 한계(기록):** S1 라벨은 가격만 본다. 그래서 `funding_carry`의 S1 점수에는 캐리 현금흐름이 없고, 그 계열의 기준 사례도 가격 효과로 방향만 확인한다. 캐리 자체는 S2·S3(펀딩 반영)에서 평가된다. S1 승격이 캐리 후보를 덜 고를 수 있다는 점은 캠페인 결과를 해석할 때 고려한다.
+
+### ADR-047 보강 (2026-11-20, B7 구현)
+- **순수 핵심** `search/campaign.py`: 셀 = (계열, 주기, top-M, 연구 창), 배치마다 원인 코드 하나(`classify`: data_missing → no_signal → sparse → cost_dominated/no_signal → unstable → candidate 순), 전이(`transitions`: cost_dominated → 더 느린 봉, sparse → 더 넓은 유니버스, unstable → 다른 연구 창). 큐에 든 전이 대상이 먼저 돌고, 그다음은 셀 단위 할인 Thompson bandit이 고른다. 셀은 `max_pulls`회 뒤, 후보 1회 뒤, data_missing 뒤 은퇴한다. 상태는 JSON으로 직렬화되며 재시작해도 같은 결정을 내린다. 끝나면 `negative_report`가 원인 분포, 셀별 최고 S2 SR, 다음 데이터 tier(셀이 요청한 것 우선)를 보고한다.
+- **구동기** `search/campaign_runner.py`: 패널 공급자·게이트·중지 확인·저장을 주입받는다. 배치 fold = `<run>:<cell>:<pull>`, 시드는 (캠페인 시드, 셀, pull)에서 정해진다. 상태 저장 전에 중단된 배치를 다시 돌리면 S1·S2·S3·보상 trial을 모두 재사용한다(테스트로 확인). 새로 생기는 것은 S0 중복 기록(평가 아님, N_total에 들지 않음)뿐이다. 창의 첫 달은 웜업이고, 나머지 달을 7:3으로 선택·확인 구간으로 나눈다. 각 구간에는 그 이전 행 전체를 피처 웜업으로 붙인다. S3 상위 자격은 평균 총노출 ≥ 5%다.
+- **도구** `tools/run_campaign.py`: 실데이터 패널은 B3 저장소에서 가져오고 메모리에는 한 번에 하나만 둔다. 배치마다 `run/campaign-<run>.json`에 저장하고, 중단 조건은 연구 게이트·`--max-hours`·`run/STOP-campaign`이다. 끝나면 보고서 `docs/measurements/campaign-<run>.md`와 데이터 요청 큐 `run/data-queue.json`을 쓴다. 후보는 validator 판정 전이다(B8이 제출을 맡는다).
+- **리뷰 반영(B7):**
+  - 후보 기준을 S3 SR > 0에서 다음 조건으로 올렸다: 같은 확인 구간에서 이번 캠페인이 판정한 S3 수 N에 대한 귀무 기대 최대 SR(Bailey-LdP, 분산 1/일수) 초과. 기준이 0이면 귀무 셀의 절반이 후보가 되어 validator 예산 k를 쓴다.
+  - 최고 S2는 S3 자격자(노출 ≥ 5%)만 놓고 고르고, 그 S3는 `s2_trial_id`로 맞춘다. fidelity 표본은 후보를 만들지 않는다. 후보의 S3 trial id는 기록에 남는다(B8 제출 대상).
+  - 전이 폐포는 모든 전이 종류에 대한 하나의 BFS로 구한다. 이전 방식은 혼합 경로(느린 봉 → 넓은 유니버스 → 다른 창) 셀이 bandit 팔에 없어 KeyError가 났다.
+  - 예외가 난 배치는 원인 `error`로 기록하고 셀을 은퇴시킨다. 무인 캠페인이 같은 셀에서 영원히 멈추지 않는다.
+  - bandit 보상은 검증 구간 SR(≥ 0)이다(초당 보상은 재실행 배치를 부풀렸다). 사전값은 그 척도에 맞추고 최소 예산은 0이다(이전 사전값은 사실상 균등 무작위였다).
+  - 배치마다 무작위 탐색만 쓴다(배치마다 새 TPE study는 시작 무작위 표본만 낸다).
+  - 웜업은 최대 1,200봉이다(메모리·S3 비용).
+  - 도구 변경: `run/research.lock` 보유(다른 연구 프로세스의 running trial을 abandoned로 덮지 않는다), 설정·그리드를 상태에 저장하고 재개 때 다르면 거부(exit 1), run-id 형식 검증, 보고서 경로는 저장소 기준, `--max-hours`는 budget 종료(exit 0).
