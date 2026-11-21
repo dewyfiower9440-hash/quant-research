@@ -25,6 +25,9 @@ from quant_research.validator.store import rule_hash
 F64 = NDArray[np.float64]
 
 
+STRESS_VERSION = 2  # null_pipeline.stress_latencies: lagx2 is at least two bars (B8 review)
+
+
 @dataclass(frozen=True, slots=True)
 class DecisionRule:
     alpha: float = 0.05
@@ -43,9 +46,11 @@ class DecisionRule:
     min_holdout_days: int = 600  # 250 d exceeded 1.5 x alpha/k (docs/measurements/phase5-verdict-calibration.md)
     require_psr: bool = True  # the skew/kurtosis-aware PSR must reject too
     # the meaning of the lag stresses (null_pipeline.stress_latencies); 2 = lagx2 at least two bars (B8 review)
-    stress_version: int = 2
+    stress_version: int = 2  # STRESS_VERSION
 
     def __post_init__(self) -> None:
+        if self.stress_version != STRESS_VERSION:  # a label the code does not implement would lie
+            raise ValueError(f"stress_version {self.stress_version} is not implemented (only {STRESS_VERSION})")
         if (
             not 0 < self.alpha < 1
             or self.k < 1

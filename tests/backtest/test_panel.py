@@ -1,7 +1,9 @@
 """Phase 2 step 3: point-in-time decision panel (synthetic 1m data, real lake layout for the loader)."""
 
+import math
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -197,3 +199,92 @@ def test_the_funding_feature_is_an_8h_equivalent_rate_while_settlements_keep_the
     last = frame.filter(pl.col("decision_ns") == frame["decision_ns"].max()).sort("symbol")
     assert last["funding_rate"].to_list() == pytest.approx([0.0002, 0.0001])  # A pays every 4 h: twice per 8 h
     assert settlements(funding, None)["rate"].to_list() == pytest.approx([0.0001, 0.0001])
+
+
+def _reference_select_top_liquidity(frame: pl.DataFrame, n: int, window_days: int = 30) -> pl.DataFrame:
+    """The pre-fix implementation (quadratic in days per symbol), kept as the reference semantics."""
+    day = 86_400 * 10**9
+    with_day = frame.sort(["symbol", "decision_ns"]).with_columns(
+        (pl.col("decision_ns") // day).alias("_day"), pl.col("quote_volume").fill_null(0.0).alias("_qv")
+    )
+    per_bar = with_day.unique(subset=["symbol", "bar_start_ns"], keep="first", maintain_order=True)
+    daily = per_bar.group_by("symbol", (pl.col("bar_start_ns") // day).alias("_bar_day")).agg(pl.col("_qv").sum())
+    days = with_day.select("symbol", "_day").unique()
+    trailing = (
+        days.join(daily, on="symbol", how="left")
+        .filter((pl.col("_bar_day") < pl.col("_day")) & (pl.col("_bar_day") >= pl.col("_day") - window_days))
+        .group_by("symbol", "_day")
+        .agg(pl.col("_qv").sum().alias("_trailing"))
+    )
+    first = with_day.filter(pl.col("decision_ns") == pl.col("decision_ns").min().over("_day"))
+    ranked = (
+        first.join(trailing, on=["symbol", "_day"], how="left")
+        .filter(pl.col("member") & pl.col("_trailing").is_not_null())
+        .with_columns(pl.col("_trailing").rank("ordinal", descending=True).over("_day").alias("_rank"))
+        .filter(pl.col("_rank") <= n)
+        .select("symbol", "_day", pl.lit(True).alias("selected"))
+    )
+    return (
+        with_day.join(ranked, on=["symbol", "_day"], how="left")
+        .with_columns((pl.col("selected").fill_null(False) & pl.col("member")).alias("selected"))
+        .drop("_day", "_qv")
+        .sort(["decision_ns", "symbol"])
+    )
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_liquidity_selection_matches_the_reference_without_its_quadratic_join(seed: int) -> None:
+    """Campaign c1 hit the 2 GB research gate: the trailing volume joined every (symbol, day) with all of that
+    symbol's days (155 symbols x 1,100 days^2 = 190 M rows, 4.4 GB on a 36-month 1d panel). The rewrite uses
+    cumulative sums with as-of joins; the selection must be identical (integer volumes keep the sums exact)."""
+    rng = np.random.default_rng(seed)
+    day, hour = 86_400 * 10**9, 3_600 * 10**9
+    rows: list[tuple[str, int, int | None, float, bool]] = []
+    for k in range(7):
+        for d in range(60):
+            if rng.random() < 0.15:  # missing days and late listings
+                continue
+            for h in (0, 8, 16):
+                t = T0 + d * day + h * hour
+                bar = None if rng.random() < 0.05 else t - hour
+                rows.append((f"S{k}", t, bar, float(rng.integers(0, 50)), bool(rng.random() < 0.9)))
+    frame = pl.DataFrame(
+        rows,
+        schema={
+            "symbol": pl.String,
+            "decision_ns": pl.Int64,
+            "bar_start_ns": pl.Int64,
+            "quote_volume": pl.Float64,
+            "member": pl.Boolean,
+        },
+        orient="row",
+    )
+    for n, window in ((2, 30), (3, 7), (5, 1)):
+        got = select_top_liquidity(frame, n, window_days=window)
+        want = _reference_select_top_liquidity(frame, n, window_days=window)
+        assert got.select("symbol", "decision_ns", "selected").equals(want.select("symbol", "decision_ns", "selected"))
+        assert got["selected"].sum() > 0  # not a pass by both selecting nothing
+
+
+def test_a_non_finite_volume_counts_as_zero_and_does_not_poison_later_days() -> None:
+    """Review of F-020: with cumulative sums a NaN / inf bar volume made every later trailing sum NaN, ranked first,
+    so the symbol was selected nearly every day. It counts as zero volume."""
+    day, hour = 86_400 * 10**9, 3_600 * 10**9
+    rows: list[tuple[str, int, int, float, bool]] = []
+    for d in range(20):
+        for sym, vol in (("A", 10.0), ("B", 20.0)):
+            bad = sym == "A" and d == 2
+            rows.append((sym, T0 + d * day, T0 + d * day - hour, math.nan if bad else vol, True))
+    frame = pl.DataFrame(
+        rows,
+        schema={
+            "symbol": pl.String,
+            "decision_ns": pl.Int64,
+            "bar_start_ns": pl.Int64,
+            "quote_volume": pl.Float64,
+            "member": pl.Boolean,
+        },
+        orient="row",
+    )
+    chosen = select_top_liquidity(frame, 1, window_days=3).filter(pl.col("selected"))
+    assert set(chosen["symbol"].to_list()) == {"B"}  # B always trades more; A's NaN day never makes A "largest"

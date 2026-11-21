@@ -40,6 +40,7 @@ def main() -> int:
     from quant_research.catalog.universe_load import PIT_RULE
     from quant_research.config import load_settings
     from quant_research.data.access import PointInTime
+    from quant_research.log import configure_logging
     from quant_research.research.ledger import TrialLedger
     from quant_research.research.store import ResearchStore
     from quant_research.search.campaign_runner import MAX_WARMUP_BARS
@@ -48,8 +49,10 @@ def main() -> int:
     from quant_research.validator.store import ValidatorStore, open_readonly
     from quant_research.validator.verdict import DecisionRule
 
+    settings = load_settings()
+    configure_logging(settings.log_level, json=True)  # logs to stderr: stdout carries the ack bits only
     log = structlog.get_logger("run_validator")
-    root = load_settings().data_root
+    root = settings.data_root
     try:
         lock = InstanceLock(root / "run" / "validator.lock").__enter__()
     except AlreadyRunningError as e:

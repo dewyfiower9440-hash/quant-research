@@ -243,5 +243,8 @@ def test_a_retried_request_checks_the_budget_before_reading_again(venv: Env, pan
 
 def test_the_rule_hash_identifies_the_stress_definition() -> None:
     """Re-review 3: lagx2 changed meaning but the rule hash did not; the hash must name the stress definition."""
-    assert DecisionRule().stress_version == 2
-    assert DecisionRule().hash() != replace(DecisionRule(), stress_version=1).hash()
+    from dataclasses import asdict
+
+    assert DecisionRule().stress_version == 2 and "stress_version" in asdict(DecisionRule())  # part of the hash
+    with pytest.raises(ValueError, match="stress_version"):  # a version the code does not implement
+        DecisionRule(stress_version=1)

@@ -179,17 +179,44 @@ def select_top_liquidity(frame: pl.DataFrame, n: int, *, window_days: int = 30) 
     quote volume over the previous `window_days` days of AVAILABLE bars; held for that day."""
     with_day = frame.sort(["symbol", "decision_ns"]).with_columns(
         (pl.col("decision_ns") // DAY_NS).alias("_day"),
-        pl.col("quote_volume").fill_null(0.0).alias("_qv"),
+        # a NaN / inf volume would poison every later cumulative sum of the symbol (review): it counts as 0
+        pl.when(pl.col("quote_volume").is_finite()).then(pl.col("quote_volume")).otherwise(0.0).alias("_qv"),
     )
     # quote volume of the as-of bars, counted once per bar (consecutive decisions may see the same bar)
     per_bar = with_day.unique(subset=["symbol", "bar_start_ns"], keep="first", maintain_order=True)
-    daily = per_bar.group_by("symbol", (pl.col("bar_start_ns") // DAY_NS).alias("_bar_day")).agg(pl.col("_qv").sum())
-    days = with_day.select("symbol", "_day").unique()
+    # trailing sum over bar days in [day - window, day - 1] as a difference of cumulative sums (as-of joins): the
+    # earlier (symbol, day) x (symbol, bar day) join was quadratic in days (4.4 GB on a 36-month 1d panel)
+    daily = (
+        per_bar.drop_nulls("bar_start_ns")
+        .group_by("symbol", (pl.col("bar_start_ns") // DAY_NS).alias("_bar_day"))
+        .agg(pl.col("_qv").sum())
+        .sort(["symbol", "_bar_day"])
+        .with_columns(
+            pl.col("_qv").cum_sum().over("symbol").alias("_cum"),
+            pl.int_range(1, pl.len() + 1).over("symbol").alias("_cnt"),
+        )
+        .select("symbol", "_bar_day", "_cum", "_cnt")
+    )
+    days = (
+        with_day.select("symbol", "_day")
+        .unique()
+        .with_columns((pl.col("_day") - 1).alias("_hi"), (pl.col("_day") - window_days - 1).alias("_lo"))
+    )
+
+    def upto(key: str, suffix: str) -> pl.DataFrame:
+        return (
+            days.sort(["symbol", key])
+            .join_asof(
+                daily, left_on=key, right_on="_bar_day", by="symbol", strategy="backward", check_sortedness=False
+            )
+            .select("symbol", "_day", pl.col("_cum").alias(f"_cum{suffix}"), pl.col("_cnt").alias(f"_cnt{suffix}"))
+        )
+
     trailing = (
-        days.join(daily, on="symbol", how="left")
-        .filter((pl.col("_bar_day") < pl.col("_day")) & (pl.col("_bar_day") >= pl.col("_day") - window_days))
-        .group_by("symbol", "_day")
-        .agg(pl.col("_qv").sum().alias("_trailing"))
+        upto("_hi", "_hi")
+        .join(upto("_lo", "_lo"), on=["symbol", "_day"], how="left")
+        .filter((pl.col("_cnt_hi").fill_null(0) - pl.col("_cnt_lo").fill_null(0)) > 0)  # at least one bar day
+        .select("symbol", "_day", (pl.col("_cum_hi") - pl.col("_cum_lo").fill_null(0.0)).alias("_trailing"))
     )
     first = with_day.filter(pl.col("decision_ns") == pl.col("decision_ns").min().over("_day"))
     ranked = (
