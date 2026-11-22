@@ -14,6 +14,8 @@ from quant_research.search.campaign import (
     Cell,
     classify,
     negative_report,
+    next_round,
+    preregistered_groups,
     transitions,
 )
 
@@ -151,6 +153,142 @@ def test_every_cell_a_record_can_add_is_a_bandit_arm_including_mixed_transition_
     other = state.next_cell(bandit, seed=1, seq=2)
     assert other == Cell("trend", "4h", 100, "w1") and other is not None
     bandit.update(other.key, 0.0)  # no KeyError
+
+
+FUNDING = "binance.um.bulk.funding"
+METRICS = "binance.um.bulk.metrics_5m"
+
+
+def _retire_all(state: CampaignState, cells: list[Cell]) -> None:
+    for c in cells:
+        for _ in range(state.max_pulls):
+            if c.key in state.retired:
+                break
+            state.record(c, "no_signal", _summary(s1_finite=0), reward=0.0)
+
+
+def test_the_preregistered_grid_comes_in_groups_w2_then_w1_then_1h_then_top30() -> None:
+    groups = preregistered_groups(("trend", "funding_carry"))
+    assert [len(g) for g in groups] == [4, 4, 4, 12]
+    assert {c.key for c in groups[0]} == {
+        f"{f}@{tf}|top100|w2" for f in ("trend", "funding_carry") for tf in ("4h", "1d")
+    }
+    assert {c.window for c in groups[1]} == {"w1"} and {c.timeframe for c in groups[1]} == {"4h", "1d"}
+    assert {c.timeframe for c in groups[2]} == {"1h"} and {c.top_m for c in groups[2]} == {100}
+    assert {c.top_m for c in groups[3]} == {30} and {c.window for c in groups[3]} == {"w1", "w2"}
+
+
+def test_a_round_reopens_only_the_cells_whose_missing_data_arrived_and_renews_their_pulls() -> None:
+    groups = preregistered_groups(("trend", "funding_carry"))
+    state = CampaignState.new("run", groups[0], max_pulls=2)
+    funding_cell = Cell("funding_carry", "4h", 100, "w2")
+    state.record(funding_cell, "data_missing", _summary(data_missing=(FUNDING,)), reward=0.0)
+    _retire_all(state, [c for c in groups[0] if c != funding_cell])
+    plan = next_round(state, {"w2": {FUNDING: "v1"}}, groups)
+    assert plan.reopened == (funding_cell.key,)  # the others retired by pulls: never reopened
+    state.start_round(plan, {"w2": {FUNDING: "v1"}})
+    assert state.round == 2 and funding_cell.key in state.eligible()
+    state.record(funding_cell, "no_signal", _summary(s1_finite=0), reward=0.0)
+    assert funding_cell.key not in state.retired  # a reopened cell gets max_pulls new batches
+    state.record(funding_cell, "no_signal", _summary(s1_finite=0), reward=0.0)
+    assert funding_cell.key in state.retired
+
+
+def test_a_round_does_not_reopen_a_cell_for_data_of_another_window_or_the_same_version() -> None:
+    groups = preregistered_groups(("funding_carry",))
+    cell = Cell("funding_carry", "4h", 100, "w2")
+    state = CampaignState.new("run", [cell], max_pulls=2)
+    state.record(cell, "data_missing", _summary(data_missing=(FUNDING,)), reward=0.0)
+    assert cell.key not in next_round(state, {"w1": {FUNDING: "v1"}}, groups).reopened  # w1 rows only
+    plan = next_round(state, {"w2": {FUNDING: "v1"}}, groups)
+    state.start_round(plan, {"w2": {FUNDING: "v1"}})
+    state.record(cell, "data_missing", _summary(data_missing=(FUNDING,)), reward=0.0)  # still no rows in the panel
+    assert cell.key not in next_round(state, {"w2": {FUNDING: "v1"}}, groups).reopened  # same data, same failure
+    assert cell.key in next_round(state, {"w2": {FUNDING: "v2"}}, groups).reopened  # a new data version
+
+
+def test_a_round_adds_the_next_grid_group_once_and_skips_cells_already_in_the_campaign() -> None:
+    groups = preregistered_groups(("trend",))
+    state = CampaignState.new("run", groups[0], max_pulls=1)
+    state.record(Cell("trend", "4h", 100, "w2"), "unstable", _summary(s3_sr=-0.1), reward=0.0)  # queues w1 4h
+    _retire_all(state, groups[0])
+    plan = next_round(state, {}, groups)
+    assert set(plan.added) == {"trend@1d|top100|w1"}  # trend@4h|top100|w1 came in by the transition
+    state.start_round(plan, {})
+    assert state.cells.count("trend@1d|top100|w1") == 1 and state.round == 2
+    _retire_all(state, [Cell.parse(k) for k in state.cells])
+    nxt = next_round(state, {}, groups)
+    assert {Cell.parse(k).timeframe for k in nxt.added} == {"1h"}  # group 3, not group 4
+
+
+def test_a_round_with_nothing_to_open_waits_for_the_outstanding_data() -> None:
+    groups = preregistered_groups(("trend", "oi_like"))
+    state = CampaignState.new("run", [c for g in groups for c in g], max_pulls=1)
+    for key in list(state.cells):
+        cell = Cell.parse(key)
+        if cell.family == "oi_like":
+            state.record(cell, "data_missing", _summary(data_missing=(METRICS,)), reward=0.0)
+        else:
+            state.record(cell, "no_signal", _summary(s1_finite=0), reward=0.0)
+    plan = next_round(state, {"w1": {FUNDING: "v1"}, "w2": {FUNDING: "v1"}}, groups)
+    assert plan.empty and plan.waiting == (METRICS,)
+
+
+def test_cells_a_round_adds_become_bandit_arms_so_the_next_pick_works() -> None:
+    """Review (step 2) 1: no transition reaches 1h or top30, so a G3 round left the bandit without arms for its cells
+    and `next_cell` raised 'no eligible family' in the same process."""
+    groups = preregistered_groups(("trend",))
+    state = CampaignState.new("run", groups[0], max_pulls=1)
+    bandit = FamilyBandit(tuple(c.key for c in state.all_cells()), BanditPrior(min_pulls=0.0))
+    for _ in range(3):  # G2, then G3, then G4
+        _retire_all(state, [Cell.parse(k) for k in state.cells])
+        plan = next_round(state, {}, groups)
+        assert plan.added
+        state.start_round(plan, {})
+        bandit.add_arms(c.key for c in state.all_cells())
+        pick = state.next_cell(bandit, seed=3, seq=len(state.history))
+        assert pick is not None and pick.key in plan.added
+        bandit.update(pick.key, 0.0)  # no KeyError
+
+
+def test_a_cell_is_not_reopened_by_alternating_reports_over_unchanged_data() -> None:
+    """Review (step 2) 2: only the last report's versions were kept, so {A} / {B} reports reopened it forever."""
+    groups = preregistered_groups(("funding_carry",))
+    cell = Cell("funding_carry", "4h", 100, "w2")
+    avail = {"w2": {FUNDING: "v1", METRICS: "v1"}}
+    state = CampaignState.new("run", [cell], max_pulls=1)
+    reopened = 0
+    for needs in ((FUNDING,), (METRICS,), (FUNDING,), (METRICS,)):
+        state.record(cell, "data_missing", _summary(data_missing=needs), reward=0.0)
+        plan = next_round(state, avail, groups)
+        if cell.key in plan.reopened:
+            reopened += 1
+            state.start_round(plan, avail)
+    assert reopened == 2  # once per dataset version, then never again on the same data
+
+
+def test_a_state_after_a_round_round_trips_through_json() -> None:
+    groups = preregistered_groups(("funding_carry",))
+    cell = Cell("funding_carry", "4h", 100, "w2")
+    state = CampaignState.new("run", [cell], max_pulls=1)
+    state.record(cell, "data_missing", _summary(data_missing=(FUNDING,)), reward=0.0)
+    state.start_round(next_round(state, {"w2": {FUNDING: "v1"}}, groups), {"w2": {FUNDING: "v1"}})
+    assert state.pull_base and state.data_versions
+    again = CampaignState.from_json(json.loads(json.dumps(state.to_json())))
+    assert again.to_json() == state.to_json() and again.data_versions == {cell.key: {FUNDING: "v1"}}
+
+
+def test_a_state_saved_before_rounds_existed_restores_as_round_one() -> None:
+    cell = Cell("trend", "4h", 100, "w2")
+    state = CampaignState.new("run", [cell], max_pulls=3)
+    state.record(cell, "no_signal", _summary(s1_finite=0), reward=0.0)
+    raw = state.to_json()
+    for key in ("round", "pull_base", "data_versions"):
+        raw.pop(key)
+    restored = CampaignState.from_json(json.loads(json.dumps(raw)))
+    assert restored.round == 1 and restored.pull_base == {} and restored.pulls == {cell.key: 1}
+    again = CampaignState.from_json(json.loads(json.dumps(state.to_json())))
+    assert again.to_json() == state.to_json()
 
 
 def test_an_error_retires_the_cell_and_records_the_message() -> None:

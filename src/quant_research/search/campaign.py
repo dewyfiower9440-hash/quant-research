@@ -12,9 +12,10 @@ stopping ("failure is not the end", root cause 4):
     candidate      -> the cell's best S3 survivor goes to the validator; the cell retires
 
 Queued transition targets run first, then a discounted Thompson bandit over the cells that are not retired. A cell
-retires after `max_pulls` batches, after a candidate or after data_missing. The campaign ends when nothing is
-eligible (or on the caller's budget, stop file or resource gate); an ended campaign without candidates reports a
-negative result and the next data tiers. Everything here is pure and JSON-serialisable (restart = same decisions).
+retires after `max_pulls` batches, after a candidate or after data_missing. When nothing is eligible the campaign
+does not end (ADR-049): `next_round` reopens the data_missing cells whose data has arrived and adds the next
+pre-registered grid group; only when neither exists does the caller stop with `waiting_data` (the next scheduled
+tick computes the round again). Everything here is pure and JSON-serialisable (restart = same decisions).
 """
 
 from __future__ import annotations
@@ -111,6 +112,44 @@ def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_expos
 
 TRANSITION_CAUSES: tuple[CauseCode, ...] = ("cost_dominated", "sparse", "unstable")
 
+# ADR-049: the pre-registered grid, one group per round, in this order (windows, timeframes, top-M)
+GRID_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...]], ...] = (
+    (("w2",), ("4h", "1d"), (100,)),
+    (("w1",), ("4h", "1d"), (100,)),
+    (("w2", "w1"), ("1h",), (100,)),
+    (("w2", "w1"), TIMEFRAMES, (30,)),
+)
+
+
+def preregistered_groups(families: Sequence[str]) -> list[list[Cell]]:
+    """The grid groups G1..G4 of ADR-049 for these families (deterministic order)."""
+    return [
+        [Cell(f, tf, m, w) for w in windows for tf in tfs for m in tops for f in families]
+        for windows, tfs, tops in GRID_GROUPS
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class RoundPlan:
+    reopened: tuple[str, ...]  # data_missing cells whose datasets now have rows in their window
+    added: tuple[str, ...]  # the next grid group's cells not yet in the campaign
+    waiting: tuple[str, ...]  # datasets still asked for by retired data_missing cells
+
+    @property
+    def empty(self) -> bool:
+        return not self.reopened and not self.added
+
+
+Availability = Mapping[str, Mapping[str, str]]  # window -> {dataset: version} with research rows in that window
+
+
+def _versions(cell: Cell, needs: Sequence[str], available: Availability) -> dict[str, str] | None:
+    """The versions of every needed dataset in the cell's window, or None when one is still missing."""
+    have = available.get(cell.window, {})
+    if not all(d in have for d in needs):
+        return None
+    return {d: have[d] for d in needs}
+
 
 def transitions(cell: Cell, cause: CauseCode) -> list[Cell]:
     match cause:
@@ -138,6 +177,11 @@ class CampaignState:
     data_requests: list[str] = field(default_factory=lambda: list[str]())
     history: list[dict[str, object]] = field(default_factory=lambda: list[dict[str, object]]())
     settings: dict[str, object] = field(default_factory=lambda: dict[str, object]())  # grid + config (resume check)
+    round: int = 1  # ADR-049
+    pull_base: dict[str, int] = field(default_factory=lambda: dict[str, int]())  # pulls when a cell was reopened
+    data_versions: dict[str, dict[str, str]] = field(  # dataset versions a reopened cell was opened with
+        default_factory=lambda: dict[str, dict[str, str]]()
+    )
 
     @staticmethod
     def new(run_id: str, cells: Iterable[Cell], *, max_pulls: int = 3) -> CampaignState:
@@ -149,7 +193,8 @@ class CampaignState:
         return CampaignState(run_id, max_pulls, keys)
 
     def all_cells(self) -> list[Cell]:
-        """Every cell the campaign may ever run: the grid plus every transition target (a fixed bandit arm set)."""
+        """Every cell the campaign may run in this round: its cells plus every transition target. A round adds cells
+        that no transition reaches (1h, top30), so the caller extends its bandit with these after `start_round`."""
         out = dict.fromkeys(self.cells)
         frontier = [Cell.parse(k) for k in self.cells]
         while frontier:  # one closure over every transition kind (mixed paths: slower bars, then wider, ...)
@@ -198,9 +243,25 @@ class CampaignState:
             for ds in summary.data_missing:
                 if ds not in self.data_requests:
                     self.data_requests.append(ds)
-        done = cause in ("candidate", "data_missing", "error") or self.pulls[key] >= self.max_pulls
+        used = self.pulls[key] - self.pull_base.get(key, 0)
+        done = cause in ("candidate", "data_missing", "error") or used >= self.max_pulls
         if done and key not in self.retired:
             self.retired.append(key)
+
+    def start_round(self, plan: RoundPlan, available: Availability) -> None:
+        """Apply `next_round`'s plan: reopen (with a fresh pull budget), add the group, keep the open requests."""
+        self.round += 1
+        for key in plan.reopened:
+            needs = _last_missing(self.history, key)
+            versions = _versions(Cell.parse(key), needs, available)
+            if key in self.retired:
+                self.retired.remove(key)
+            self.pull_base[key] = self.pulls.get(key, 0)
+            self.data_versions[key] = {**self.data_versions.get(key, {}), **(versions or {})}  # every version seen
+        for key in plan.added:
+            if key not in self.cells:
+                self.cells.append(key)
+        self.data_requests = list(plan.waiting)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -214,6 +275,9 @@ class CampaignState:
             "data_requests": list(self.data_requests),
             "history": list(self.history),
             "settings": dict(self.settings),
+            "round": self.round,
+            "pull_base": dict(self.pull_base),
+            "data_versions": {k: dict(v) for k, v in self.data_versions.items()},
         }
 
     @staticmethod
@@ -223,6 +287,11 @@ class CampaignState:
 
         pulls = {str(k): int(cast(int, v)) for k, v in cast(Mapping[str, object], raw.get("pulls", {})).items()}
         history = [dict(cast(Mapping[str, object], h)) for h in cast(Sequence[object], raw.get("history", []))]
+        base = {str(k): int(cast(int, v)) for k, v in cast(Mapping[str, object], raw.get("pull_base", {})).items()}
+        versions = {
+            str(k): {str(d): str(x) for d, x in cast(Mapping[str, object], v).items()}
+            for k, v in cast(Mapping[str, object], raw.get("data_versions", {})).items()
+        }
         return CampaignState(
             str(raw["run_id"]),
             int(cast(int, raw["max_pulls"])),
@@ -234,7 +303,49 @@ class CampaignState:
             strings("data_requests"),
             history,
             dict(cast(Mapping[str, object], raw.get("settings", {}))),
+            int(cast(int, raw.get("round", 1))),  # a state saved before ADR-049 is in its first round
+            base,
+            versions,
         )
+
+
+def _last_missing(history: Sequence[Mapping[str, object]], key: str) -> tuple[str, ...]:
+    """The datasets the cell's most recent data_missing batch asked for."""
+    for h in reversed(history):
+        if h.get("cell") == key:
+            summary = h.get("summary")
+            if h.get("cause") != "data_missing" or not isinstance(summary, Mapping):
+                return ()
+            raw = cast(Mapping[str, object], summary).get("data_missing", [])
+            return tuple(str(d) for d in cast(Sequence[object], raw))
+    return ()
+
+
+def next_round(state: CampaignState, available: Availability, groups: Sequence[Sequence[Cell]]) -> RoundPlan:
+    """ADR-049 round: (1) retired data_missing cells whose datasets now have rows in their window under versions
+    they were not opened with, (2) the first grid group with cells not yet in the campaign; else only `waiting`."""
+    reopened: list[str] = []
+    waiting: list[str] = []
+    for key in state.retired:
+        needs = _last_missing(state.history, key)
+        if not needs:
+            continue  # retired by pulls, a candidate or an error: never reopened
+        versions = _versions(Cell.parse(key), needs, available)
+        opened = state.data_versions.get(key, {})
+        if versions is not None and any(opened.get(d) != v for d, v in versions.items()):
+            reopened.append(key)  # some needed dataset is new or changed since the cell was last opened
+            continue
+        if versions is None:  # (a dataset present under the version that already failed is not waited for)
+            have = available.get(Cell.parse(key).window, {})
+            waiting.extend(d for d in needs if d not in have and d not in waiting)
+    known = set(state.cells)
+    added: list[str] = []
+    for group in groups:
+        fresh = [c.key for c in group if c.key not in known]
+        if fresh:
+            added = list(dict.fromkeys(fresh))
+            break
+    return RoundPlan(tuple(reopened), tuple(added), tuple(waiting))
 
 
 def _summary_json(s: BatchSummary) -> dict[str, object]:

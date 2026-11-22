@@ -10,7 +10,7 @@ whose reward regime changed is re-learned instead of being locked in. A per-fami
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -66,6 +66,13 @@ class FamilyBandit:
             raise ValueError("families must be distinct and non-empty")
         for f in self.families:
             self.arms.setdefault(f, ArmState())
+
+    def add_arms(self, names: Iterable[str]) -> None:
+        """New arms start at the prior (a campaign round adds cells, ADR-049); existing arms are kept as they are."""
+        fresh = [n for n in dict.fromkeys(names) if n not in self.arms]
+        for n in fresh:
+            self.arms[n] = ArmState()
+        self.families = (*self.families, *fresh)
 
     def update(self, family: str, reward: float) -> None:
         """Discount every arm, then add this observation (so the newest reward carries weight 1)."""
