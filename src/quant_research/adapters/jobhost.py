@@ -85,7 +85,9 @@ class Log:
             self._file.write(stamped + "\n")
             self._file.flush()
         if sys.stdout is not None:  # pythonw (Task Scheduler) has no console
-            print(stamped, flush=True)
+            # the console (cp949 on this machine) cannot show every symbol name; the file above keeps the real text
+            encoding = sys.stdout.encoding or "utf-8"
+            print(stamped.encode(encoding, "backslashreplace").decode(encoding), flush=True)
 
     def close(self) -> None:
         if self._file is not None:

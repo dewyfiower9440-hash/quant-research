@@ -1,5 +1,6 @@
 """Shared job-CLI helpers: status files are atomic, logs are timestamped, memory sampling works on Windows."""
 
+import io
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,19 @@ def test_log_appends_timestamped_lines(tmp_path: Path, capsys: pytest.CaptureFix
     assert [line.split(" ", 1)[1] for line in lines] == ["START a", "END b"]
     assert lines[0][:4].isdigit() and "+00:00" in lines[0]
     assert "START a" in capsys.readouterr().out
+
+
+def test_log_escapes_characters_the_console_cannot_encode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = io.BytesIO()
+    console = io.TextIOWrapper(raw, encoding="cp949", errors="strict")  # the Korean Windows console
+    monkeypatch.setattr(sys, "stdout", console)
+    path = tmp_path / "job.log"
+    log = Log(path)
+    log("[fundingRate 629/632] 币安人生USDT months=10")  # a listed symbol with CJK characters
+    log.close()
+    console.flush()
+    assert "币安人生USDT" in path.read_text(encoding="utf-8")  # the file keeps the real name
+    assert "\\u5e01" in raw.getvalue().decode("cp949")  # the console gets an escape, not a crash
 
 
 def test_memory_sample_reports_this_process_or_fails_loudly_off_windows() -> None:
