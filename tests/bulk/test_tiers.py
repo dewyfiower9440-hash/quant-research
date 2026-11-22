@@ -25,7 +25,7 @@ from quant_research.bulk.tiers import (
 
 def test_every_queued_request_maps_to_its_preregistered_tier() -> None:
     assert tier_for("binance.um.bulk.metrics_5m").bulk_kind == "metrics"
-    assert tier_for("binance.um.bulk.metrics_5m").top == 100
+    assert tier_for("binance.um.bulk.metrics_5m").top is None  # the whole universe (ADR-049 addendum 2)
     depth = tier_for("binance.um.bulk.book_depth")
     assert (depth.bulk_kind, depth.top, depth.since) == ("bookDepth", 30, "2023-01")
     assert tier_for("binance.um.bulk.agg_flow_1m").top == 10
@@ -80,7 +80,7 @@ def test_the_next_action_is_the_first_unfinished_tier_in_queue_order() -> None:
         (TierState("piloted"), "full", 0, "done", 0),
         (TierState("piloted"), "full", 3, "running", 0),
         (TierState("running"), "full", 4, "running", 1),  # failed months are retried
-        (TierState("running", attempts=2), "full", 1, "failed", 3),  # bounded retries
+        (TierState("running", attempts=2), "full", 1, "deferred", 0),  # not ended: retried after the others
         (TierState("piloted"), "full", -9, "running", 0),  # killed at the tick's time budget: resumes, no failure
     ],
 )
@@ -155,3 +155,19 @@ def test_panels_drop_only_optional_unready_datasets_and_coverage_hides_them() ->
     assert usable_datasets((*default, SPOT_DS), unready, keep=default) == (*default, SPOT_DS)
     found = {"w1": {FUNDING: "1", METRICS: "2"}, "w2": {SPOT_DS: "3"}}
     assert visible_coverage(found, unready) == {"w1": {}, "w2": {SPOT_DS: "3"}}
+
+
+def test_feature_tiers_cover_every_universe_symbol_not_the_longest_lived_ones() -> None:
+    """Final review 1 (ADR-049 addendum 2): `--top N` keeps the symbols with the most member months up to today, a
+    look-ahead choice that covered 41 % of a 2025 month's universe. Tiers a family reads take the whole universe."""
+    assert tier_for(METRICS).top is None and tier_for(SPOT_DS).top is None
+
+
+def test_errors_without_progress_defer_a_tier_instead_of_ending_it() -> None:
+    """Final review 2: three offline ticks made a tier `failed` for good and hid its dataset from the campaign
+    forever. It is deferred (retried after the others), like a tier killed without progress."""
+    state = TierState("running")
+    for _ in range(MAX_ATTEMPTS):
+        state = after_exit(state, "full", 1, progressed=False)
+    assert state.status == "deferred" and state.attempts == 0
+    assert next_action([METRICS], {METRICS: state}) == (METRICS, "pilot")  # not terminal: tried again

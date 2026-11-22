@@ -180,21 +180,31 @@ def main() -> int:
     stop_file = root / "run" / "STOP-campaign"
     deadline = None if a.max_hours is None else time.monotonic() + a.max_hours * 3_600
     loaded: dict[tuple[str, str, int, tuple[str, ...]], tuple[Panel, Panel]] = {}
-    # v2.3 step 11: tiers still downloading are not used in this tick (read once; a tier that finishes meanwhile
-    # counts from the next tick). An unreadable state file refuses the tick: inside a batch it would be recorded
-    # as a cell error and retire the whole grid.
+    # v2.3 step 11: tiers still downloading are not used. The state is read at the start (an unreadable file refuses
+    # the tick) and again for every panel and round, because a tier's download may start during a long tick; a read
+    # that fails then stops the campaign as a transient failure (inside a batch a plain error would be recorded as
+    # a cell error and retire the grid).
     tier_path = root / "run" / "data-queue-state.json"
-    try:
-        raw_tiers: Mapping[str, Mapping[str, object]] = (
+
+    def read_unready() -> frozenset[str]:
+        raw: Mapping[str, Mapping[str, object]] = (
             cast(Mapping[str, Mapping[str, object]], json.loads(tier_path.read_text(encoding="utf-8")))
             if tier_path.exists()
             else {}
         )
-        unready = unready_datasets({str(k): parse_state(str(k), v) for k, v in raw_tiers.items()})
-    except (ValueError, AttributeError, TypeError) as e:
+        return unready_datasets({str(k): parse_state(str(k), v) for k, v in raw.items()})
+
+    def unready_now() -> frozenset[str]:
+        try:
+            return read_unready()
+        except (ValueError, AttributeError, TypeError, OSError) as e:
+            raise PermissionError(f"unreadable {tier_path.name}: {type(e).__name__}: {e}") from e
+
+    try:
+        print(json.dumps({"unready_tiers": sorted(read_unready())}))
+    except (ValueError, AttributeError, TypeError, OSError) as e:
         print(json.dumps({"refused": f"unreadable {tier_path.name}: {type(e).__name__}: {e}"}))
         return 1
-    print(json.dumps({"unready_tiers": sorted(unready)}))
 
     try:  # one research process at a time: close_abandoned() below assumes nobody else has running trials
         lock = InstanceLock(root / "run" / "research.lock").__enter__()
@@ -210,7 +220,7 @@ def main() -> int:
 
         def panels(cell: Cell) -> tuple[Panel, Panel]:
             # v2.3 step 7: metrics / spot only for the families that read them; step 11: only finished tiers
-            datasets = usable_datasets(panel_datasets(cell.family), unready, keep=DEFAULT_DATASETS)
+            datasets = usable_datasets(panel_datasets(cell.family), unready_now(), keep=DEFAULT_DATASETS)
             key = (cell.window, cell.timeframe, cell.top_m, datasets)
             if key not in loaded:
                 loaded.clear()  # one panel in memory at a time
@@ -258,7 +268,9 @@ def main() -> int:
 
         windows_ns = {w: (month_ns(*lo), month_ns(*hi)) for w, (lo, hi) in WINDOWS.items()}
         rounds = Rounds(
-            groups, lambda: visible_coverage(research_coverage(catalog, windows_ns), unready), on_start=loaded.clear
+            groups,
+            lambda: visible_coverage(research_coverage(catalog, windows_ns), unready_now()),
+            on_start=loaded.clear,
         )
         # ADR-049 decision 2: the S3 null N of earlier campaigns on the same splits, one history per run id (a copy
         # such as campaign-c1-old.json must not count c1 twice; this run's own file is never counted)

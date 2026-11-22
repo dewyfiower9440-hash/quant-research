@@ -254,7 +254,8 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
   - 캠페인 라운드와 원인: `qr-data/run/campaign-c1.md`
     - 예약 실행은 저장소 밖에 쓴다. 커밋된 측정표를 매 틱 덮어쓰지 않기 위해서다.
     - 기록으로 남길 때 `docs/measurements/`로 복사해 커밋한다.
-  - 대기 중인 데이터: `qr-data/run/data-queue.json`
+  - 캠페인이 기다리는 데이터: `qr-data/run/campaign-c1.json`의 `data_requests`와 캠페인 로그의 `waiting_data` 사유.
+    - `data-queue.json`은 큐 순서(요청 + 기본 tier 6개 전부)이지 대기 목록이 아니다.
   - tier 상태: `qr-data/run/data-queue-state.json`
   - `skipped_cap` tier는 lake 상한(200GB)이나 디스크 여유 때문에 멈춘 것이다. 상한 상향은 사용자 결정이다.
 - 동시 실행:
@@ -265,4 +266,13 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
     - 외부 소스(`fetch_external.py`)는 잠금이 없다. 예약 작업의 IgnoreNew로만 한 번에 하나씩 돈다.
   - validator는 `run/validator.lock`으로 하나만 돈다.
   - 캠페인과 다운로드는 같이 돌 수 있다. 메모리 가드는 research gate 2GB, 다운로드 RAM 1.5GB이다.
+- tier 상태(`data-queue-state.json`)의 뜻:
+  - `pending`·`piloted`·`running`: 진행 중. 이 tier의 데이터셋은 캠페인에서 숨겨진다(끝난 tier만 쓴다, ADR-049 보강 2).
+  - `deferred`: 진척 없는 종료나 오류가 이어져 다른 tier 뒤로 미뤄졌다. 계속 재시도한다(오프라인이면 여기로 온다).
+  - `done`: 완료. 이때부터 그 데이터를 요구하는 셀이 다시 열린다.
+  - `skipped_cap`: lake 상한이나 디스크 여유 때문에 멈췄다. 사용자 결정이 필요하다. 다시 시도하려면 그 항목을 상태 파일에서 지운다.
+  - 알림은 없다. 상태 파일과 `data-queue.progress.json`(마지막 틱)을 직접 확인한다.
+- 캠페인 틱의 종료 코드: 0(라운드 대기·예산), 1(tier 상태 파일이나 다른 캠페인 파일을 읽을 수 없음), 2(다른 연구 프로세스가 잠금 보유), 3(자원 가드·STOP 파일).
+- validator 질의 예산(k = 20)은 자동 제출된 후보가 판정될 때마다 줄어든다. 사전 조건 미달로 거부된 요청은 예산을 쓰지 않는다.
+- 세션에서 손으로 돌리는 `run_data_queue.py`와 예약 작업은 `run/data-queue.lock`으로 겹치지 않는다(늦게 온 쪽이 exit 2).
 - 첫 등록 뒤 첫 캠페인 틱은 패널 캐시를 다시 만든다(패널 코드 변경, 창·주기·top-M 조합마다 약 8~10분).

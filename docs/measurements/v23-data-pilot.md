@@ -16,5 +16,6 @@
 | binance.um.bulk.agg_flow_1m | aggTrades | 10 | 0 | 0 | — | 파일럿 없음. 큐가 이 tier에 오면 파일럿부터 돈다 |
 | external (fng·coinmetrics·dvol) | fetch_external | — | — | — | 작음 | 파일럿 없이 전체 실행 |
 
+- **2026-11-23 개정(ADR-049 보강 2):** metrics·spot tier는 top-N이 아니라 유니버스 전체(1분봉과 같은 (심볼, 월) 약 10,300개)를 받는다. 위 표의 metrics·spot 투영은 top-N 기준이어서 더는 맞지 않는다. 큐가 그 tier를 다시 판정할 때 새 투영을 낸다. 대략 metrics는 (심볼, 월)당 0.36MB × 10,300 × 1.25 ≈ 4.6GB, spot은 파일럿 2개 기준 (심볼, 월)당 약 2MB × 10,300 × 1.25 ≈ 25GB다(추정).
 - 투영 합계는 약 65GB다. 지금 lake(약 63GB)에 더하면 약 128GB이고 상한(200GB) 안이다. 그래서 상한 때문에 건너뛰는 tier는 없을 것으로 본다. 각 tier의 실제 판정은 큐가 그 tier의 파일럿을 돌릴 때 다시 내린다.
 - 시간은 실측 기준 추정이다. metrics 전체는 약 8시간, bookDepth(일 파일)는 그와 비슷하거나 더 걸린다. aggTrades는 월 0.3~1GB zip × 10심볼 × 약 80개월이라 수일이 걸린다. 세션 백그라운드로는 끝까지 받을 수 없으므로 `register_data_queue_task.ps1` 등록이 필요하다(사용자 작업).

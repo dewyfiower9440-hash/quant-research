@@ -164,17 +164,23 @@ def panel_datasets(template_family: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*DEFAULT_DATASETS, *extra]))
 
 
+MIN_INPUT_COVERAGE = 0.8  # share of member rows with a value (pre-registered, ADR-049 addendum 2)
+
+
 def missing_inputs(template_family: str, panel: Panel) -> tuple[str, ...]:
-    """Datasets the family needs whose column has no value among the panel's member rows."""
+    """Datasets the family needs whose column covers less than MIN_INPUT_COVERAGE of the panel's member rows
+    (ADR-049 addendum 2: an input present for a fraction of the universe would judge the family on that
+    fraction; the cell is data_missing until the data covers the members)."""
     out: list[str] = []
     members = panel.frame.filter(pl.col("member"))
     for need in REQUIRED_DATA.get(template_family, ()):
         if need not in DATA_COLUMNS:
             continue
         column, dataset = DATA_COLUMNS[need]
-        if column not in members.columns or members[column].drop_nulls().is_empty():
+        have = 0 if column not in members.columns else members.height - members[column].null_count()
+        if members.height == 0 or have / members.height < MIN_INPUT_COVERAGE:
             out.append(dataset)
-    return tuple(out)
+    return tuple(dict.fromkeys(out))  # one entry per dataset (a family may read several of its columns)
 
 
 def _exposure(metrics: dict[str, object]) -> float:

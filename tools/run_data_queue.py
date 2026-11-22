@@ -12,7 +12,7 @@ tier gets one step (bulk/tiers.py):
 - full: tools/bulk_extras.py --kinds K [--top N] [--since] (resumable from the catalog) or tools/fetch_external.py,
   killed at --max-hours (the next tick resumes it). New datasets are sealed in epoch 2 by the catalog bootstrap
   inside those tools before research can read them (B4).
-Exit codes: 0 a step ran or nothing to do, 1 error."""
+Exit codes: 0 a step ran or nothing to do, 1 error, 2 another data queue tick holds run/data-queue.lock."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from typing import cast
 from quant_research.adapters.jobhost import Log, write_json
 from quant_research.bulk.tiers import (
     TIERS,
+    Action,
     TierState,
     after_exit,
     decide,
@@ -41,9 +42,11 @@ from quant_research.bulk.tiers import (
     project,
     tier_for,
 )
+from quant_research.capture.lock import AlreadyRunningError, InstanceLock
 from quant_research.config import load_settings
 
 REPO = Path(__file__).resolve().parents[1]
+KLINES_DATASET = "binance.um.bulk.klines_1m"
 PILOT_TOP = 2
 
 
@@ -58,12 +61,13 @@ async def run_child(argv: list[str], timeout_s: float) -> int:
         return -9
 
 
-def symbol_months(root: Path, dataset_id: str) -> int:
-    """Distinct (symbol, month) files the catalog holds for the dataset (read-only connection)."""
+def symbol_months(root: Path, dataset_id: str, since: str | None = None) -> int:
+    """Distinct (symbol, month) files the catalog holds for the dataset, from month `since` on (read-only)."""
     uri = f"file:{(root / 'meta' / 'catalog.db').as_posix()}?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as conn:
         row = conn.execute(
-            "select count(*) from (select distinct symbol, month from bulk_file where dataset_id = ?)", (dataset_id,)
+            "select count(*) from (select distinct symbol, month from bulk_file where dataset_id = ? and month >= ?)",
+            (dataset_id, since or ""),
         ).fetchone()
     return int(row[0])
 
@@ -110,7 +114,7 @@ def main() -> int:
         log.close()
         return 0
     request, action = step
-    tier, state = tier_for(request), states.get(request, TierState())
+    tier = tier_for(request)
     universe = a.universe or max((root / "bulk").glob("universe-*.json"))
     report = json.loads(universe.read_text(encoding="utf-8"))
     if tier.source == "external":
@@ -130,6 +134,33 @@ def main() -> int:
     if a.dry_run:
         log.close()
         return 0
+    try:  # one queue tick at a time (a session run beside the scheduled task would lose state updates)
+        lock = InstanceLock(root / "run" / "data-queue.lock").__enter__()
+    except AlreadyRunningError as e:
+        log(f"REFUSED another data queue tick is running: {e}")
+        log.close()
+        return 2
+    try:
+        return run_step(a, root, log, states, state_path, request, action, cmd, report)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def run_step(
+    a: argparse.Namespace,
+    root: Path,
+    log: Log,
+    states: dict[str, TierState],
+    state_path: Path,
+    request: str,
+    action: Action,
+    cmd: list[str],
+    report: Mapping[str, object],
+) -> int:
+    tier, state = tier_for(request), states.get(request, TierState())
+    # the entry exists before the first file does: a campaign tick that starts now sees the tier as unready
+    states[request] = state
+    write_json(state_path, {k: asdict(v) for k, v in states.items()})
     started = time.monotonic()
     files_before = symbol_months(root, request) if tier.source == "bulk" else 0
     code = asyncio.run(run_child(cmd, a.max_hours * 3_600))
@@ -139,8 +170,9 @@ def main() -> int:
         # bytes per symbol-month from everything this dataset holds (an earlier pilot's files count too: a pilot
         # that found its month already there adds 0 bytes and must not project 0), scaled to what is still missing
         have = symbol_months(root, request)
-        months = [m for m in report["months"] if tier.since is None or m >= tier.since]
-        total = (tier.top or len(report["spans"])) * len(months)
+        months = [m for m in cast(list[str], report["months"]) if tier.since is None or m >= tier.since]
+        # a whole-universe tier downloads each symbol's member months: as many (symbol, month) files as the klines
+        total = symbol_months(root, KLINES_DATASET, tier.since) if tier.top is None else tier.top * len(months)
         if have == 0:
             new = after_exit(state, action, 1, progressed=False)  # the pilot wrote nothing: a failed attempt
         else:

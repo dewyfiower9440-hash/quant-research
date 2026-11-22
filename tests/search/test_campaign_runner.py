@@ -459,6 +459,35 @@ def test_rounds_never_restart_a_round_with_an_empty_plan(
     assert out.status == "waiting_data" and out.batches == 0 and state.round == 1
 
 
+def test_an_unreadable_coverage_while_a_round_is_computed_pauses_the_campaign(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    """Final re-review 1: the coverage read (tier state file mid-replace) raised out of run_campaign: the tick
+    crashed without its report. It is transient like a batch's: the campaign pauses, the round is not started."""
+    catalog, ledger = env
+    cell = Cell("momentum", "1h", 30, "w2")
+    state = CampaignState.new("u", [cell], max_pulls=1)
+    state.record(cell, "no_signal", BatchSummary(0, 0, 0, 0, None, None, None, None, None, ()), reward=0.0)
+
+    def locked() -> dict[str, dict[str, str]]:
+        raise PermissionError("unreadable data-queue-state.json")
+
+    out = run_campaign(
+        state,
+        _bandit(state),
+        ledger=ledger,
+        catalog=catalog,
+        panels=lambda _cell: panels,
+        config=CONFIG,
+        gate=lambda: (True, ""),
+        stop=lambda: False,
+        persist=lambda _s, _b: None,
+        rounds=Rounds(groups=[[cell]], available=locked),
+    )
+    assert out.status == "gate" and "PermissionError" in out.reason and state.round == 1
+
+
 def test_the_time_budget_ends_the_campaign_as_budget_not_as_the_gate(
     env: tuple[Catalog, TrialLedger],
     panels: tuple[Panel, Panel],

@@ -535,3 +535,24 @@ def test_the_v23_families_ask_for_their_datasets_and_are_data_missing_without_th
     assert missing_inputs("oi_positioning", selection) == (METRICS,)
     assert missing_inputs("spot_basis", selection) == (SPOT,)
     assert missing_inputs("trend", selection) == ()
+
+
+def test_an_input_present_for_too_few_member_rows_counts_as_missing(panels: tuple[Panel, Panel]) -> None:
+    """Final review 1 (ADR-049 addendum 2): one symbol with funding passed `missing_inputs`, so a family was judged
+    on a fraction of its universe. An input must cover at least 80 % of the member rows."""
+    import polars as pl
+
+    from quant_research.search.pipeline import MIN_INPUT_COVERAGE, missing_inputs
+
+    selection, _confirmation = panels
+    symbols = selection.frame["symbol"].unique().sort().to_list()
+    assert len(symbols) == 4 and MIN_INPUT_COVERAGE == 0.8
+
+    def with_funding(have: list[str]) -> Panel:
+        frame = selection.frame.with_columns(
+            pl.when(pl.col("symbol").is_in(have)).then(0.0001).otherwise(None).alias("funding_rate")
+        )
+        return Panel(frame, selection.funding, selection.files, selection.config, selection.evaluate_from_ns)
+
+    assert missing_inputs("funding_carry", with_funding(symbols)) == ()
+    assert missing_inputs("funding_carry", with_funding(symbols[:3])) == ("binance.um.bulk.funding",)  # 75 %

@@ -37,8 +37,11 @@ class Tier:
 # ADR-044 tiers T1..T5, T7 (T6 Upbit backfill is a user-registered task)
 TIERS: dict[str, Tier] = {
     "binance.um.bulk.funding": Tier("bulk", "fundingRate"),
-    "binance.um.bulk.metrics_5m": Tier("bulk", "metrics", top=100),
-    "binance.spot.bulk.klines_1m": Tier("bulk", "spotKlines", top=200),
+    # ADR-049 addendum 2: tiers a family reads take every universe symbol in its member months. `--top N` picks
+    # the symbols with the most member months up to today: a look-ahead choice that left most of an earlier
+    # month's universe without data (41 % covered in 2025-06) and biased the rest towards survivors.
+    "binance.um.bulk.metrics_5m": Tier("bulk", "metrics"),
+    "binance.spot.bulk.klines_1m": Tier("bulk", "spotKlines"),
     "binance.um.bulk.book_depth": Tier("bulk", "bookDepth", top=30, since="2023-01"),
     "binance.um.bulk.agg_flow_1m": Tier("bulk", "aggTrades", top=10),
 }
@@ -155,5 +158,7 @@ def after_exit(state: TierState, action: Action, code: int, *, progressed: bool,
         if stalls >= MAX_STALLS:
             return replace(state, status="deferred", stalls=0, note=f"deferred: {stalls} ticks without a new file")
         return replace(state, status=same, stalls=stalls, note=f"exit {code}")
-    attempts = state.attempts + 1  # 1 error, 4 failed months: retried a bounded number of times
-    return replace(state, status="failed" if attempts >= MAX_ATTEMPTS else same, attempts=attempts, note=f"exit {code}")
+    attempts = state.attempts + 1  # 1 error (offline, S3 5xx), 4 failed months
+    if attempts >= MAX_ATTEMPTS:  # not the end of the tier (an offline evening would hide its dataset for good):
+        return replace(state, status="deferred", attempts=0, note=f"deferred: exit {code} {attempts} times")
+    return replace(state, status=same, attempts=attempts, note=f"exit {code}")

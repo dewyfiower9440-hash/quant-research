@@ -431,7 +431,11 @@ def run_campaign(
         if cell is None:
             if rounds is None:
                 return CampaignOutcome("exhausted", ran, "no eligible cell")
-            available = rounds.available()
+            try:
+                available = rounds.available()
+            except PermissionError as e:  # the coverage could not be read now (a state file mid-replace): pause
+                log.warning("campaign.round_transient", error=str(e))
+                return CampaignOutcome("gate", ran, f"transient {type(e).__name__}: {e}")
             plan = next_round(state, available, rounds.groups)
             if plan.empty:
                 if state.data_requests != list(plan.waiting):

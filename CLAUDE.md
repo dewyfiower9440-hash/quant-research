@@ -18,8 +18,14 @@ Stack: Python (uv)
 - ci: required
 
 ## Project map
-- Design (v2.1 base + v2.2 delta, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`, `docs/plans/2026-11-20-autonomous-quant-research-v2.2.md` (ADR-040..048)
-- Current execution plan: `docs/plans/2026-11-20-v22-rebuild.md`
+- Design (v2.1 base + v2.2 delta, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`, `docs/plans/2026-11-20-autonomous-quant-research-v2.2.md` (ADR-040..049)
+- Last execution plan (done): `docs/plans/2026-11-22-v23-never-stop.md` (v2.3: the campaign that does not stop; `2026-11-20-v22-rebuild.md` is closed)
+- Autonomous loop (v2.3, ADR-049): `search/campaign.py` (cells, causes, rounds), `search/campaign_runner.py` (driver,
+  cross-window confirmation), `catalog/coverage.py`, `bulk/tiers.py` (data queue planning); tools `run_campaign.py`,
+  `run_data_queue.py`, `run_validator.py`; user-run tasks `tools/register_campaign_task.ps1`,
+  `register_data_queue_task.ps1`, `register_validator_task.ps1` (`docs/operations.md` section 18). State outside the
+  repo: `qr-data/run/campaign-c1.json`, `data-queue.json`, `data-queue-state.json`, report `qr-data/run/campaign-c1.md`
+- PowerShell tests are outside the gate and CI: `Invoke-Pester -Path tests/powershell` (the scripts only with `-WhatIf`)
 - Execution plan (in progress, approved Phase 0-1 only): `docs/plans/2026-11-08-phase0-1-build.md`
 - Phase 2 plan (DSL, two engines, cost model, trial accounting): `docs/plans/2026-11-09-phase2-dsl-backtest.md`;
   code in `strategy/` (spec, ops, canonical, s0, compile, templates), `backtest/` (panel, costs, market, engines,
@@ -79,4 +85,9 @@ Stack: Python (uv)
 - A compound command that the commit hook blocks runs nothing: a message-file write chained before `git commit -F` was never written, so the rerun failed with "could not read log file" → write the commit message file in its own call (Write tool) before committing (2026-11-20)
 - A per-row join of (symbol, day) with all of a symbol's days looked fine on 6-month panels and took 4.4 GB on a 36-month 1d panel (F-020) → measure memory of every per-day aggregation on the longest window before a campaign; prefer cumulative sums + as-of joins over cross joins (2026-11-21)
 - Binance lists symbols with CJK names (`币安人生USDT`); printing them to the cp949 console killed `tools/bulk_extras.py` at symbol 629/632 → job CLIs print through `adapters.jobhost.Log` (escapes what the console cannot encode); for one-off scripts set `PYTHONIOENCODING=utf-8` (not with `python -I`) (2026-11-21)
+- `sed` with a Windows path in the replacement turned `run\campaign` into a control character (`\c`) inside a .ps1 → never put backslashes through sed; use Edit, or a Python script that replaces exact bytes (2026-11-22)
+- A scheduled campaign tick wrote its report into `docs/measurements/` and would have rewritten a committed file every hour → scheduled runs write under `qr-data/run/`; copy a report into docs/ only to commit it (2026-11-22)
+- A dataset counted as available as soon as one file existed, so a campaign cell ran on a tier that was 20 % downloaded → research uses a tier only when `run/data-queue-state.json` says `done`, and an input must cover 80 % of the member rows (2026-11-23)
+- `--top N` in `tools/bulk_extras.py` ranks symbols by member months up to today (look-ahead, 41 % of a 2025 month's universe) → tiers a family reads download the whole universe file, never a top-N of it (2026-11-23)
+- structlog's JSON tracebacks print frame locals by default → `configure_logging(show_locals=False)` wherever locals can hold holdout results (the validator) (2026-11-22)
 - Background shells in a Claude Code session are killed when the whole system runs low on memory (bulk funding download stopped at 280/632) → run long jobs in the foreground (20 min per call, resumable tools) or register a scheduled task (`tools/register_campaign_task.ps1`, user-run) (2026-11-21)
