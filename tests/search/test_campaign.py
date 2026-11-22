@@ -33,6 +33,9 @@ BASE = BatchSummary(
     best_gross_exposure=0.6,
     s3_sr=0.05,
     data_missing=(),
+    cross_sr=0.04,  # ADR-049 decision 3: the same spec on the other window's confirmation split
+    pooled_sr=0.045,
+    pooled_threshold=0.03,
 )
 
 
@@ -59,7 +62,11 @@ def test_a_cell_key_round_trips_and_names_its_v2_space() -> None:
         ({"s2_done": 0, "best_sr_net": None, "s3_sr": None}, "no_signal"),
         ({"s2_exposed": 0, "best_sr_net": None}, "sparse"),
         ({"error": "ValueError: boom"}, "error"),
-        ({"s3_threshold": 0.08}, "unstable"),  # S3 SR 0.05 below the best-of-N null level of its split
+        ({"s3_threshold": 0.08}, "candidate"),  # ADR-049: the own-window bar is reported, the pooled bar decides
+        ({"pooled_threshold": 0.05}, "unstable"),  # pooled SR 0.045 below the best-of-N null of both splits
+        ({"cross_sr": -0.01}, "unstable"),  # signs disagree between the two windows
+        ({"cross_sr": None, "pooled_sr": None}, "unstable"),  # the cross run did not happen
+        ({"s3_sr": 0.0}, "unstable"),
         ({"best_sr_net": -0.02, "best_total_return": -0.01, "best_cost_fraction": 0.05}, "cost_dominated"),
         ({"best_sr_net": -0.02, "best_total_return": -0.06, "best_cost_fraction": 0.05}, "no_signal"),
         ({"s3_sr": -0.01}, "unstable"),

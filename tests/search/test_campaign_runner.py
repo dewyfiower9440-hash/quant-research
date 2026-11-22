@@ -16,6 +16,8 @@ from quant_research.search.campaign_runner import (
     missing_data,
     run_campaign,
 )
+from quant_research.search.optimizers import RandomSearcher
+from quant_research.strategy.space import build_point
 
 CELLS = [Cell("momentum", "1h", 30, "w2"), Cell("funding_carry", "1h", 30, "w2")]
 CONFIG = CampaignConfig(seed=4, s1_count=8, top_k=2, promote_rate=0.0, s3_top=1, s3_random_rate=0.0)
@@ -209,6 +211,185 @@ def test_the_s3_threshold_counts_the_s3_runs_of_earlier_campaigns_on_the_same_sp
     assert prior == {"w2": 49}
     fresh = s3_null_threshold([], "w2", 150, prior=prior.get("w2", 0))
     assert fresh == s3_null_threshold(earlier, "w2", 150) > 0.0
+
+
+def test_the_pooled_bar_counts_every_s3_on_both_splits_and_tightens_with_more_days() -> None:
+    """ADR-049 decision 3: N = all S3 judged on the two confirmation splits (cross runs included) + this batch's two."""
+    from quant_research.search.campaign_runner import pooled_null_threshold
+
+    def entry(window: str, cross: float | None) -> dict[str, object]:
+        return {"cell": f"trend@4h|top100|{window}", "summary": {"s3_sr": 0.01, "cross_sr": cross}}
+
+    few = pooled_null_threshold([entry("w2", None)], {}, 480)
+    more = pooled_null_threshold([entry("w2", 0.02), entry("w1", None)], {}, 480)
+    prior = pooled_null_threshold([entry("w2", None)], {"w1": 40, "w2": 40}, 480)
+    assert 0.0 < few < more < prior
+    assert pooled_null_threshold([entry("w2", None)], {}, 960) < few
+    from quant_research.search.campaign_runner import judged_s3_counts
+
+    assert judged_s3_counts([[entry("w2", 0.02)]]) == {"w1": 1, "w2": 1}  # a cross run is judged on the other split
+
+
+def test_a_cross_window_s3_is_one_trial_reused_on_replay_and_pooled_by_concatenation(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    import numpy as np
+
+    from quant_research.backtest.run import RunConfig, run_backtest, unblob
+    from quant_research.search.campaign_runner import cross_confirm
+    from quant_research.search.optimizers import propose
+    from quant_research.strategy.space import space_of
+
+    catalog, ledger = env
+    space = space_of("momentum@1h")
+    traded = None
+    for cand in propose(space, RandomSearcher(space, 3), 12):  # a point that trades in the fixture (flat pnl: no SR)
+        run = run_backtest(
+            build_point(space, cand.point), panels[1], catalog, ledger, RunConfig(engine="event", seed=1), stage="S3"
+        )
+        sr = run.metrics.get("sr_daily")
+        if isinstance(sr, float) and np.isfinite(sr):
+            traded = (cand.point, run)
+            break
+    assert traded is not None  # precondition: the fixture has a trading point among the first 12
+    point, own = traded
+    before = _trials(ledger)
+    first = cross_confirm(ledger, catalog, space, point, own.trial_id, panels[1], fold="f", seed=1)
+    assert _trials(ledger) == before + 1 and first is not None
+    again = cross_confirm(ledger, catalog, space, point, own.trial_id, panels[1], fold="f", seed=1)
+    assert _trials(ledger) == before + 1 and again == first  # replay: the finished trial is reused
+    pnl = [
+        unblob(
+            bytes(
+                ledger.store.conn.execute("select pnl_daily from backtest_run where trial_id = ?", (t,)).fetchone()[0]
+            )
+        )
+        for t in (own.trial_id, first.trial_id)
+    ]
+    joined = np.concatenate(pnl)
+    expected = float(np.mean(joined) / np.std(joined, ddof=1))
+    assert first.pooled_sr == expected and first.days == len(joined)
+
+
+def test_the_cross_step_runs_the_best_s3_spec_on_the_other_windows_split_and_skips_when_it_cannot(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    """Review (step 4) 3: the cross run must use the other window's panel, match the own S3's spec, and leave the
+    summary alone when the spec cannot be matched or the other window lacks the family's data."""
+    from dataclasses import replace
+
+    from quant_research.search.campaign_runner import summarize, with_cross
+    from quant_research.search.pipeline import SearchBudget, run_family_search
+    from quant_research.search.s1 import S1Config
+    from quant_research.strategy.space import space_of
+
+    catalog, ledger = env
+    selection, confirmation = panels
+    result = run_family_search(
+        ledger,
+        "momentum@1h",
+        RandomSearcher(space_of("momentum@1h"), 5),
+        selection=selection,
+        confirmation=confirmation,
+        catalog=catalog,
+        config={"t": 1},
+        s1=S1Config(horizon_bars=24),
+        budget=SearchBudget(s1_count=12, top_k=3, promote_rate=0.0, s3_top=1),
+        seed=5,
+        fold="t:c:0",
+    )
+    summary = summarize(result, min_exposure=0.0)
+    assert summary.s3_trial_id is not None  # precondition: an S3 ran
+    cell = Cell("momentum", "1h", 30, "w2")
+    state = CampaignState.new("t", [cell])
+    asked: list[str] = []
+
+    def other_window(c: Cell) -> tuple[Panel, Panel]:
+        asked.append(c.window)
+        return confirmation, selection  # the 'other window' confirmation is a different period than the own S3's
+
+    out = with_cross(
+        summary,
+        result,
+        state,
+        cell,
+        ledger=ledger,
+        catalog=catalog,
+        panels=other_window,
+        seed=5,
+        fold="t:c:0",
+        prior_s3={},
+    )
+    assert asked == ["w1"] and out.cross_trial_id is not None and out.pooled_threshold > 0
+    fold, window = ledger.store.conn.execute(
+        "select t.fold, b.window_from_ns from trial t join backtest_run b using (trial_id) where t.trial_id = ?",
+        (out.cross_trial_id,),
+    ).fetchone()
+    own = ledger.store.conn.execute(
+        "select window_from_ns from backtest_run where trial_id = ?", (summary.s3_trial_id,)
+    ).fetchone()[0]
+    assert fold == "t:c:0:x" and window != own  # its own trial, on the other split
+    unmatched = replace(summary, s3_trial_id=-1)
+    assert (
+        with_cross(
+            unmatched,
+            result,
+            state,
+            cell,
+            ledger=ledger,
+            catalog=catalog,
+            panels=other_window,
+            seed=5,
+            fold="t:c:0",
+            prior_s3={},
+        )
+        == unmatched
+    )
+    carry = Cell("funding_carry", "1h", 30, "w2")  # the fixture has no funding: the other window lacks the data
+    assert (
+        with_cross(
+            summary,
+            result,
+            state,
+            carry,
+            ledger=ledger,
+            catalog=catalog,
+            panels=other_window,
+            seed=5,
+            fold="t:c:0",
+            prior_s3={},
+        )
+        == summary
+    )
+
+
+def test_a_failed_cross_step_keeps_the_own_s3_as_error_and_transient_failures_propagate() -> None:
+    """Re-review (step 4) 6: the guard around the cross step had no test."""
+    import pytest
+
+    from quant_research.search.campaign import classify
+    from quant_research.search.campaign_runner import guarded_cross, judged_s3_counts
+
+    cell = Cell("trend", "4h", 100, "w2")
+    own = BatchSummary(10, 10, 3, 3, 0.1, 0.1, 0.0, 0.5, 0.02, (), s3_trial_id=7)
+
+    def broken() -> BatchSummary:
+        raise ValueError("empty universe")
+
+    out = guarded_cross(own, broken, cell=cell)
+    assert out.error == "cross: ValueError: empty universe" and out.s3_sr == 0.02
+    assert classify(out, min_exposure=0.05) == "error"
+    state = CampaignState.new("g", [cell])
+    state.record(cell, "error", out, reward=0.0)
+    assert judged_s3_counts([state.history]) == {"w2": 1}  # the own S3 still counts toward the null N
+
+    def short() -> BatchSummary:
+        raise MemoryError("cannot allocate")
+
+    with pytest.raises(MemoryError):
+        guarded_cross(own, short, cell=cell)
 
 
 def test_earlier_campaigns_count_once_each_with_their_latest_history() -> None:

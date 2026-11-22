@@ -12,7 +12,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from quant_research.backtest.panel import Panel, PanelConfig, assemble, decision_grid, settlements
+from quant_research.backtest.panel import Panel, PanelConfig, assemble, decision_grid, settlements, slice_panel
 from quant_research.backtest.run import RunConfig, run_backtest
 from quant_research.catalog.bootstrap import bootstrap
 from quant_research.catalog.store import Catalog
@@ -141,6 +141,27 @@ def test_s1_vs_s3_rank_correlation_is_reported_per_family(env: tuple[Catalog, Tr
         stage="S3",
     )
     assert fidelity_by_family(ledger)[0].pairs == fam.pairs
+
+
+def test_a_cross_window_s3_is_never_paired_with_the_s1_of_the_other_window(
+    env: tuple[Catalog, TrialLedger], panel: Panel
+) -> None:
+    """Review (v2.3 step 4) 5: the ADR-049 cross S3 (fold '<fold>:x') is the newest S3 of its spec; pairing it with
+    the S1 of the own window's selection split mixed a selected window into the fidelity numbers."""
+    catalog, ledger = env
+    s0 = run_s0(ledger, generate(SPACES["momentum"], seed=13, count=6), CONFIG)
+    scored = run_s1(ledger, s0.accepted, panel, CONFIG, S1Config(horizon_bars=4))
+    for s in scored:
+        spec = build_point(SPACES["momentum"], s.candidate.point)
+        run_backtest(spec, panel, catalog, ledger, RunConfig(engine="vector"), stage="S3", fold="r:c:0")
+    before = fidelity_by_family(ledger)
+    hi = int(cast(int, panel.frame["decision_ns"].max()))
+    other = slice_panel(panel, hi - 86_400 * 10**9 // 2, hi)  # half a day: the cross S3 SR is undefined
+    assert before and before[0].pairs > 0  # precondition: pairs exist that a wrong pairing would drop
+    for s in scored:
+        spec = build_point(SPACES["momentum"], s.candidate.point)
+        run_backtest(spec, other, catalog, ledger, RunConfig(engine="vector"), stage="S3", fold="r:c:0:x")
+    assert fidelity_by_family(ledger) == before
 
 
 def test_s2_metrics_carry_the_map_elites_descriptors_and_probe(env: tuple[Catalog, TrialLedger], panel: Panel) -> None:

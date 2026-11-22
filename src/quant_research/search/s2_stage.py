@@ -95,6 +95,7 @@ def fidelity_by_family(ledger: TrialLedger, *, s3_score: str = S3_SCORE) -> list
         "(select spec_hash, max(trial_id) as t from trial where stage = 'S1' and status = 'done' group by spec_hash) a "
         "join trial s1 on s1.trial_id = a.t "
         "join (select spec_hash, max(trial_id) as t from trial where stage = 'S3' and status = 'done' "
+        "and coalesce(fold, '') not like '%:x' "  # ADR-049 cross S3 runs on the other window: not this S1's pair
         "group by spec_hash) b on b.spec_hash = s1.spec_hash "
         "join trial s3 on s3.trial_id = b.t order by s1.spec_hash"
     ).fetchall()

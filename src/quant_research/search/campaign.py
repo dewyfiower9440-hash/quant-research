@@ -90,6 +90,12 @@ class BatchSummary:
     s3_threshold: float = 0.0  # expected max SR under the null of this campaign's S3 runs on the same split
     s3_trial_id: int | None = None  # the candidate's S3 trial (what B8 submits)
     error: str = ""  # the exception of a failed batch
+    # ADR-049 decision 3: the same spec's S3 on the other research window's confirmation split, the SR of both
+    # splits' daily pnl joined, and the best-of-N null bar of every S3 judged on the two splits
+    cross_sr: float | None = None
+    pooled_sr: float | None = None
+    pooled_threshold: float = 0.0
+    cross_trial_id: int | None = None
 
 
 def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_exposure: applied by the runner
@@ -105,8 +111,10 @@ def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_expos
     if b.best_sr_net <= 0:
         gross = (b.best_total_return or 0.0) + (b.best_cost_fraction or 0.0)
         return "cost_dominated" if gross > 0 else "no_signal"  # positive before costs, negative after
-    if b.s3_sr is None or b.s3_sr <= b.s3_threshold:
-        return "unstable"  # positive on selection, not confirmed above the best-of-N null level of the split
+    if b.s3_sr is None or b.s3_sr <= 0:
+        return "unstable"  # positive on selection, not on its own confirmation split
+    if b.cross_sr is None or b.cross_sr <= 0 or b.pooled_sr is None or b.pooled_sr <= b.pooled_threshold:
+        return "unstable"  # ADR-049: signs disagree across the windows, or the pooled SR is within the null bar
     return "candidate"
 
 
@@ -363,6 +371,10 @@ def _summary_json(s: BatchSummary) -> dict[str, object]:
         "s3_threshold": s.s3_threshold,
         "s3_trial_id": s.s3_trial_id,
         "error": s.error,
+        "cross_sr": s.cross_sr,
+        "pooled_sr": s.pooled_sr,
+        "pooled_threshold": s.pooled_threshold,
+        "cross_trial_id": s.cross_trial_id,
     }
 
 

@@ -15,16 +15,19 @@ from __future__ import annotations
 import math
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, cast
 
+import numpy as np
 import structlog
+from numpy.typing import NDArray
 
 from quant_research.backtest.panel import Panel, slice_panel
 from quant_research.backtest.panel_store import Window
+from quant_research.backtest.run import RunConfig, experiment_config, run_backtest, unblob
 from quant_research.catalog.store import Catalog
-from quant_research.research.ledger import TrialLedger
+from quant_research.research.ledger import TrialLedger, experiment_key
 from quant_research.search.bandit import BanditPrior, FamilyBandit
 from quant_research.search.campaign import (
     WINDOWS,
@@ -36,12 +39,22 @@ from quant_research.search.campaign import (
     classify,
     next_round,
 )
+from quant_research.search.cost_model import spec_ops
 from quant_research.search.multiplicity import expected_max_sr
 from quant_research.search.optimizers import RandomSearcher
-from quant_research.search.pipeline import SearchBudget, SearchResult, missing_inputs, run_family_search
+from quant_research.search.pipeline import (
+    SearchBudget,
+    SearchResult,
+    existing_trial,
+    missing_inputs,
+    outcome_from_trial,
+    point_json,
+    run_family_search,
+)
 from quant_research.search.s1 import S1Config
-from quant_research.strategy.space import space_of
+from quant_research.strategy.space import Point, Space, build_point, space_of
 
+F64 = NDArray[np.float64]
 log = structlog.get_logger(__name__)
 S1_HORIZON_BARS: dict[str, int] = {"1h": 24, "4h": 6, "1d": 5}  # about one day, one day, one week ahead
 MAX_WARMUP_BARS = 1_200  # longest v2 lookback (720) + smoothing + volatility windows, with room
@@ -131,11 +144,16 @@ def summarize(
 
 
 def _judged(history: Sequence[Mapping[str, object]], window: str) -> int:
+    """S3 runs judged on this window's confirmation split: a cell's own S3 in this window, plus the cross S3 of a
+    cell of the other window (ADR-049 decision 3 runs it on this split)."""
     n = 0
     for h in history:
         summary = h.get("summary")
-        if str(h.get("cell", "")).endswith(f"|{window}") and isinstance(summary, Mapping):
-            n += cast(Mapping[str, object], summary).get("s3_sr") is not None
+        if not isinstance(summary, Mapping):
+            continue
+        s = cast(Mapping[str, object], summary)
+        mine = str(h.get("cell", "")).endswith(f"|{window}")
+        n += (s.get("s3_sr") is not None) if mine else (s.get("cross_sr") is not None)
     return n
 
 
@@ -165,6 +183,63 @@ def s3_null_threshold(
     """Expected max daily SR under the null of the S3 runs judged on this window's confirmation split so far, this
     one included (N = earlier judged S3, `prior` ones of earlier campaigns among them, + 1; variance ~ 1 / days)."""
     return expected_max_sr(prior + _judged(history, window) + 1, 1.0 / max(confirmation_days, 1))
+
+
+def pooled_null_threshold(history: Sequence[Mapping[str, object]], prior: Mapping[str, int], days: int) -> float:
+    """ADR-049 decision 3: expected max daily SR under the null of every S3 judged on the two confirmation splits
+    (earlier campaigns included) plus this batch's two (own + cross); variance ~ 1 / pooled days."""
+    n = sum(prior.get(w, 0) + _judged(history, w) for w in WINDOWS) + 2
+    return expected_max_sr(n, 1.0 / max(days, 1))
+
+
+@dataclass(frozen=True, slots=True)
+class CrossResult:
+    trial_id: int
+    cross_sr: float | None  # the cross S3's own daily SR
+    pooled_sr: float | None  # SR of the own S3 and the cross S3 daily pnl joined
+    days: int  # pooled days
+
+
+def _daily_pnl(ledger: TrialLedger, trial_id: int) -> F64:
+    row = ledger.store.conn.execute("select pnl_daily from backtest_run where trial_id = ?", (trial_id,)).fetchone()
+    return unblob(bytes(row[0])) if row is not None and row[0] is not None else np.zeros(0)
+
+
+def cross_confirm(
+    ledger: TrialLedger,
+    catalog: Catalog,
+    space: Space,
+    point: Point,
+    own_s3_trial: int,
+    other_confirmation: Panel,
+    *,
+    fold: str,
+    seed: int,
+) -> CrossResult | None:
+    """Run (or reuse, on a replayed batch) the spec's S3 on the other window's confirmation split as one trial in fold
+    `<fold>:x`, and pool its daily pnl with the own S3's. Each split is a separate backtest: no run crosses the sealed
+    holdout between the research windows (v2.2 §2.1). None when the cross run was refused."""
+    spec = build_point(space, point)
+    cfg = RunConfig(engine="event", seed=seed)  # the pipeline's S3 engine
+    h, conf = experiment_config(spec, other_confirmation, catalog, cfg)
+    fold_x = f"{fold}:x"
+    prior = existing_trial(ledger, experiment_key(h, conf), "S3", fold_x)
+    if prior is not None:
+        out = outcome_from_trial(ledger, prior)
+    else:
+        tags: dict[str, object] = {
+            "point": point_json(point),
+            "cross_of": own_s3_trial,
+            "rows": other_confirmation.frame.height,
+            "ops": spec_ops(spec),
+        }
+        out = run_backtest(spec, other_confirmation, catalog, ledger, cfg, stage="S3", fold=fold_x, tags=tags)
+    if out.status != "done":
+        return None
+    joined = np.concatenate([_daily_pnl(ledger, own_s3_trial), _daily_pnl(ledger, out.trial_id)])
+    sd = float(np.std(joined, ddof=1)) if len(joined) > 1 else 0.0
+    pooled = float(np.mean(joined)) / sd if sd > 0 else None
+    return CrossResult(out.trial_id, _number(out.metrics, "sr_daily"), pooled, len(joined))
 
 
 def split_window(
@@ -244,9 +319,81 @@ def run_batch(
     prior = (prior_s3 or {}).get(cell.window, 0)
     threshold = s3_null_threshold(state.history, cell.window, _days(confirmation), prior=prior)
     summary = summarize(result, min_exposure=config.min_exposure, s3_threshold=threshold)
+    del selection, confirmation  # review (step 4): one window's panels in memory at a time, also for the cross run
+    if (summary.best_sr_net or 0.0) > 0 and (summary.s3_sr or 0.0) > 0 and summary.s3_trial_id is not None:
+        own = summary
+        summary = guarded_cross(
+            own,
+            lambda: with_cross(
+                own,
+                result,
+                state,
+                cell,
+                ledger=ledger,
+                catalog=catalog,
+                panels=panels,
+                seed=seed,
+                fold=f"{state.run_id}:{cell.key}:{pull}",
+                prior_s3=prior_s3 or {},
+            ),
+            cell=cell,
+        )
     validation = None if result.validation is None else _number(result.validation.metrics, "sr_daily")
     reward = max(0.0, validation or 0.0)
     return classify(summary, min_exposure=config.min_exposure), summary, reward
+
+
+def guarded_cross(summary: BatchSummary, cross: Callable[[], BatchSummary], *, cell: Cell) -> BatchSummary:
+    """Run the cross step; MemoryError / PermissionError propagate (transient: the campaign stops, the replay reuses
+    every trial), any other failure keeps the own S3 in the summary (the null N still counts it) as `error`."""
+    try:
+        return cross()
+    except (MemoryError, PermissionError):
+        raise
+    except Exception as e:  # job-step boundary: logged with the traceback, recorded, never swallowed silently
+        log.exception("campaign.cross_failed", cell=cell.key)
+        return replace(summary, error=f"cross: {type(e).__name__}: {e}")
+
+
+def with_cross(
+    summary: BatchSummary,
+    result: SearchResult,
+    state: CampaignState,
+    cell: Cell,
+    *,
+    ledger: TrialLedger,
+    catalog: Catalog,
+    panels: PanelProvider,
+    seed: int,
+    fold: str,
+    prior_s3: Mapping[str, int],
+) -> BatchSummary:
+    """ADR-049 decision 3 for a batch whose best S2 and its own S3 are both positive: the same spec on the other
+    window's confirmation split, pooled with the own S3 and judged against the two splits' best-of-N null bar."""
+    s3 = next((o for o in result.s3 if o.trial_id == summary.s3_trial_id), None)
+    s2_id = None if s3 is None else s3.metrics.get("s2_trial_id")
+    source = next((s.source for s in result.s2 if s.outcome.trial_id == s2_id), None)
+    if source is None:
+        return summary
+    other = Cell(cell.family, cell.timeframe, cell.top_m, next(w for w in WINDOWS if w != cell.window))
+    _selection, other_confirmation = panels(other)
+    if missing_data(other, other_confirmation):
+        return summary  # the other window lacks the family's data: no cross run, the cell stays unstable
+    space = space_of(cell.space)
+    x = cross_confirm(
+        ledger,
+        catalog,
+        space,
+        source.candidate.point,
+        summary.s3_trial_id or 0,
+        other_confirmation,
+        fold=fold,
+        seed=seed,
+    )
+    if x is None:
+        return summary
+    bar = pooled_null_threshold(state.history, prior_s3, x.days)
+    return replace(summary, cross_sr=x.cross_sr, pooled_sr=x.pooled_sr, pooled_threshold=bar, cross_trial_id=x.trial_id)
 
 
 def run_campaign(
