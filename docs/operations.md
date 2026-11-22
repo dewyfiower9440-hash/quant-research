@@ -228,3 +228,41 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - `tools/register_paper_task.ps1`은 등록 뒤 `C:\dev\qr-data\run\paper.expected`를 만든다. 이 표시가 있으면 모니터는 paper heartbeat가 없어도 `heartbeat:paper` critical을 열고 6시간마다 다시 알린다.
 - **해제 절차:** `Unregister-ScheduledTask -TaskName qr-paper -Confirm:$false` → `C:\dev\qr-data\run\paper.expected`와 `paper.heartbeat.json` 삭제. 표시만 남기면 경보가 계속된다.
 - supervisor 상태(`run/supervisor.state.json`)는 60초마다 다시 쓰이며, 10분보다 오래된 상태는 모니터가 무시한다(supervisor가 꺼진 동안 이전 연속 재시작 횟수로 경보하지 않음).
+
+## 18. 멈추지 않는 자율 캠페인 예약 작업 (v2.3, ADR-049, 2026-11-22)
+- 예약 작업 등록은 자동 모드에서 거부되므로 사용자가 직접 실행한다(Gotchas). 세 작업 모두 사용자 권한(관리자 아님), 우선순위 7(BelowNormal), IgnoreNew로 등록된다. 각 스크립트는 `-WhatIf`로 무엇을 등록할지 먼저 보여 준다. 인자 검증 테스트: `Invoke-Pester -Path tests/powershell`.
+- 등록 명령(Claude Code 프롬프트에서 `!`로 시작해 실행):
+  - `! powershell -NoProfile -File C:/dev/auto/code/tools/register_campaign_task.ps1`
+    - 매시간 실행한다. 한 번에 최대 6시간, 30일 동안 돈다. c1을 사전 등록 격자로 이어서 돌리고, 라운드마다 G2~G4 묶음과 재개방 셀을 연다.
+    - 틱이 끝날 때마다 후보를 validator 대기열(outbox)에 넣는다.
+    - 로그: `qr-data/logs/campaign-c1.log`
+  - `! powershell -NoProfile -File C:/dev/auto/code/tools/register_data_queue_task.ps1`
+    - 2시간마다 실행하고, 한 번에 tier 하나의 한 단계만 처리한다(파일럿 → 투영 → 상한 검사 → 전체).
+    - 로그: `qr-data/logs/data-queue.log`, 상태: `qr-data/run/data-queue-state.json`
+  - `! powershell -NoProfile -File C:/dev/auto/code/tools/register_validator_task.ps1`
+    - 매시간 실행해 대기 중인 요청을 holdout에서 판정한다. 결과는 1비트로만 남긴다.
+    - 로그: `qr-data/logs/validator.log`. 트레이스백에 지역변수가 남지 않는다(holdout 값 차단).
+- 멈추기:
+  - `Disable-ScheduledTask`는 다음 틱만 막는다. 실행 중인 틱(캠페인 최대 6시간)은 계속 돈다.
+  - 캠페인을 지금 멈추려면 `qr-data/run/STOP-campaign` 파일을 만든다(다음 배치 경계에서 멈춤). 그리고 `Disable-ScheduledTask qr-campaign`.
+  - 곧바로 끊으려면 `Stop-ScheduledTask`. 끊긴 배치는 재개할 때 같은 trial로 다시 돈다.
+  - 데이터 큐·validator: `Disable-ScheduledTask` 또는 `Stop-ScheduledTask`에 `qr-data-queue` / `qr-validator`.
+- 다시 시작하기:
+  - `STOP-campaign` 파일을 지우고 `Enable-ScheduledTask`.
+  - 세 작업 모두 상태 파일·catalog·ledger에서 이어 간다.
+- 상태 확인:
+  - 캠페인 라운드와 원인: `qr-data/run/campaign-c1.md`
+    - 예약 실행은 저장소 밖에 쓴다. 커밋된 측정표를 매 틱 덮어쓰지 않기 위해서다.
+    - 기록으로 남길 때 `docs/measurements/`로 복사해 커밋한다.
+  - 대기 중인 데이터: `qr-data/run/data-queue.json`
+  - tier 상태: `qr-data/run/data-queue-state.json`
+  - `skipped_cap` tier는 lake 상한(200GB)이나 디스크 여유 때문에 멈춘 것이다. 상한 상향은 사용자 결정이다.
+- 동시 실행:
+  - 연구 프로세스는 `run/research.lock`으로 하나만 돈다. 캠페인 두 개나 run_search와는 같이 돌지 않는다.
+  - 다운로드:
+    - tier 전체 다운로드는 다른 벌크 다운로드와 `run/bulk.lock`을 공유한다. 잠금이 잡혀 있으면 다음 틱까지 기다린다.
+    - 파일럿은 별도 잠금(`bulk-extras-pilot.lock`)을 쓰므로 다른 다운로드와 같이 돌 수 있다.
+    - 외부 소스(`fetch_external.py`)는 잠금이 없다. 예약 작업의 IgnoreNew로만 한 번에 하나씩 돈다.
+  - validator는 `run/validator.lock`으로 하나만 돈다.
+  - 캠페인과 다운로드는 같이 돌 수 있다. 메모리 가드는 research gate 2GB, 다운로드 RAM 1.5GB이다.
+- 첫 등록 뒤 첫 캠페인 틱은 패널 캐시를 다시 만든다(패널 코드 변경, 창·주기·top-M 조합마다 약 8~10분).

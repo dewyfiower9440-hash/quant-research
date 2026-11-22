@@ -7,25 +7,31 @@
     tools/run_campaign.py saves its state after every batch (qr-data/run/campaign-<run>.json), so each tick resumes
     the same --run-id where the last one stopped: after the research gate (exit 3), a reboot or the session's memory
     reaper. A tick that finds another research process (run/research.lock) exits 2 and the next tick tries again.
-    Once the campaign is exhausted, every later tick ends at once with the same report.
+    v2.3 (ADR-049): with -Grid preregistered (default) the campaign never ends 'exhausted'; when its cells are used
+    it opens the next round (reopened data_missing cells, the next grid group) and only a round with nothing to
+    open ends the tick as waiting_data; the next tick computes the round again (new data from qr-data-queue).
+    Candidates go to the validator outbox at the end of every tick (register_validator_task.ps1 judges them).
     Each tick runs at most $MaxHours hours and appends its output (refusals, gate stops, tracebacks) to
     $LogDir\campaign-<run>.log. Stop early: create qr-data\run\STOP-campaign.
-    Lists are plain text, comma or space separated, because `powershell -File` does not parse arrays:
-        powershell -NoProfile -File C:/dev/auto/code/tools/register_campaign_task.ps1 -RunId c2 -Timeframes "1h,4h"
+    The default run id c1 continues the first campaign (its grid is group G1), so the S3 null bar keeps its N.
+    -Grid cli runs only -Timeframes / -TopM / -Windows (plain text lists, comma or space separated, because
+    `powershell -File` does not parse arrays):
+        powershell -NoProfile -File C:/dev/auto/code/tools/register_campaign_task.ps1 -WhatIf
     Every value is checked here, at registration, not later inside a silent pythonw run.
     Remove when done: Unregister-ScheduledTask -TaskName qr-campaign -Confirm:$false
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-campaign',
-    [ValidatePattern('^[A-Za-z0-9_-]{1,32}$')][string]$RunId = 'c2',
+    [ValidatePattern('^[A-Za-z0-9_-]{1,32}$')][string]$RunId = 'c1',
+    [ValidateSet('preregistered', 'cli')][string]$Grid = 'preregistered',
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
     [ValidateNotNullOrEmpty()][string]$Timeframes = '4h,1d',
     [ValidateNotNullOrEmpty()][string]$TopM = '100',
     [ValidateNotNullOrEmpty()][string]$Windows = 'w1,w2',
     [ValidateNotNullOrEmpty()][string]$LogDir = 'C:\dev\qr-data\logs',
     [ValidateRange(10, 1440)][int]$RepeatMinutes = 60,
-    [ValidateRange(1, 30)][int]$Days = 7,
+    [ValidateRange(1, 90)][int]$Days = 30,
     [ValidateRange(0.5, 24)][double]$MaxHours = 6,
     [ValidateRange(1, 8)][int]$PolarsThreads = 2
 )
@@ -50,9 +56,10 @@ $topList = Split-List -Text $TopM -Name 'TopM' -Pattern '^[1-9][0-9]{0,3}$'
 $winList = Split-List -Text $Windows -Name 'Windows' -Pattern '^(w1|w2)$'
 
 $user = "$env:USERDOMAIN\$env:USERNAME"
-$report = Join-Path $Project "docs\measurements\campaign-$RunId.md"
+# outside the repository: a scheduled tick must not rewrite the committed measurement (copy it to docs/ to commit)
+$report = Join-Path (Join-Path (Split-Path -Parent $LogDir) 'run') "campaign-$RunId.md"
 $logFile = Join-Path $LogDir "campaign-$RunId.log"
-$arguments = "tools\run_campaign.py --run-id $RunId --timeframes $($tfList -join ' ') " +
+$arguments = "tools\run_campaign.py --run-id $RunId --grid $Grid --timeframes $($tfList -join ' ') " +
     "--top-m $($topList -join ' ') --windows $($winList -join ' ') --max-hours $MaxHours " +
     "--polars-threads $PolarsThreads --report `"$report`" --log-file `"$logFile`""
 $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $Project
@@ -66,6 +73,6 @@ $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -Ru
 Write-Verbose "log: $logFile; resumable state: qr-data\run\campaign-$RunId.json"
 if ($PSCmdlet.ShouldProcess($TaskName, "Register per-user scheduled task: $arguments")) {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
-        -Principal $principal -Description "quant-research autonomous campaign $RunId (v2.2)" -Force |
+        -Principal $principal -Description "quant-research autonomous campaign $RunId (v2.3)" -Force |
         Select-Object TaskName, State
 }
