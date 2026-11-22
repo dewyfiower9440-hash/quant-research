@@ -83,6 +83,26 @@ def parse_state(request: str, entry: Mapping[str, object]) -> TierState:
     return TierState(status, projected, attempts, str(entry.get("note", "")), stalls)
 
 
+def unready_datasets(states: Mapping[str, TierState]) -> frozenset[str]:
+    """Tier datasets whose download is known to be incomplete (a state entry that is not `done`): research must
+    not use them yet. A campaign cell that ran while a tier was still downloading judged the family on a fraction
+    of the symbols and spent a pull (c1 round 2, v2.3 step 11). A tier without an entry is not judged here (no
+    state file hides nothing); datasets outside the tiers are never listed."""
+    return frozenset(d for d in TIERS if d in states and states[d].status != "done")
+
+
+def usable_datasets(datasets: Sequence[str], unready: frozenset[str], *, keep: Sequence[str]) -> tuple[str, ...]:
+    """A family's panel datasets without the unready optional ones (its column is then absent and the cell is
+    data_missing until the tier is done). `keep` (the default panel datasets: prices, funding cash flows) are
+    never dropped, so no family's backtest silently loses its funding costs."""
+    return tuple(d for d in datasets if d in keep or d not in unready)
+
+
+def visible_coverage(found: Mapping[str, Mapping[str, str]], unready: frozenset[str]) -> dict[str, dict[str, str]]:
+    """Research coverage without the unready tiers: a tier still downloading does not reopen its cells."""
+    return {w: {d: v for d, v in have.items() if d not in unready} for w, have in found.items()}
+
+
 def project(*, pilot_bytes: int, pilot_units: int, total_units: int) -> int:
     """Lake bytes of the full tier from the pilot's bytes per symbol-month, with the safety margin."""
     if pilot_units < 1 or total_units < 0 or pilot_bytes < 0:

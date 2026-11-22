@@ -109,7 +109,8 @@ def main() -> int:
     lower_priority()
     from quant_research.adapters.jobhost import write_json
     from quant_research.backtest.panel import Panel, PanelConfig
-    from quant_research.backtest.panel_store import PanelStore, Window, load_universe_panel
+    from quant_research.backtest.panel_store import DEFAULT_DATASETS, PanelStore, Window, load_universe_panel
+    from quant_research.bulk.tiers import parse_state, unready_datasets, usable_datasets, visible_coverage
     from quant_research.capture.lock import AlreadyRunningError, InstanceLock
     from quant_research.capture.run import git_sha, repo_root
     from quant_research.catalog.coverage import research_coverage
@@ -179,6 +180,21 @@ def main() -> int:
     stop_file = root / "run" / "STOP-campaign"
     deadline = None if a.max_hours is None else time.monotonic() + a.max_hours * 3_600
     loaded: dict[tuple[str, str, int, tuple[str, ...]], tuple[Panel, Panel]] = {}
+    # v2.3 step 11: tiers still downloading are not used in this tick (read once; a tier that finishes meanwhile
+    # counts from the next tick). An unreadable state file refuses the tick: inside a batch it would be recorded
+    # as a cell error and retire the whole grid.
+    tier_path = root / "run" / "data-queue-state.json"
+    try:
+        raw_tiers: Mapping[str, Mapping[str, object]] = (
+            cast(Mapping[str, Mapping[str, object]], json.loads(tier_path.read_text(encoding="utf-8")))
+            if tier_path.exists()
+            else {}
+        )
+        unready = unready_datasets({str(k): parse_state(str(k), v) for k, v in raw_tiers.items()})
+    except (ValueError, AttributeError, TypeError) as e:
+        print(json.dumps({"refused": f"unreadable {tier_path.name}: {type(e).__name__}: {e}"}))
+        return 1
+    print(json.dumps({"unready_tiers": sorted(unready)}))
 
     try:  # one research process at a time: close_abandoned() below assumes nobody else has running trials
         lock = InstanceLock(root / "run" / "research.lock").__enter__()
@@ -193,7 +209,8 @@ def main() -> int:
         pit = PointInTime(catalog)
 
         def panels(cell: Cell) -> tuple[Panel, Panel]:
-            datasets = panel_datasets(cell.family)  # v2.3 step 7: metrics / spot only for the families that read them
+            # v2.3 step 7: metrics / spot only for the families that read them; step 11: only finished tiers
+            datasets = usable_datasets(panel_datasets(cell.family), unready, keep=DEFAULT_DATASETS)
             key = (cell.window, cell.timeframe, cell.top_m, datasets)
             if key not in loaded:
                 loaded.clear()  # one panel in memory at a time
@@ -240,7 +257,9 @@ def main() -> int:
             sys.stdout.flush()
 
         windows_ns = {w: (month_ns(*lo), month_ns(*hi)) for w, (lo, hi) in WINDOWS.items()}
-        rounds = Rounds(groups, lambda: research_coverage(catalog, windows_ns), on_start=loaded.clear)
+        rounds = Rounds(
+            groups, lambda: visible_coverage(research_coverage(catalog, windows_ns), unready), on_start=loaded.clear
+        )
         # ADR-049 decision 2: the S3 null N of earlier campaigns on the same splits, one history per run id (a copy
         # such as campaign-c1-old.json must not count c1 twice; this run's own file is never counted)
         others: list[CampaignState] = []

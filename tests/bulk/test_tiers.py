@@ -17,6 +17,9 @@ from quant_research.bulk.tiers import (
     parse_state,
     project,
     tier_for,
+    unready_datasets,
+    usable_datasets,
+    visible_coverage,
 )
 
 
@@ -126,3 +129,29 @@ def test_a_pause_at_the_lake_cap_or_the_disk_reserve_is_a_user_decision() -> Non
     disk = after_exit(TierState("running"), "full", 3, progressed=True, gate_reason="free disk 49 GB < 50 GB")
     heat = after_exit(TierState("running"), "full", 3, progressed=True, gate_reason="SSD 72 C")
     assert (cap.status, disk.status, heat.status) == ("skipped_cap", "skipped_cap", "running")
+
+
+FUNDING, METRICS, SPOT_DS = "binance.um.bulk.funding", "binance.um.bulk.metrics_5m", "binance.spot.bulk.klines_1m"
+
+
+def test_a_tier_is_unready_only_while_its_download_is_known_to_be_incomplete() -> None:
+    """v2.3 step 11 (real c1 tick): taker_flow ran on metrics of 20 of 100 symbols and spent a pull as no_signal.
+    Review: a tier without a state entry is not judged (no state file must not close the funding cells)."""
+    states = {
+        FUNDING: TierState("done"),
+        METRICS: TierState("running"),
+        "binance.um.bulk.book_depth": TierState("skipped_cap"),
+    }
+    assert unready_datasets(states) == frozenset({METRICS, "binance.um.bulk.book_depth"})
+    assert unready_datasets({}) == frozenset()  # nothing known: nothing hidden
+    assert "binance.um.bulk.klines_1m" not in unready_datasets({"binance.um.bulk.klines_1m": TierState("running")})
+
+
+def test_panels_drop_only_optional_unready_datasets_and_coverage_hides_them() -> None:
+    """Review 3: funding is a default panel dataset (settlement cash flows of every family) and is never dropped."""
+    default = ("k", "m", "p", FUNDING)
+    unready = frozenset({FUNDING, METRICS})
+    assert usable_datasets((*default, METRICS), unready, keep=default) == default
+    assert usable_datasets((*default, SPOT_DS), unready, keep=default) == (*default, SPOT_DS)
+    found = {"w1": {FUNDING: "1", METRICS: "2"}, "w2": {SPOT_DS: "3"}}
+    assert visible_coverage(found, unready) == {"w1": {}, "w2": {SPOT_DS: "3"}}

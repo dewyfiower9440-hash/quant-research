@@ -64,3 +64,14 @@
 | 2026-11-20 | v2.2 B1·B2 | df49c67 | 선언 게이트(S1 최소 표본, 봉인 창) | 793 passed, 94.16% | run 44694783250 success |
 | 2026-11-20 | v2.2 B2 2차 리뷰 | 6ef251e | 선언 게이트(창 끝 event 검사, 충실도 테스트) | 794 passed, 94.18% | run 44696488217 success |
 | 2026-11-20 | v2.2 A3 부호 뒤집기 귀무 | 89dca8e | tools/run_null_v2.py --nulls signflip --reps 200 | 측정 159, 통과 0 (FWER 0, Wilson [0, 0.024]) | 측정표 docs/measurements/phase5-null-v2-signflip.md |
+| 2026-11-22 | v2.3 단계 1 | 2059866 | 선언 게이트(ADR-049, 문서) | 928 passed | run 45016999953 success |
+| 2026-11-22 | v2.3 단계 2 | b5ad029 | 선언 게이트(라운드 순수 핵심) | 940 passed | run 45018361713 success |
+| 2026-11-22 | v2.3 단계 3 | ef398fe | 선언 게이트(러너 라운드·커버리지·도구) | 964 passed | run 45020811427 success |
+| 2026-11-22 | v2.3 단계 5 | 60fa270 | 선언 게이트(데이터 큐) | 967 passed | run 45021864993 success |
+| 2026-11-22 | v2.3 단계 4 | 13f420c | 선언 게이트(두 창 결합 확인) | 976 passed | run 45023861522 success |
+| 2026-11-22 | v2.3 단계 6 | c2ca5e7 | 선언 게이트(비용 모형 v2) | 983 passed | run 45025289458 success |
+| 2026-11-22 | v2.3 단계 6 측정 | c2ca5e7 | tools/measure_cost_model.py | 보류 대역 v1 0.687 → v2 0.795 (기준 0.9 미충족) | 측정표 docs/measurements/v23-cost-model.md |
+| 2026-11-22 | v2.3 단계 7 | 6b63211 | 선언 게이트(metrics·spot 패널 열) | 990 passed | run 45027555190 success |
+| 2026-11-22 | v2.3 단계 8 | 2f5fe3d | 선언 게이트(새 계열 3개) | 1003 passed | run 45029134822 success |
+| 2026-11-22 | v2.3 단계 9 | bdd98f6 | 선언 게이트(validator 자동 제출) | 1006 passed | run 45030828572 success |
+| 2026-11-22 | v2.3 단계 10 | 4612e13 | 선언 게이트 + Invoke-Pester tests/powershell(8/8, 게이트 밖) | 1006 passed | run 45032472251 success |

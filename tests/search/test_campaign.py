@@ -305,3 +305,21 @@ def test_an_error_retires_the_cell_and_records_the_message() -> None:
     assert cell.key in state.retired
     summary = state.history[-1]["summary"]
     assert isinstance(summary, dict) and summary["error"] == "ValueError: selection too short"
+
+
+def test_a_cell_closed_while_its_tier_downloads_reopens_when_the_tier_is_done() -> None:
+    """v2.3 step 11 review 4: hidden coverage -> the cell waits; once the tier is done the same catalog version is
+    new to the cell (it was never opened with it), so it reopens with a fresh pull budget."""
+    from quant_research.bulk.tiers import visible_coverage
+
+    cell = Cell("taker_like", "4h", 100, "w2")
+    state = CampaignState.new("run", [cell], max_pulls=3)
+    state.record(cell, "no_signal", _summary(s1_finite=0), reward=0.0)  # the pull spent on partial data
+    state.record(cell, "data_missing", _summary(data_missing=(METRICS,)), reward=0.0)  # tier unready: column absent
+    found = {"w2": {METRICS: "905:1"}}
+    hidden = next_round(state, visible_coverage(found, frozenset({METRICS})), [[cell]])
+    assert hidden.reopened == () and hidden.waiting == (METRICS,)
+    plan = next_round(state, visible_coverage(found, frozenset()), [[cell]])
+    assert plan.reopened == (cell.key,)
+    state.start_round(plan, visible_coverage(found, frozenset()))
+    assert state.pull_base[cell.key] == 2 and cell.key in state.eligible()  # three new pulls on the full data
