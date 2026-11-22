@@ -76,3 +76,4 @@
 | 2026-11-22 | v2.3 단계 9 | bdd98f6 | 선언 게이트(validator 자동 제출) | 1006 passed | run 45030828572 success |
 | 2026-11-22 | v2.3 단계 10 | 4612e13 | 선언 게이트 + Invoke-Pester tests/powershell(8/8, 게이트 밖) | 1006 passed | run 45032472251 success |
 | 2026-11-23 | v2.3 단계 11 | aa0da41 | 선언 게이트(끝난 tier만 사용, c1 라운드 2 측정) | 1009 passed | run 45038382948 success |
+| 2026-11-23 | v2.3 단계 12 | d5abc39 | 선언 게이트(최종 리뷰 수정: 유니버스 전체 tier, 커버리지 하한, 라운드 읽기 실패 일시 정지) | 1013 passed, 94.48% | run 45072161420 success |
