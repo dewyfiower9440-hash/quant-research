@@ -2,6 +2,7 @@
 
     uv run python tools/run_campaign.py --run-id c1 [--timeframes 4h 1d] [--top-m 100] [--windows w2]
         [--families ...] [--max-batches N] [--max-hours H] [--s1-count 60] [--top-k 5]
+        [--polars-threads 2] [--log-file F]
 
 Cells = family x timeframe x top-M x research window (seal epoch 2). Panels come from the panel store (B3), built
 on first use and reused (one panel in memory at a time). State + bandit are saved after every batch to
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import re
 import sys
 import time
@@ -70,7 +72,19 @@ def main() -> int:
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", type=Path, default=None)
+    # 4 threads ran c1 into the 2 GB gate (B9); without the flag an inherited POLARS_MAX_THREADS wins, else 2
+    ap.add_argument("--polars-threads", type=int, default=None)
+    ap.add_argument("--log-file", type=Path, default=None, help="append stdout and stderr here (pythonw has none)")
     a = ap.parse_args()
+    if a.polars_threads is not None:  # before Polars is imported
+        os.environ["POLARS_MAX_THREADS"] = str(a.polars_threads)
+    else:
+        os.environ.setdefault("POLARS_MAX_THREADS", "2")
+    if a.log_file is not None:  # a scheduled run: refusals, gate stops and tracebacks must land somewhere
+        a.log_file.parent.mkdir(parents=True, exist_ok=True)
+        sink = a.log_file.open("a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = sink
+        print(json.dumps({"start": datetime.now(UTC).isoformat(timespec="seconds"), "argv": sys.argv[1:]}))
     lower_priority()
     from quant_research.adapters.jobhost import write_json
     from quant_research.backtest.panel import Panel, PanelConfig
