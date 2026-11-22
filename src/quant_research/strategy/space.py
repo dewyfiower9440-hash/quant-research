@@ -178,6 +178,10 @@ SPACES: dict[str, Space] = {
     "low_vol": Space("low_vol", (IntAxis("window", 24, 720, 24), _QUANTILE), _WIDE_COMMON),
     "liquidity": Space("liquidity", (IntAxis("window", 24, 720, 24), _QUANTILE), _WIDE_COMMON),
     "breakout": Space("breakout", (IntAxis("window", 24, 720, 24), FloatAxis("buffer", 0.0, 0.2, 0.05)), _COMMON),
+    # v2.3 step 8 (pre-registered before the metrics / spot tiers are read)
+    "oi_positioning": Space("oi_positioning", (IntAxis("window", 4, 336, 4), _QUANTILE), _COMMON),
+    "taker_flow": Space("taker_flow", (IntAxis("window", 1, 168, 1), _QUANTILE), _COMMON),
+    "spot_basis": Space("spot_basis", (IntAxis("window", 4, 168, 4), _QUANTILE), _COMMON),
 }
 
 

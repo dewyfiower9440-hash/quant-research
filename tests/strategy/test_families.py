@@ -49,9 +49,47 @@ def _minutes(hourly: F64, volume: F64) -> pl.DataFrame:
     return pl.concat(frames)
 
 
-def _panel(hourly: F64, *, volume: F64 | None = None, funding: F64 | None = None, premium: F64 | None = None) -> Panel:
+def _metrics(oi_growth: F64, taker: F64) -> pl.DataFrame:
+    """Hourly metrics snapshots: open interest growing at a per-symbol rate, a constant taker buy / sell ratio."""
+    stamps = np.arange(HOURS)
+    return pl.concat(
+        pl.DataFrame(
+            {
+                "symbol": [name] * HOURS,
+                "event_ns": T0 + stamps * H,
+                "sum_open_interest_value": 1e6 * np.exp(oi_growth[k] * stamps),
+                "sum_toptrader_long_short_ratio": np.ones(HOURS),
+                "sum_taker_long_short_vol_ratio": np.full(HOURS, float(taker[k])),
+                "available_ns": T0 + stamps * H + M,
+            }
+        )
+        for k, name in enumerate(SYMBOLS)
+    )
+
+
+def _panel(
+    hourly: F64,
+    *,
+    volume: F64 | None = None,
+    funding: F64 | None = None,
+    premium: F64 | None = None,
+    oi_growth: F64 | None = None,
+    taker: F64 | None = None,
+    basis: F64 | None = None,
+) -> Panel:
     n = len(SYMBOLS)
     minutes = _minutes(hourly, np.full(n, 1_000.0) if volume is None else volume)
+    metrics = None
+    if oi_growth is not None or taker is not None:
+        metrics = _metrics(np.zeros(n) if oi_growth is None else oi_growth, np.ones(n) if taker is None else taker)
+    spot = None
+    if basis is not None:  # the spot pair trades at contract / (1 + basis)
+        factor = pl.DataFrame({"symbol": SYMBOLS, "_f": 1.0 / (1.0 + basis)})
+        spot = (
+            minutes.join(factor, on="symbol")
+            .with_columns(pl.col(c) * pl.col("_f") for c in ("open", "high", "low", "close"))
+            .drop("_f")
+        )
     cfg = PanelConfig(H)
     decisions = decision_grid(T0, T0 + (HOURS - 2) * H, cfg)
     fund = None
@@ -80,7 +118,9 @@ def _panel(hourly: F64, *, volume: F64 | None = None, funding: F64 | None = None
     members = pl.DataFrame(
         {"symbol": SYMBOLS, "from_ns": [T0] * n, "to_ns": [None] * n}, schema_overrides={"to_ns": pl.Int64}
     )
-    frame = assemble(decisions, SYMBOLS, minutes, cfg, funding=fund, premium=prem, members=members)
+    frame = assemble(
+        decisions, SYMBOLS, minutes, cfg, funding=fund, premium=prem, members=members, metrics=metrics, spot=spot
+    )
     return Panel(frame, settlements(fund, None), [("lake/synthetic.parquet", 1)], cfg)
 
 
@@ -132,7 +172,25 @@ def _breakout() -> Panel:
     return _panel(_noise(7) + drift)
 
 
+def _oi_positioning() -> Panel:
+    growth = np.linspace(-0.002, 0.002, len(SYMBOLS))  # per hour
+    return _panel(_noise(8) + _ranked_drift(growth, 0.002), oi_growth=growth)
+
+
+def _taker_flow() -> Panel:
+    taker = np.linspace(0.8, 1.2, len(SYMBOLS))
+    return _panel(_noise(9) + _ranked_drift(-taker, 0.002), taker=taker)  # more taker buying, higher return
+
+
+def _spot_basis() -> Panel:
+    basis = np.linspace(-0.002, 0.002, len(SYMBOLS))
+    return _panel(_noise(10) + _ranked_drift(basis, 0.002), basis=basis)
+
+
 PLANTED: dict[str, tuple[Callable[[], Panel], dict[str, float]]] = {
+    "oi_positioning": (_oi_positioning, {"window": 24, "quantile": 0.8}),
+    "taker_flow": (_taker_flow, {"window": 4, "quantile": 0.8}),
+    "spot_basis": (_spot_basis, {"window": 8, "quantile": 0.8}),
     "xs_reversal": (_xs_reversal, {"lookback": 1, "quantile": 0.8}),
     "low_vol": (_low_vol, {"window": 48, "quantile": 0.8}),
     "liquidity": (_liquidity, {"window": 24, "quantile": 0.8}),
@@ -168,6 +226,9 @@ def test_each_new_family_finds_no_edge_on_a_random_walk(family: str) -> None:
         volume=rng.permutation(np.geomspace(1e3, 1e6, n)),
         funding=rng.permutation(np.linspace(-0.0005, 0.0005, n)),
         premium=rng.permutation(np.linspace(-0.002, 0.002, n)),
+        oi_growth=rng.permutation(np.linspace(-0.002, 0.002, n)),
+        taker=rng.permutation(np.linspace(0.8, 1.2, n)),
+        basis=rng.permutation(np.linspace(-0.002, 0.002, n)),
     )
     res = evaluate_s1(build(family, params, n=n), flat, S1Config(horizon_bars=4, round_trip_cost=0.0))
     assert res.event_samples >= 100 and res.event_hac_t is not None  # not a pass by having no events

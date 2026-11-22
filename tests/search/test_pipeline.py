@@ -517,3 +517,21 @@ def test_a_family_whose_data_is_not_in_the_panel_is_refused_before_any_trial(
             seed=1,
         )
     assert _count(ledger, "S0") == 0
+
+
+def test_the_v23_families_ask_for_their_datasets_and_are_data_missing_without_their_columns(
+    panels: tuple[Panel, Panel],
+) -> None:
+    """v2.3 steps 7-8: a family's panel reads the datasets of its inputs; a panel without them is data_missing."""
+    from quant_research.backtest.panel_store import DEFAULT_DATASETS
+    from quant_research.search.pipeline import missing_inputs, panel_datasets
+    from quant_research.strategy.ops import METRICS, SPOT
+
+    assert panel_datasets("trend") == DEFAULT_DATASETS
+    assert panel_datasets("oi_positioning") == (*DEFAULT_DATASETS, METRICS)
+    assert panel_datasets("taker_flow") == (*DEFAULT_DATASETS, METRICS)
+    assert panel_datasets("spot_basis") == (*DEFAULT_DATASETS, SPOT)
+    selection, _confirmation = panels  # klines only: no metrics, no spot columns
+    assert missing_inputs("oi_positioning", selection) == (METRICS,)
+    assert missing_inputs("spot_basis", selection) == (SPOT,)
+    assert missing_inputs("trend", selection) == ()

@@ -61,7 +61,26 @@ def panel() -> Panel:
     members = pl.DataFrame(
         {"symbol": syms, "from_ns": [T0] * 3, "to_ns": [None] * 3}, schema_overrides={"to_ns": pl.Int64}
     )
-    frame = assemble(decisions, syms, minutes, cfg, mark=mark, funding=funding, members=members)
+    hours = DAYS * 24  # v2.3 steps 7-8: metrics snapshots and a spot pair, so every template has its inputs
+    metrics = pl.DataFrame(
+        {
+            "symbol": [s for s in syms for _ in range(hours)],
+            "event_ns": [T0 + h * H for _ in syms for h in range(hours)],
+            "sum_open_interest_value": [
+                1e6 * (1 + 0.01 * ((h * (k + 2)) % 17)) for k, _ in enumerate(syms) for h in range(hours)
+            ],
+            "sum_toptrader_long_short_ratio": [1.0] * (3 * hours),
+            "sum_taker_long_short_vol_ratio": [
+                0.9 + 0.02 * ((h + 5 * k) % 11) for k, _ in enumerate(syms) for h in range(hours)
+            ],
+        }
+    ).with_columns((pl.col("event_ns") + M).alias("available_ns"))
+    spot = minutes.with_columns(
+        pl.col(c) * (0.998 + 0.001 * (pl.col("event_ns") // H % 5)) for c in ("open", "high", "low", "close")
+    )
+    frame = assemble(
+        decisions, syms, minutes, cfg, mark=mark, funding=funding, members=members, metrics=metrics, spot=spot
+    )
     return Panel(frame, settlements(funding, mark), [("lake/x.parquet", 1)], cfg)
 
 

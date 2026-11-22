@@ -74,6 +74,9 @@ Family = Literal[
     "low_vol",
     "liquidity",
     "breakout",  # v2.2 B6 (D6)
+    "oi_positioning",
+    "taker_flow",
+    "spot_basis",  # v2.3 step 8
 ]
 Timeframe = Literal["5m", "15m", "1h", "4h", "1d"]
 TIMEFRAME_NS: dict[str, int] = {

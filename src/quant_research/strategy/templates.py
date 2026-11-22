@@ -12,10 +12,21 @@ from quant_research.strategy.spec import StrategySpec
 Json = dict[str, object]
 Params = Mapping[str, float]
 FAMILIES: tuple[str, ...] = ("trend", "mean_reversion", "momentum", "funding_basis", "volatility")  # v1 (Director)
-# v2.2 B6 (D6): documented crypto cross-sectional / time-series premia that the panel data already supports. OI
-# positioning (metrics), taker flow (aggTrades), BTC lead-lag and the kimchi premium need data that is not in the
-# panel yet (B4 downloads, a reference-asset operator) and are added when it is.
-NEW_FAMILIES: tuple[str, ...] = ("xs_reversal", "funding_carry", "premium_basis", "low_vol", "liquidity", "breakout")
+# v2.2 B6 (D6): documented crypto cross-sectional / time-series premia that the panel data already supports.
+# v2.3 step 8: OI positioning, taker flow (metrics 5m ratios) and the spot basis, now that the panel carries those
+# columns (step 7); they stay data_missing until the data tiers are in the lake. BTC lead-lag (a reference-asset
+# operator) and the kimchi premium (Upbit T6) are still held back.
+NEW_FAMILIES: tuple[str, ...] = (
+    "xs_reversal",
+    "funding_carry",
+    "premium_basis",
+    "low_vol",
+    "liquidity",
+    "breakout",
+    "oi_positioning",
+    "taker_flow",
+    "spot_basis",
+)
 ALL_FAMILIES: tuple[str, ...] = FAMILIES + NEW_FAMILIES
 
 # Pre-registered grids (initial priors; widened 2026-11-10, ADR-024); index 0 is the Phase 2 default.
@@ -71,6 +82,13 @@ GRID: dict[str, list[dict[str, float]]] = {
     "low_vol": [{"window": 168, "quantile": 0.8}, {"window": 336, "quantile": 0.8}, {"window": 720, "quantile": 0.9}],
     "liquidity": [{"window": 168, "quantile": 0.8}, {"window": 336, "quantile": 0.8}, {"window": 720, "quantile": 0.9}],
     "breakout": [{"window": 48, "buffer": 0.0}, {"window": 168, "buffer": 0.0}, {"window": 336, "buffer": 0.05}],
+    "oi_positioning": [
+        {"window": 24, "quantile": 0.8},
+        {"window": 72, "quantile": 0.8},
+        {"window": 168, "quantile": 0.9},
+    ],
+    "taker_flow": [{"window": 4, "quantile": 0.8}, {"window": 24, "quantile": 0.8}, {"window": 72, "quantile": 0.9}],
+    "spot_basis": [{"window": 8, "quantile": 0.8}, {"window": 24, "quantile": 0.8}, {"window": 72, "quantile": 0.9}],
 }
 REQUIRED_DATA: dict[str, tuple[str, ...]] = {
     "trend": ("klines",),
@@ -84,6 +102,9 @@ REQUIRED_DATA: dict[str, tuple[str, ...]] = {
     "low_vol": ("klines",),
     "liquidity": ("klines",),
     "breakout": ("klines",),
+    "oi_positioning": ("klines", "open_interest"),
+    "taker_flow": ("klines", "taker_ratio"),
+    "spot_basis": ("klines", "spot"),
 }
 
 
@@ -215,6 +236,17 @@ def build(family: str, params: Params, *, n: int = 10) -> StrategySpec:
                 },
                 n,
             )
+        case "oi_positioning":  # crowding: short the names whose open interest grew most, long those deleveraging
+            # contracts = OI value / price: the quote-currency value moves with the price, and its change rate would
+            # largely repeat the short-term reversal of xs_reversal (review, step 8)
+            contracts = {"op": "div", "args": [{"op": "oi_value"}, _close()]}
+            return _ranked("oi_positioning", {"op": "ret", "args": [contracts], "window": int(p["window"])}, p, n)
+        case "taker_flow":  # order flow: long persistent taker buying, short taker selling (rank of minus the ratio)
+            flow = {"op": "sma", "args": [{"op": "taker_ls"}], "window": int(p["window"])}
+            return _ranked("taker_flow", {"op": "neg", "args": [flow]}, p, n)
+        case "spot_basis":  # contract over spot: short the richest futures, long the cheapest (cash-and-carry)
+            basis = {"op": "sub", "args": [{"op": "div", "args": [_close(), {"op": "spot_close"}]}, 1.0]}
+            return _ranked("spot_basis", {"op": "sma", "args": [basis], "window": int(p["window"])}, p, n)
         case _:
             raise ValueError(f"unknown family {family!r} (families: {', '.join(ALL_FAMILIES)})")
 
