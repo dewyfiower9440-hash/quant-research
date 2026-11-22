@@ -26,7 +26,14 @@ from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger, TrialOrigin, experiment_key
 from quant_research.search.archive import Archive, Descriptor, Elite
 from quant_research.search.bandit import FamilyBandit, cost_normalised_reward, deflated_performance
-from quant_research.search.cost_model import LinearCost, LinearMemory, guard_memory, plan_rows, spec_ops
+from quant_research.search.cost_model import (
+    CostPredictor,
+    LinearCost,
+    LinearMemory,
+    guard_memory,
+    plan_rows,
+    spec_ops,
+)
 from quant_research.search.optimizers import Searcher, propose
 from quant_research.search.promotion import Selection, select_for_s2
 from quant_research.search.s0_stage import Accepted, S0Outcome, run_s0
@@ -190,7 +197,7 @@ def run_family_search(
     fold: str | None = None,
     origin: TrialOrigin | None = None,
     gate: Callable[[], tuple[bool, str]] | None = None,
-    cost_model: Mapping[str, LinearCost] | None = None,
+    cost_model: Mapping[str, CostPredictor] | None = None,
     memory_model: LinearMemory | None = None,
     bandit: FamilyBandit | None = None,
     archive: Archive | None = None,
@@ -223,10 +230,7 @@ def run_family_search(
             raise RuntimeError(f"resource gate refused the batch: {why}")
     s1_count = budget.s1_count
     if cost_model is not None and budget.time_budget_s is not None and "S1" in cost_model:
-        # shrink the sample so the predicted S1 batch fits the time budget (cost is per row x ops)
-        fit_rows = plan_rows(cost_model["S1"], rows=rows, ops=[OPS_PRIOR] * s1_count, budget_s=budget.time_budget_s)
-        if fit_rows < rows:
-            s1_count = max(0, int(s1_count * fit_rows / max(rows, 1)))
+        s1_count = s1_budget(cost_model["S1"], rows=rows, count=s1_count, budget_s=budget.time_budget_s)
     cost: dict[str, float] = {}
 
     first_new = int(ledger.store.conn.execute("select coalesce(max(trial_id), 0) from trial").fetchone()[0])
@@ -362,9 +366,21 @@ MIN_SPLIT_DECISIONS = 24  # each part of the reward split keeps at least a day o
 OPS_PRIOR = 20  # typical expanded-tree node count, used only before the candidates are known
 
 
+def s1_budget(model: CostPredictor, *, rows: int, count: int, budget_s: float) -> int:
+    """How many S1 proposals fit the time budget: the v1 line shrinks through `plan_rows` (cost per row x ops),
+    any other model (v2 `RowCost`: a per-trial cost on this panel) by its predicted seconds per trial."""
+    if isinstance(model, LinearCost):
+        fit_rows = plan_rows(model, rows=rows, ops=[OPS_PRIOR] * count, budget_s=budget_s)
+        return count if fit_rows >= rows else max(0, int(count * fit_rows / max(rows, 1)))
+    per_trial = model.predict(rows, OPS_PRIOR)
+    if per_trial <= 0 or per_trial * count <= budget_s:
+        return count
+    return max(0, int(budget_s / per_trial))
+
+
 def predicted_costs(
     ledger: TrialLedger,
-    cost_model: Mapping[str, LinearCost],
+    cost_model: Mapping[str, CostPredictor],
     *,
     fold: str | None,
     s1: Sequence[S1Scored],

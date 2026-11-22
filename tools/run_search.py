@@ -87,7 +87,7 @@ def main() -> int:
     from quant_research.search.archive import Archive
     from quant_research.search.bandit import BanditPrior, FamilyBandit
     from quant_research.search.compare import compare, planted_landscape
-    from quant_research.search.cost_model import BAND, CostSample, LinearCost, fit_cost
+    from quant_research.search.cost_model import BAND, CostSample, LinearCost, fit_cost, fit_cost_v2
     from quant_research.search.multiplicity import dsr_report, sharpe_stats, sr_variance
     from quant_research.search.neff_stage import group_summary, neff_groups
     from quant_research.search.optimizers import RandomSearcher, Searcher, TpeSearcher
@@ -123,16 +123,16 @@ def main() -> int:
         }
 
     def cost_samples(store: ResearchStore) -> list[CostSample]:
-        rows = store.conn.execute(
-            "select stage, metrics_json, cost_s from trial where status in ('done', 'rejected') and cost_s is not null "
-            "and metrics_json is not null and stage in ('S1', 'S2', 'S3')"
+        rows = store.conn.execute(  # recording order: the v2 model weighs recent trials more (ADR-049 decision 4)
+            "select stage, metrics_json, cost_s, coalesce(fold, '') from trial where status in ('done', 'rejected') "
+            "and cost_s is not null and metrics_json is not null and stage in ('S1', 'S2', 'S3') order by trial_id"
         ).fetchall()
         out: list[CostSample] = []
-        for stage, m, cost in rows:
+        for stage, m, cost, fold in rows:
             body = json.loads(m)
             r, o = body.get("rows"), body.get("ops")
             if isinstance(r, int) and isinstance(o, int) and r > 0 and o > 0:
-                out.append(CostSample(str(stage), r, o, float(cost)))
+                out.append(CostSample(str(stage), r, o, float(cost), group=str(fold)))
         return out
 
     with InstanceLock(root / "run" / "research.lock"):
@@ -166,7 +166,7 @@ def main() -> int:
             n_s2 = a.top_k + round(a.promote_rate * a.s1_count)
             for family in families:
                 for name in searchers:
-                    fit = fit_cost(cost_samples(store))  # from everything recorded so far
+                    fit = fit_cost_v2(cost_samples(store))  # from everything recorded so far (v2, ADR-049)
                     pred: dict[str, float | None] = {
                         "S1": fit["S1"].predict(rows, OPS_PRIOR) * a.s1_count if "S1" in fit else None,
                         "S2": fit["S2"].predict(rows, OPS_PRIOR) * n_s2 if "S2" in fit else None,
@@ -223,7 +223,13 @@ def main() -> int:
                             "ratio_pred_over_actual": ratios,
                             "optuna_evaluations": optuna,
                             "wall_s": round(time.monotonic() - w, 1),
-                            "cost_fit": {k: [v.a, v.b] for k, v in fit.items()},
+                            "cost_fit": {
+                                k: {
+                                    "fallback": list(v.fallback),
+                                    "buckets": {str(b): list(ab) for b, ab in v.buckets.items()},
+                                }
+                                for k, v in fit.items()
+                            },
                         }
                     )
                     line = {"family": family, "searcher": name, **res.counts(), "wall_s": batches[-1]["wall_s"]}
