@@ -26,7 +26,16 @@ from quant_research.backtest.panel_store import Window
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
 from quant_research.search.bandit import BanditPrior, FamilyBandit
-from quant_research.search.campaign import BatchSummary, CampaignState, CauseCode, Cell, classify
+from quant_research.search.campaign import (
+    WINDOWS,
+    Availability,
+    BatchSummary,
+    CampaignState,
+    CauseCode,
+    Cell,
+    classify,
+    next_round,
+)
 from quant_research.search.multiplicity import expected_max_sr
 from quant_research.search.optimizers import RandomSearcher
 from quant_research.search.pipeline import SearchBudget, SearchResult, missing_inputs, run_family_search
@@ -36,7 +45,17 @@ from quant_research.strategy.space import space_of
 log = structlog.get_logger(__name__)
 S1_HORIZON_BARS: dict[str, int] = {"1h": 24, "4h": 6, "1d": 5}  # about one day, one day, one week ahead
 MAX_WARMUP_BARS = 1_200  # longest v2 lookback (720) + smoothing + volatility windows, with room
-Status = Literal["exhausted", "budget", "stopped", "gate"]
+Status = Literal["exhausted", "budget", "stopped", "gate", "waiting_data"]
+
+
+@dataclass(frozen=True, slots=True)
+class Rounds:
+    """ADR-049 rounds: the pre-registered grid groups, the research coverage (read when a round is computed) and a
+    hook run before a round starts (the caller drops its in-process panel cache: reopened cells need new panels)."""
+
+    groups: Sequence[Sequence[Cell]]
+    available: Callable[[], Availability]
+    on_start: Callable[[], None] = lambda: None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,15 +130,41 @@ def summarize(
     )
 
 
-def s3_null_threshold(history: Sequence[Mapping[str, object]], window: str, confirmation_days: int) -> float:
-    """Expected max daily SR under the null of the S3 runs judged on this window's confirmation split so far, this
-    one included (N = earlier judged S3 + 1; variance of a daily SR estimate ~ 1 / days)."""
-    judged = 0
+def _judged(history: Sequence[Mapping[str, object]], window: str) -> int:
+    n = 0
     for h in history:
         summary = h.get("summary")
         if str(h.get("cell", "")).endswith(f"|{window}") and isinstance(summary, Mapping):
-            judged += cast(Mapping[str, object], summary).get("s3_sr") is not None
-    return expected_max_sr(judged + 1, 1.0 / max(confirmation_days, 1))
+            n += cast(Mapping[str, object], summary).get("s3_sr") is not None
+    return n
+
+
+def earlier_histories(states: Sequence[CampaignState], own_run: str) -> list[list[dict[str, object]]]:
+    """One history per other run id: the longest (histories only grow, so a stale copy such as campaign-c1-old.json
+    neither counts a run twice nor replaces its current file and lowers the null N)."""
+    best: dict[str, list[dict[str, object]]] = {}
+    for s in states:
+        if s.run_id != own_run and len(s.history) >= len(best.get(s.run_id, [])):
+            best[s.run_id] = s.history
+    return list(best.values())
+
+
+def judged_s3_counts(histories: Sequence[Sequence[Mapping[str, object]]]) -> dict[str, int]:
+    """S3 runs judged per research window in earlier campaigns (ADR-049 decision 2: the null N carries over)."""
+    out: dict[str, int] = {}
+    for window in WINDOWS:
+        n = sum(_judged(h, window) for h in histories)
+        if n:
+            out[window] = n
+    return out
+
+
+def s3_null_threshold(
+    history: Sequence[Mapping[str, object]], window: str, confirmation_days: int, *, prior: int = 0
+) -> float:
+    """Expected max daily SR under the null of the S3 runs judged on this window's confirmation split so far, this
+    one included (N = earlier judged S3, `prior` ones of earlier campaigns among them, + 1; variance ~ 1 / days)."""
+    return expected_max_sr(prior + _judged(history, window) + 1, 1.0 / max(confirmation_days, 1))
 
 
 def split_window(
@@ -166,6 +211,7 @@ def run_batch(
     catalog: Catalog,
     panels: PanelProvider,
     config: CampaignConfig,
+    prior_s3: Mapping[str, int] | None = None,
 ) -> tuple[CauseCode, BatchSummary, float]:
     selection, confirmation = panels(cell)
     missing = missing_data(cell, selection)
@@ -195,7 +241,8 @@ def run_batch(
         fold=f"{state.run_id}:{cell.key}:{pull}",
         bandit=one_arm,
     )
-    threshold = s3_null_threshold(state.history, cell.window, _days(confirmation))
+    prior = (prior_s3 or {}).get(cell.window, 0)
+    threshold = s3_null_threshold(state.history, cell.window, _days(confirmation), prior=prior)
     summary = summarize(result, min_exposure=config.min_exposure, s3_threshold=threshold)
     validation = None if result.validation is None else _number(result.validation.metrics, "sr_daily")
     reward = max(0.0, validation or 0.0)
@@ -214,10 +261,14 @@ def run_campaign(
     stop: Callable[[], bool],
     persist: Callable[[CampaignState, FamilyBandit], None],
     out_of_time: Callable[[], bool] = lambda: False,
+    rounds: Rounds | None = None,
+    prior_s3: Mapping[str, int] | None = None,
 ) -> CampaignOutcome:
-    """Run batches until nothing is eligible, the batch or time budget is used, the stop check fires or the gate
-    refuses. The state and the bandit are persisted after every batch. A batch that raises is recorded with cause
-    `error` (its cell retires, the trials it wrote stay in the ledger) so one bad cell cannot stall the campaign."""
+    """Run batches until the batch or time budget is used, the stop check fires or the gate refuses. When nothing is
+    eligible: without `rounds` the campaign is `exhausted`; with them the next ADR-049 round starts (persisted), and
+    only a round with nothing to open ends the call as `waiting_data` (the next scheduled tick asks again). The
+    state and the bandit are persisted after every batch. A batch that raises is recorded with cause `error` (its
+    cell retires, the trials it wrote stay in the ledger) so one bad cell cannot stall the campaign."""
     ran = 0
     while True:
         if config.max_batches is not None and ran >= config.max_batches:
@@ -231,10 +282,25 @@ def run_campaign(
             return CampaignOutcome("gate", ran, why)
         cell = state.next_cell(bandit, seed=config.seed, seq=len(state.history))
         if cell is None:
-            return CampaignOutcome("exhausted", ran, "no eligible cell")
+            if rounds is None:
+                return CampaignOutcome("exhausted", ran, "no eligible cell")
+            available = rounds.available()
+            plan = next_round(state, available, rounds.groups)
+            if plan.empty:
+                if state.data_requests != list(plan.waiting):
+                    state.data_requests = list(plan.waiting)
+                    persist(state, bandit)  # the state file shows what the campaign now waits for
+                waiting = ", ".join(plan.waiting) or "no data requested"
+                return CampaignOutcome("waiting_data", ran, f"round {state.round} has nothing to open ({waiting})")
+            rounds.on_start()
+            state.start_round(plan, available)
+            bandit.add_arms(c.key for c in state.all_cells())  # cells no transition reaches (1h, top30)
+            log.info("campaign.round", round=state.round, reopened=list(plan.reopened), added=len(plan.added))
+            persist(state, bandit)
+            continue
         try:
             cause, summary, reward = run_batch(
-                state, cell, ledger=ledger, catalog=catalog, panels=panels, config=config
+                state, cell, ledger=ledger, catalog=catalog, panels=panels, config=config, prior_s3=prior_s3
             )
         except (MemoryError, PermissionError) as e:  # not a property of the cell: stop, nothing recorded, resumable
             log.warning("campaign.batch_transient", cell=cell.key, error=f"{type(e).__name__}: {e}")

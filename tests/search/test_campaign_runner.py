@@ -8,8 +8,14 @@ from quant_research.backtest.panel import Panel
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
 from quant_research.search.bandit import BanditPrior, FamilyBandit
-from quant_research.search.campaign import CampaignState, Cell
-from quant_research.search.campaign_runner import CampaignConfig, CampaignOutcome, missing_data, run_campaign
+from quant_research.search.campaign import BatchSummary, CampaignState, Cell
+from quant_research.search.campaign_runner import (
+    CampaignConfig,
+    CampaignOutcome,
+    Rounds,
+    missing_data,
+    run_campaign,
+)
 
 CELLS = [Cell("momentum", "1h", 30, "w2"), Cell("funding_carry", "1h", 30, "w2")]
 CONFIG = CampaignConfig(seed=4, s1_count=8, top_k=2, promote_rate=0.0, s3_top=1, s3_random_rate=0.0)
@@ -191,6 +197,85 @@ def test_the_s3_threshold_grows_with_the_s3_runs_judged_on_the_same_split() -> N
     assert 0.0 < t5 < t50
     assert s3_null_threshold(judged(49, "w1"), "w2", 150) == 0.0  # another window's split does not count
     assert s3_null_threshold(judged(49, "w2"), "w2", 600) < t50  # a longer split: a tighter null
+
+
+def test_the_s3_threshold_counts_the_s3_runs_of_earlier_campaigns_on_the_same_split() -> None:
+    """ADR-049 decision 2: a new run id must not restart the best-of-N bar from zero."""
+    from quant_research.search.campaign_runner import judged_s3_counts, s3_null_threshold
+
+    earlier: list[dict[str, object]] = [{"cell": "trend@4h|top100|w2", "summary": {"s3_sr": 0.01}} for _ in range(49)]
+    earlier.append({"cell": "trend@4h|top100|w1", "summary": {"s3_sr": None}})  # not judged
+    prior = judged_s3_counts([earlier])
+    assert prior == {"w2": 49}
+    fresh = s3_null_threshold([], "w2", 150, prior=prior.get("w2", 0))
+    assert fresh == s3_null_threshold(earlier, "w2", 150) > 0.0
+
+
+def test_earlier_campaigns_count_once_each_with_their_latest_history() -> None:
+    """Re-review (step 3): a stale copy (campaign-c1-old.json sorts first) replaced c1's file and lowered the N."""
+    from quant_research.search.campaign_runner import earlier_histories
+
+    cell = Cell("trend", "4h", 100, "w2")
+    old, new, mine = CampaignState.new("c1", [cell]), CampaignState.new("c1", [cell]), CampaignState.new("c2", [cell])
+    judged = BatchSummary(1, 1, 1, 1, 0.1, 0.1, 0.0, 0.5, 0.01, ())
+    for s, n in ((old, 1), (new, 3), (mine, 5)):
+        for _ in range(n):
+            s.record(cell, "unstable", judged, reward=0.0)
+    histories = earlier_histories([old, new, mine], "c2")
+    assert [len(h) for h in histories] == [3]  # c1 once, its longest history; c2 (this run) not at all
+
+
+def test_an_exhausted_round_opens_the_next_group_then_waits_for_data(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    """ADR-049: with rounds the campaign does not end 'exhausted'; it adds the next group, runs it, and stops only as
+    'waiting_data' when the data its data_missing cells asked for never arrives."""
+    catalog, ledger = env
+    first, second = Cell("momentum", "1h", 30, "w2"), Cell("funding_carry", "1h", 30, "w2")
+    state = CampaignState.new("g", [first], max_pulls=1)
+    bandit = _bandit(state)
+    started: list[int] = []
+    out = run_campaign(
+        state,
+        bandit,
+        ledger=ledger,
+        catalog=catalog,
+        panels=lambda _cell: panels,
+        config=CONFIG,
+        gate=lambda: (True, ""),
+        stop=lambda: False,
+        persist=lambda _s, _b: None,
+        rounds=Rounds(groups=[[first], [second]], available=lambda: {}, on_start=lambda: started.append(1)),
+    )
+    ran = [str(h["cell"]) for h in state.history]
+    assert second.key in ran and state.round >= 2 and started  # the second group ran after the first retired
+    assert out.status == "waiting_data"
+    if missing_data(second, panels[0]):
+        assert "binance.um.bulk.funding" in out.reason and state.data_requests == ["binance.um.bulk.funding"]
+
+
+def test_rounds_never_restart_a_round_with_an_empty_plan(
+    env: tuple[Catalog, TrialLedger],
+    panels: tuple[Panel, Panel],
+) -> None:
+    catalog, ledger = env
+    cell = Cell("momentum", "1h", 30, "w2")
+    state = CampaignState.new("e", [cell], max_pulls=1)
+    state.record(cell, "no_signal", BatchSummary(0, 0, 0, 0, None, None, None, None, None, ()), reward=0.0)
+    out = run_campaign(
+        state,
+        _bandit(state),
+        ledger=ledger,
+        catalog=catalog,
+        panels=lambda _cell: panels,
+        config=CONFIG,
+        gate=lambda: (True, ""),
+        stop=lambda: False,
+        persist=lambda _s, _b: None,
+        rounds=Rounds(groups=[[cell]], available=lambda: {}),
+    )
+    assert out.status == "waiting_data" and out.batches == 0 and state.round == 1
 
 
 def test_the_time_budget_ends_the_campaign_as_budget_not_as_the_gate(
