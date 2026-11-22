@@ -110,6 +110,27 @@ def test_only_a_finished_s3_trial_can_be_submitted_once_and_a_spec_only_once(
         submit_candidate(venv.research, s2.trial_id, rule=LENIENT, now_ns=4)
 
 
+def test_a_campaign_tick_submits_each_new_candidate_once_and_reports_the_rest(
+    venv: Env, panels: tuple[Panel, Panel]
+) -> None:
+    """v2.3 step 9: the campaign submits its candidates at the end of every tick; a later tick skips them."""
+    from quant_research.search.campaign import BatchSummary, CampaignState, Cell, candidate_trials
+    from quant_research.validator.process import submit_campaign_candidates
+
+    sel, _conf = panels
+    trial = _s3_trial(venv, sel)
+    cell = Cell("momentum", "1h", 30, "w2")
+    state = CampaignState.new("t", [cell], max_pulls=5)
+    won = BatchSummary(10, 10, 3, 3, 0.1, 0.1, 0.0, 0.5, 0.05, (), s3_trial_id=trial)
+    state.record(cell, "unstable", BatchSummary(10, 10, 3, 3, 0.1, 0.1, 0.0, 0.5, -0.01, (), s3_trial_id=999), reward=0)
+    state.record(cell, "candidate", won, reward=0.0)
+    assert candidate_trials(state.history) == [trial]  # only candidate batches, by their own S3 trial
+    first = submit_campaign_candidates(venv.research, state.history, rule=LENIENT, now_ns=1)
+    assert [s["trial_id"] for s in first.submitted] == [trial] and first.skipped == {}
+    again = submit_campaign_candidates(venv.research, state.history, rule=LENIENT, now_ns=2)
+    assert again.submitted == [] and "already submitted" in again.skipped[str(trial)]
+
+
 def test_a_holdout_too_short_for_the_rule_is_refused_without_spending_a_query(
     venv: Env, panels: tuple[Panel, Panel]
 ) -> None:
@@ -144,6 +165,30 @@ def test_a_judged_request_leaves_one_bit_and_no_holdout_trial_in_research(
     log = venv.vstore.access_log()
     assert {r.purpose for r in log} >= {"holdout_hist"} and venv.vstore.verify_chain()[0]
     assert "binance.um.bulk.funding" in {r.dataset_id for r in log}  # B8 review 7: every dataset the panel reads
+
+
+def test_the_access_log_names_every_dataset_the_holdout_panel_of_the_family_reads(
+    venv: Env, panels: tuple[Panel, Panel]
+) -> None:
+    """v2.3 step 9 review 2: the holdout panel reads the family's datasets (panel_datasets), the log only the spec's
+    ops: a spot_basis spec whose ops never read spot left the spot holdout read out of the chained log."""
+    from quant_research.strategy.ops import SPOT
+
+    sel, conf = panels
+    body = _spec().model_dump(mode="json")
+    body["family"] = "spot_basis"  # ops of the momentum template: no spot_close
+    out = run_backtest(
+        StrategySpec.model_validate(body),
+        sel,
+        venv.catalog,
+        venv.ledger,
+        RunConfig(engine="event"),
+        stage="S3",
+        fold="x",
+    )
+    submit_candidate(venv.research, out.trial_id, rule=LENIENT, now_ns=1)
+    venv.run(_holdout(conf), LENIENT)
+    assert SPOT in {r.dataset_id for r in venv.vstore.access_log()}
 
 
 def test_a_bad_request_is_refused_and_does_not_block_the_queue(venv: Env, panels: tuple[Panel, Panel]) -> None:

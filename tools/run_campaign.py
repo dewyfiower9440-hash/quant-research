@@ -132,6 +132,8 @@ def main() -> int:
     )
     from quant_research.search.pipeline import panel_datasets
     from quant_research.strategy.templates import ALL_FAMILIES
+    from quant_research.validator.process import submit_campaign_candidates
+    from quant_research.validator.verdict import DecisionRule
 
     root = load_settings().data_root
     families = a.families or list(ALL_FAMILIES)
@@ -265,6 +267,9 @@ def main() -> int:
             rounds=rounds,
             prior_s3=prior_s3,
         )
+        # v2.3 step 9 (B10): new candidates go to the validator outbox at the end of every tick (research.lock held)
+        sent = submit_campaign_candidates(research, state.history, rule=DecisionRule(), now_ns=time.time_ns())
+        print(json.dumps({"validator_submitted": sent.submitted, "validator_skipped": sent.skipped}))
     finally:
         research.close()
         catalog.close()

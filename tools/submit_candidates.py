@@ -12,8 +12,6 @@ import argparse
 import json
 import re
 import time
-from collections.abc import Mapping
-from typing import cast
 
 
 def main() -> int:
@@ -26,23 +24,14 @@ def main() -> int:
     from quant_research.capture.lock import AlreadyRunningError, InstanceLock
     from quant_research.config import load_settings
     from quant_research.research.store import ResearchStore
-    from quant_research.search.campaign import CampaignState
-    from quant_research.validator.process import submit_candidate
-    from quant_research.validator.store import ValidatorError
+    from quant_research.search.campaign import CampaignState, candidate_trials
+    from quant_research.validator.process import submit_campaign_candidates
     from quant_research.validator.verdict import DecisionRule
 
     root = load_settings().data_root
     saved = json.loads((root / "run" / f"campaign-{a.run_id}.json").read_text(encoding="utf-8"))
     state = CampaignState.from_json(saved["state"])
-    trials: list[int] = []
-    for h in state.history:
-        summary = h.get("summary")
-        if h.get("cause") == "candidate" and isinstance(summary, Mapping):
-            trial = cast(Mapping[str, object], summary).get("s3_trial_id")
-            if isinstance(trial, int):
-                trials.append(trial)
-    submitted: list[dict[str, int]] = []
-    skipped: dict[str, str] = {}
+    trials = candidate_trials(state.history)  # the campaign tool also submits these at the end of every tick
     if a.dry_run or not trials:
         print(json.dumps({"run_id": a.run_id, "candidates": trials, "dry_run": a.dry_run}))
         return 0
@@ -53,16 +42,11 @@ def main() -> int:
         return 2
     research = ResearchStore.open(root / "meta" / "research.db")
     try:
-        for trial in trials:
-            try:
-                rid = submit_candidate(research, trial, rule=DecisionRule(), now_ns=time.time_ns())
-                submitted.append({"trial_id": trial, "request_id": rid})
-            except ValidatorError as e:
-                skipped[str(trial)] = str(e)
+        sent = submit_campaign_candidates(research, state.history, rule=DecisionRule(), now_ns=time.time_ns())
     finally:
         research.close()
         lock.__exit__(None, None, None)
-    print(json.dumps({"run_id": a.run_id, "candidates": trials, "submitted": submitted, "skipped": skipped}))
+    print(json.dumps({"run_id": a.run_id, "candidates": trials, "submitted": sent.submitted, "skipped": sent.skipped}))
     return 0
 
 

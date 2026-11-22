@@ -35,6 +35,8 @@ from quant_research.catalog.epochs import EPOCH2_WINDOWS, HOLDOUT_UNTIL_NS, RESE
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
 from quant_research.research.store import ResearchStore
+from quant_research.search.campaign import candidate_trials
+from quant_research.search.pipeline import panel_datasets
 from quant_research.strategy.spec import StrategySpec
 from quant_research.validator.null_pipeline import holdout_evaluation
 from quant_research.validator.store import Submission, ValidatorError, ValidatorStore
@@ -89,6 +91,30 @@ def submit_candidate(research: ResearchStore, trial_id: int, *, rule: DecisionRu
         (trial_id, str(row[3]), str(row[2]), float(sr), rule.hash(), now_ns),
     )
     return int(cur.lastrowid or 0)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateSubmission:
+    submitted: list[dict[str, int]]  # {"trial_id", "request_id"}
+    skipped: dict[str, str]  # trial id -> why (already submitted, same spec, not a finished S3)
+
+
+def submit_campaign_candidates(
+    research: ResearchStore, history: Sequence[Mapping[str, object]], *, rule: DecisionRule, now_ns: int
+) -> CandidateSubmission:
+    """v2.3 step 9: every candidate of a campaign history into the outbox; refusals are reported, not raised (the
+    campaign tick runs this each time, so the candidates of earlier ticks come back as 'already submitted')."""
+
+    submitted: list[dict[str, int]] = []
+    skipped: dict[str, str] = {}
+    for trial in candidate_trials(history):
+        try:
+            submitted.append(
+                {"trial_id": trial, "request_id": submit_candidate(research, trial, rule=rule, now_ns=now_ns)}
+            )
+        except ValidatorError as e:
+            skipped[str(trial)] = str(e)
+    return CandidateSubmission(submitted, skipped)
 
 
 def pending_requests(research_ro: sqlite3.Connection, store: ValidatorStore) -> list[Request]:
@@ -180,7 +206,9 @@ def process_request(
         spec = _spec(research_ro, req.experiment_key)
     except (ValidatorError, ValueError) as e:  # pydantic's ValidationError is a ValueError
         return close(f"unreadable request: {e}")
-    datasets = sorted(set(spec_datasets(spec)) | set(datasets_read))
+    # every dataset the holdout provider reads for this spec is logged: its ops, the default panel, and the panel
+    # datasets of its family (tools/run_validator.py builds holdout panels with panel_datasets; review step 9)
+    datasets = sorted(set(spec_datasets(spec)) | set(datasets_read) | set(panel_datasets(spec.family)))
     k, used = store.budget(EPOCH)
     if req.rule_hash != rule.hash():
         return close(f"request rule {req.rule_hash} is not the epoch's rule {rule.hash()}")

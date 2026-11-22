@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 EARLIEST_NS = 1_577_836_800 * 10**9  # 2020-01-01: the first month of the lake history
 
@@ -29,7 +31,14 @@ def month_floor(ns: int) -> int:
 
 
 def main() -> int:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--log-file", type=Path, default=None, help="append stdout and stderr here (pythonw has none)")
+    a = ap.parse_args()
+    if a.log_file is not None:  # a scheduled run (v2.3 step 9): its output must land somewhere
+        a.log_file.parent.mkdir(parents=True, exist_ok=True)
+        sink = a.log_file.open("a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = sink
+        print(json.dumps({"start": datetime.now(UTC).isoformat(timespec="seconds")}))
     import structlog
 
     from quant_research.backtest.panel import Panel, PanelConfig, slice_panel
@@ -44,13 +53,15 @@ def main() -> int:
     from quant_research.research.ledger import TrialLedger
     from quant_research.research.store import ResearchStore
     from quant_research.search.campaign_runner import MAX_WARMUP_BARS
+    from quant_research.search.pipeline import panel_datasets
     from quant_research.strategy.spec import TIMEFRAME_NS, StrategySpec
     from quant_research.validator.process import H_FWD, H_HIST, HoldoutRole, process_pending
     from quant_research.validator.store import ValidatorStore, open_readonly
     from quant_research.validator.verdict import DecisionRule
 
     settings = load_settings()
-    configure_logging(settings.log_level, json=True)  # logs to stderr: stdout carries the ack bits only
+    # logs to stderr (stdout carries the ack bits only); no frame locals: they hold holdout results (review step 9)
+    configure_logging(settings.log_level, json=True, show_locals=False)
     log = structlog.get_logger("run_validator")
     root = settings.data_root
     try:
@@ -64,17 +75,26 @@ def main() -> int:
     research_ro = open_readonly(root / "meta" / "research.db")
     panels = PanelStore(root / "cache" / "panels")
     pit = PointInTime(catalog, role="validator")
-    cache: dict[tuple[str, str, int], Panel] = {}
+    cache: dict[tuple[str, str, int, tuple[str, ...]], Panel] = {}
 
     def holdout(spec: StrategySpec, role: HoldoutRole, latency_ns: int) -> Panel:
-        key = (spec.timeframe, role, latency_ns)
+        datasets = panel_datasets(spec.family)  # v2.3: metrics / spot for the families that read them
+        key = (spec.timeframe, role, latency_ns, datasets)
         if key not in cache:
+            cache.clear()  # one holdout panel in memory at a time (the research side's rule)
             target = H_HIST if role == "hist" else H_FWD
             tf = TIMEFRAME_NS[spec.timeframe]
             start = max(EARLIEST_NS, month_floor(target.first_ns - MAX_WARMUP_BARS * tf))  # research's warm-up
             window = Window(start, target.end_ns)
             universe = load_universe_panel(
-                pit, root, panels, window, PanelConfig(tf, latency_ns=latency_ns), top_m=None, rule=PIT_RULE
+                pit,
+                root,
+                panels,
+                window,
+                PanelConfig(tf, latency_ns=latency_ns),
+                top_m=None,
+                rule=PIT_RULE,
+                datasets=datasets,
             )
             if universe.missing:  # holdout-side information: the validator's log, not stdout (ack bits only)
                 log.warning("validator.members_without_klines", holdout=role, members=len(universe.missing))

@@ -378,6 +378,18 @@ def _summary_json(s: BatchSummary) -> dict[str, object]:
     }
 
 
+def candidate_trials(history: Sequence[Mapping[str, object]]) -> list[int]:
+    """The own S3 trial of every candidate batch, in order (what the validator outbox receives)."""
+    out: list[int] = []
+    for h in history:
+        summary = h.get("summary")
+        if h.get("cause") == "candidate" and isinstance(summary, Mapping):
+            trial = cast(Mapping[str, object], summary).get("s3_trial_id")
+            if isinstance(trial, int) and trial not in out:
+                out.append(trial)
+    return out
+
+
 def negative_report(state: CampaignState) -> dict[str, object]:
     """What an ended campaign found: batches, causes, candidates, and which data to collect next."""
     causes = Counter(str(h["cause"]) for h in state.history)

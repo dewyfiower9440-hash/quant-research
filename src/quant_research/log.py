@@ -4,6 +4,7 @@ import logging
 import sys
 
 import structlog
+from structlog.tracebacks import ExceptionDictTransformer
 from structlog.typing import EventDict, Processor, WrappedLogger
 
 _SENSITIVE_KEYS = (
@@ -30,19 +31,25 @@ def _stderr_logger(*_args: object) -> structlog.PrintLogger:
     return structlog.PrintLogger(sys.stderr)
 
 
-def configure_logging(level: str, *, json: bool, cache: bool = True) -> None:
+def configure_logging(level: str, *, json: bool, cache: bool = True, show_locals: bool = True) -> None:
     """Configure structlog once. Logs go to stderr so stdout stays free for CLI output.
 
-    `cache=False` (tests) re-binds loggers on every use so captured streams are honored.
+    `cache=False` (tests) re-binds loggers on every use so captured streams are honored. `show_locals=False` keeps
+    frame locals out of JSON tracebacks (the validator: its locals hold holdout results, v2.3 step 9 review).
     """
     renderer: Processor = structlog.processors.JSONRenderer() if json else structlog.dev.ConsoleRenderer()
+    tracebacks: Processor = (
+        structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=show_locals))
+        if json
+        else structlog.processors.format_exc_info
+    )
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             redact_secrets,
-            structlog.processors.dict_tracebacks if json else structlog.processors.format_exc_info,
+            tracebacks,
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelNamesMapping()[level]),
