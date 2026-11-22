@@ -201,6 +201,53 @@ def test_the_funding_feature_is_an_8h_equivalent_rate_while_settlements_keep_the
     assert settlements(funding, None)["rate"].to_list() == pytest.approx([0.0001, 0.0001])
 
 
+def _metrics(symbol: str, rows: list[tuple[int, float, float, float, int]]) -> pl.DataFrame:
+    """(event_ns, oi value, top-trader L/S, taker L/S, available_ns) rows of the bulk metrics dataset."""
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * len(rows),
+            "event_ns": [r[0] for r in rows],
+            "sum_open_interest": [1.0] * len(rows),
+            "sum_open_interest_value": [r[1] for r in rows],
+            "count_toptrader_long_short_ratio": [1.0] * len(rows),
+            "sum_toptrader_long_short_ratio": [r[2] for r in rows],
+            "count_long_short_ratio": [1.0] * len(rows),
+            "sum_taker_long_short_vol_ratio": [r[3] for r in rows],
+            "available_ns": [r[4] for r in rows],
+        }
+    )
+
+
+def test_metrics_columns_are_the_newest_row_available_at_the_decision_never_a_later_one() -> None:
+    """v2.3 step 7 leakage check: a metrics row recorded before the decision but available after it is not seen."""
+    cfg = PanelConfig(60 * M)
+    kl = minutes("A", 3 * 60)
+    d1 = T0 + 60 * M + cfg.decision_delay_ns  # the first decision
+    rows = [
+        (T0 + 30 * M, 1_000.0, 1.1, 0.9, T0 + 31 * M),  # visible at d1
+        (T0 + 59 * M, 2_000.0, 1.3, 1.2, d1 + M),  # event before d1, available after: not at d1 (future)
+    ]
+    frame = assemble(decision_grid(T0, T0 + 2 * 60 * M, cfg), ["A"], kl, cfg, metrics=_metrics("A", rows))
+    first = frame.filter(pl.col("decision_ns") == d1).row(0, named=True)
+    assert (first["oi_value"], first["toptrader_ls"], first["taker_ls"]) == (1_000.0, 1.1, 0.9)
+    second = frame.filter(pl.col("decision_ns") == d1 + 60 * M).row(0, named=True)
+    assert second["oi_value"] == 2_000.0  # seen one decision later
+
+
+def test_spot_close_is_scaled_by_the_contract_multiplier_and_missing_inputs_are_null_columns() -> None:
+    cfg = PanelConfig(60 * M)
+    kl = minutes("1000SHIBUSDT", 2 * 60)
+    spot = minutes("1000SHIBUSDT", 2 * 60).with_columns(pl.col("close") / 1_000.0)  # the SHIBUSDT price
+    grid = decision_grid(T0, T0 + 60 * M, cfg)
+    frame = assemble(grid, ["1000SHIBUSDT"], kl, cfg, spot=spot, spot_multiplier=1_000.0)
+    joined = frame.drop_nulls("close").row(0, named=True)
+    assert joined["spot_close"] == pytest.approx(joined["close"])  # same price level as the contract
+    empty = assemble(grid, ["1000SHIBUSDT"], kl, cfg, metrics=pl.DataFrame(), spot=pl.DataFrame())
+    assert empty["oi_value"].null_count() == empty.height and empty["spot_close"].null_count() == empty.height
+    plain = assemble(grid, ["1000SHIBUSDT"], kl, cfg)
+    assert "oi_value" not in plain.columns and "spot_close" not in plain.columns  # not asked for: no columns
+
+
 def _reference_select_top_liquidity(frame: pl.DataFrame, n: int, window_days: int = 30) -> pl.DataFrame:
     """The pre-fix implementation (quadratic in days per symbol), kept as the reference semantics."""
     day = 86_400 * 10**9

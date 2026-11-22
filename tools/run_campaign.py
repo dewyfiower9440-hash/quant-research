@@ -130,6 +130,7 @@ def main() -> int:
         run_campaign,
         split_window,
     )
+    from quant_research.search.pipeline import panel_datasets
     from quant_research.strategy.templates import ALL_FAMILIES
 
     root = load_settings().data_root
@@ -175,7 +176,7 @@ def main() -> int:
     gate0 = research_gate(root)
     stop_file = root / "run" / "STOP-campaign"
     deadline = None if a.max_hours is None else time.monotonic() + a.max_hours * 3_600
-    loaded: dict[tuple[str, str, int], tuple[Panel, Panel]] = {}
+    loaded: dict[tuple[str, str, int, tuple[str, ...]], tuple[Panel, Panel]] = {}
 
     try:  # one research process at a time: close_abandoned() below assumes nobody else has running trials
         lock = InstanceLock(root / "run" / "research.lock").__enter__()
@@ -190,7 +191,8 @@ def main() -> int:
         pit = PointInTime(catalog)
 
         def panels(cell: Cell) -> tuple[Panel, Panel]:
-            key = (cell.window, cell.timeframe, cell.top_m)
+            datasets = panel_datasets(cell.family)  # v2.3 step 7: metrics / spot only for the families that read them
+            key = (cell.window, cell.timeframe, cell.top_m, datasets)
             if key not in loaded:
                 loaded.clear()  # one panel in memory at a time
                 (y0, m0), (y1, m1) = WINDOWS[cell.window]
@@ -204,6 +206,7 @@ def main() -> int:
                     PanelConfig(TIMEFRAME_S[cell.timeframe] * 10**9),
                     top_m=cell.top_m,
                     rule=PIT_RULE,
+                    datasets=datasets,
                 )
                 loaded[key] = split_window(universe.panel, window)
                 print(

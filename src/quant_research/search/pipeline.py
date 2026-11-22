@@ -21,6 +21,7 @@ import numpy as np
 import polars as pl
 
 from quant_research.backtest.panel import Panel, slice_panel
+from quant_research.backtest.panel_store import DEFAULT_DATASETS
 from quant_research.backtest.run import RunConfig, RunOutcome, experiment_config, run_backtest
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger, TrialOrigin, experiment_key
@@ -41,6 +42,7 @@ from quant_research.search.s1 import S1Config
 from quant_research.search.s1_stage import S1Scored, reuse_s1, run_s1
 from quant_research.search.s2_stage import S2Scored, run_s2, s2_engine_config
 from quant_research.strategy.canonical import spec_hash
+from quant_research.strategy.ops import METRICS, SPOT
 from quant_research.strategy.space import Point, build_point, space_of
 from quant_research.strategy.spec import TIMEFRAME_NS
 from quant_research.strategy.templates import REQUIRED_DATA
@@ -146,7 +148,20 @@ def point_from_json(body: Mapping[str, object]) -> Point:
 DATA_COLUMNS: dict[str, tuple[str, str]] = {
     "funding": ("funding_rate", "binance.um.bulk.funding"),
     "premium": ("premium_close", "binance.um.bulk.premium_klines_1m"),
+    # v2.3 step 7: one need per metrics column (review: the taker / top-trader ratios are null in some files where
+    # open interest is not, so a family is checked on the column it reads)
+    "open_interest": ("oi_value", METRICS),
+    "toptrader_ratio": ("toptrader_ls", METRICS),
+    "taker_ratio": ("taker_ls", METRICS),
+    "spot": ("spot_close", SPOT),
 }
+
+
+def panel_datasets(template_family: str) -> tuple[str, ...]:
+    """The datasets a family's panel must read: the default four plus the optional inputs it needs (v2.3 step 7; a
+    panel built without them has no such column, so the family would stay data_missing after the data arrived)."""
+    extra = [DATA_COLUMNS[n][1] for n in REQUIRED_DATA.get(template_family, ()) if n in DATA_COLUMNS]
+    return tuple(dict.fromkeys([*DEFAULT_DATASETS, *extra]))
 
 
 def missing_inputs(template_family: str, panel: Panel) -> tuple[str, ...]:

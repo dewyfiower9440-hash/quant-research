@@ -11,7 +11,21 @@ from quant_research.strategy.compile import EXPANDING_MIN_HISTORY, compile_spec,
 from quant_research.strategy.ops import OPS
 from quant_research.strategy.spec import Node, parse_spec
 
-COLUMNS = ("open", "high", "low", "close", "volume", "quote_volume", "mark_close", "premium_close", "funding_rate")
+COLUMNS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "mark_close",
+    "premium_close",
+    "funding_rate",
+    "oi_value",
+    "toptrader_ls",
+    "taker_ls",
+    "spot_close",
+)
 
 
 def panel(values: dict[str, list[float]], *, members: dict[str, list[bool]] | None = None) -> pl.DataFrame:
@@ -34,6 +48,10 @@ def panel(values: dict[str, list[float]], *, members: dict[str, list[bool]] | No
                     "mark_close": c,
                     "premium_close": c / 1000,
                     "funding_rate": c / 10000,
+                    "oi_value": c * 1000,  # v2.3 step 7 inputs: every data op is covered by the leak test
+                    "toptrader_ls": 1 + c / 1000,
+                    "taker_ls": 1 - c / 2000,
+                    "spot_close": c * 0.999,
                 }
             )
     return order(pl.DataFrame(rows))

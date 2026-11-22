@@ -225,7 +225,7 @@ class PanelStore:
         for dataset_id in datasets:
             found = [
                 (f.relative_to(data_root).as_posix(), f.stat().st_size)
-                for f in bulk_files(data_root, dataset_id, [symbol], months)
+                for f in bulk_files(data_root, dataset_id, [panel_module.bulk_source(symbol, dataset_id)[0]], months)
             ]
             files += found
             if found:

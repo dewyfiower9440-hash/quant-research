@@ -17,6 +17,8 @@ KLINES = "binance.um.bulk.klines_1m"
 MARK = "binance.um.bulk.mark_klines_1m"
 PREMIUM = "binance.um.bulk.premium_klines_1m"
 FUNDING = "binance.um.bulk.funding"
+METRICS = "binance.um.bulk.metrics_5m"  # v2.3 step 7: open interest, top-trader and taker long/short ratios
+SPOT = "binance.spot.bulk.klines_1m"  # v2.3 step 7: the spot pair's 1m close (basis = contract / spot - 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,10 @@ OPS: dict[str, OpSpec] = {
     "mark_close": _data("mark_close", MARK),
     "premium_close": _data("premium_close", PREMIUM),
     "funding_rate": _data("funding_rate", FUNDING),
+    "oi_value": _data("oi_value", METRICS),  # open interest in quote currency (5 m snapshot)
+    "toptrader_ls": _data("toptrader_ls", METRICS),  # top traders' long / short position ratio
+    "taker_ls": _data("taker_ls", METRICS),  # taker buy / sell volume ratio
+    "spot_close": _data("spot_close", SPOT),  # spot close at the contract's price level (multiplier applied)
     "atr": OpSpec("data", 0, 0, True, (KLINES,), column="atr"),  # mean true range over `window` bars
     # arithmetic
     "add": OpSpec("arith", 2, 2, False, commutative=True),

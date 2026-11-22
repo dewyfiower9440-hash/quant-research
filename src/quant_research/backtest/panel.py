@@ -20,9 +20,10 @@ from typing import cast
 
 import polars as pl
 
+from quant_research.catalog.universe_load import split_multiplier
 from quant_research.data.access import PointInTime
 from quant_research.data.lake import load_bulk
-from quant_research.strategy.ops import FUNDING, KLINES, MARK, PREMIUM
+from quant_research.strategy.ops import FUNDING, KLINES, MARK, METRICS, PREMIUM, SPOT
 
 MINUTE_NS = 60 * 10**9
 DAY_NS = 86_400 * 10**9
@@ -104,8 +105,13 @@ def assemble(
     premium: pl.DataFrame | None = None,
     funding: pl.DataFrame | None = None,
     members: pl.DataFrame | None = None,
+    metrics: pl.DataFrame | None = None,
+    spot: pl.DataFrame | None = None,
+    spot_multiplier: float = 1.0,
 ) -> pl.DataFrame:
-    """Pure assembly from 1m frames that already carry `available_ns` (PointInTime.rows_visible)."""
+    """Pure assembly from 1m frames that already carry `available_ns` (PointInTime.rows_visible). `metrics` /
+    `spot` (v2.3 step 7) add their columns only when given (an empty frame: asked for but no rows -> null columns),
+    so the panels of families that do not read them stay as they were."""
     tf = config.timeframe_ns
     grid = pl.DataFrame({"symbol": list(symbols)}).join(decisions.to_frame(), how="cross")
     feature = bars(klines, tf).rename({"start_ns": "bar_start_ns"})
@@ -127,6 +133,8 @@ def assemble(
         out = _asof(out, rates, "available_ns").drop("available_ns")
     else:
         out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("funding_rate"))
+    out = _join_metrics(out, metrics)
+    out = _join_spot(out, spot, tf, spot_multiplier)
     # execution interval [d + latency, next d + latency) as 1m aggregates
     offset = (config.decision_delay_ns + config.latency_ns) % tf
     ex = bars(klines.drop("available_ns", strict=False), tf, offset_ns=offset, prefix="exec_")
@@ -172,6 +180,34 @@ def assemble(
         )
         out = out.join(hit, on=["symbol", "decision_ns"], how="left").with_columns(pl.col("member").fill_null(False))
     return out.sort(["decision_ns", "symbol"])
+
+
+METRIC_COLUMNS = {  # bulk metrics_5m column -> panel column
+    "sum_open_interest_value": "oi_value",
+    "sum_toptrader_long_short_ratio": "toptrader_ls",
+    "sum_taker_long_short_vol_ratio": "taker_ls",
+}
+
+
+def _join_metrics(out: pl.DataFrame, metrics: pl.DataFrame | None) -> pl.DataFrame:
+    """The newest metrics snapshot available at each decision (backward as-of on `available_ns`)."""
+    if metrics is None:
+        return out
+    if not metrics.height:
+        return out.with_columns(pl.lit(None, dtype=pl.Float64).alias(c) for c in METRIC_COLUMNS.values())
+    snap = metrics.select("symbol", *(pl.col(k).alias(v) for k, v in METRIC_COLUMNS.items()), "available_ns")
+    return _asof(out, snap, "available_ns").drop("available_ns")
+
+
+def _join_spot(out: pl.DataFrame, spot: pl.DataFrame | None, tf: int, multiplier: float) -> pl.DataFrame:
+    """The spot pair's bar close at the contract's price level (1000SHIB: SHIB x 1000), as of the decision."""
+    if spot is None:
+        return out
+    if not spot.height:
+        return out.with_columns(pl.lit(None, dtype=pl.Float64).alias("spot_close"))
+    b = bars(spot.select("symbol", "event_ns", "open", "high", "low", "close", "available_ns"), tf, prefix="spot_")
+    b = b.select("symbol", (pl.col("spot_close") * multiplier).alias("spot_close"), "spot_available_ns")
+    return _asof(out, b, "spot_available_ns").drop("spot_available_ns")
 
 
 def select_top_liquidity(frame: pl.DataFrame, n: int, *, window_days: int = 30) -> pl.DataFrame:
@@ -234,6 +270,16 @@ def select_top_liquidity(frame: pl.DataFrame, n: int, *, window_days: int = 30) 
     )
 
 
+def bulk_source(symbol: str, dataset_id: str) -> tuple[str, float]:
+    """(lake symbol, price multiplier) a contract's rows of `dataset_id` are stored under: the spot pair has its own
+    name (1000SHIBUSDT -> SHIBUSDT, x 1000), every futures dataset the contract's. One mapping for the loader and
+    the shard key (review v2.3 step 7). Known limit: a spot pair that keeps the prefix (1000SATS) is not found."""
+    if dataset_id != SPOT:
+        return symbol, 1.0
+    base, multiplier = split_multiplier(symbol.removesuffix("USDT"))
+    return f"{base}USDT", multiplier
+
+
 def months_between(start_ns: int, end_ns: int) -> list[str]:
     out: list[str] = []
     day = datetime.fromtimestamp(start_ns / 1e9, UTC).replace(day=1)
@@ -271,12 +317,17 @@ def load_panel(
     funding_parts: list[pl.DataFrame] = []
     for symbol in symbols:
         frames: dict[str, pl.DataFrame] = {}
+        multiplier = bulk_source(symbol, SPOT)[1]
         for dataset_id in datasets:
-            read = load_bulk(data_root, dataset_id, [symbol], months)
+            source = bulk_source(symbol, dataset_id)[0]  # the spot pair is stored under its own name
+            read = load_bulk(data_root, dataset_id, [source], months)
             files += read.files
             if read.frame.height:
                 pit.check_span(dataset_id, first_bar_ns, latest)  # warm-up included (ADR-040)
-                frames[dataset_id] = pit.rows_visible(read.frame, dataset_id)
+                visible = pit.rows_visible(read.frame, dataset_id)
+                frames[dataset_id] = (
+                    visible.with_columns(pl.lit(symbol).alias("symbol")) if source != symbol else visible
+                )
         if KLINES not in frames:
             raise FileNotFoundError(f"no {KLINES} lake files for {symbol} in {months[0]}..{months[-1]}")
         parts.append(
@@ -289,6 +340,9 @@ def load_panel(
                 premium=frames.get(PREMIUM),
                 funding=frames.get(FUNDING),
                 members=members,
+                metrics=frames.get(METRICS, pl.DataFrame()) if METRICS in datasets else None,
+                spot=frames.get(SPOT, pl.DataFrame()) if SPOT in datasets else None,
+                spot_multiplier=multiplier,
             )
         )
         funding_parts.append(settlements(frames.get(FUNDING), frames.get(MARK)))

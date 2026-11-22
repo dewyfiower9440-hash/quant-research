@@ -23,7 +23,7 @@ from quant_research.catalog.bootstrap import bootstrap
 from quant_research.catalog.store import Catalog, Instrument, LagPolicy
 from quant_research.data.access import PointInTime, SealViolationError
 from quant_research.data.lake import write_frame
-from quant_research.strategy.ops import KLINES, MARK
+from quant_research.strategy.ops import KLINES, MARK, SPOT
 
 M = 60 * 10**9
 H = 60 * M
@@ -128,6 +128,32 @@ def test_a_shard_is_built_once_and_rebuilt_when_its_inputs_change(env: tuple[Cat
     catalog.add_lag_policy(LagPolicy(KLINES, 30 * M, "test: re-calibrated"))
     lagged, rebuilt_lag = store.shard(pit, root, "AUSDT", WINDOW, CONFIG, rule=RULE, datasets=(KLINES,))
     assert rebuilt_lag and lagged.key != changed.key
+
+
+def test_a_multiplier_contract_reads_its_spot_pair_under_the_spot_name_through_the_store(
+    env: tuple[Catalog, Path],
+) -> None:
+    """Review (v2.3 step 7) 1: the loader read the spot pair as SHIBUSDT but the cache key looked for 1000SHIBUSDT
+    files, so every shard build failed its file check once spot data existed."""
+    catalog, root = env
+    iid = catalog.add_instrument(Instrument("binance", "1000SHIBUSDT", "SHIB", "USDT", "usdm_perp"))
+    catalog.add_membership(iid, RULE, from_ns=JAN, to_ns=None)
+    _write(root, "1000SHIBUSDT", "2026-01", JAN, FEB, 1.0)
+    _write(root, "1000SHIBUSDT", "2026-02", FEB, MAR, 1.0)
+    _write(root, "SHIBUSDT", "2026-01", JAN, FEB, 1.0, ds=SPOT)
+    _write(root, "SHIBUSDT", "2026-02", FEB, MAR, 1.0, ds=SPOT)
+    store = PanelStore(root / "cache" / "panels")
+    pit = PointInTime(catalog)
+    meta, built = store.shard(pit, root, "1000SHIBUSDT", WINDOW, CONFIG, rule=RULE, datasets=(KLINES, SPOT))
+    assert built and any("/SHIBUSDT-2026-01-v1.parquet" in p for p, _s in meta.files)
+    universe = load_universe_panel(pit, root, store, WINDOW, CONFIG, top_m=None, rule=RULE, datasets=(KLINES, SPOT))
+    shib = universe.panel.frame.filter((pl.col("symbol") == "1000SHIBUSDT") & pl.col("spot_close").is_not_null())
+    assert shib.height > 0
+    # the synthetic spot pair trades near 100 like every series here; at the contract's level it is x 1000
+    assert float(np.min(shib["spot_close"].to_numpy())) > 10_000.0
+    _write(root, "SHIBUSDT", "2026-02", FEB, MAR, 2.0, version="v2", ds=SPOT)  # a spot file change rebuilds
+    changed, rebuilt = store.shard(pit, root, "1000SHIBUSDT", WINDOW, CONFIG, rule=RULE, datasets=(KLINES, SPOT))
+    assert rebuilt and changed.key != meta.key
 
 
 def test_a_shard_equals_the_full_panel_on_every_row_including_membership_gaps(env: tuple[Catalog, Path]) -> None:
