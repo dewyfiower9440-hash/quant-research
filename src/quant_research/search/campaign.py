@@ -6,7 +6,9 @@ stopping ("failure is not the end", root cause 4):
 
     cost_dominated -> the same cell on slower bars (1h -> 4h -> 1d)
     sparse         -> the same cell on a wider universe (top 30 -> top 100)
-    unstable       -> the same cell on the other research window
+    unstable       -> the same cell on the other research window (confirmation SR <= 0)
+    below_bar      -> the same (ADR-050: confirmation SR > 0, the combined confirmation of ADR-049 not met)
+    infeasible     -> nothing; the cell's space has no executable point (ADR-051), the cell retires
     data_missing   -> a data request (the collection queue); the cell retires until the data exists
     no_signal      -> nothing; the bandit learns the cell is poor
     candidate      -> the cell's best S3 survivor goes to the validator; the cell retires
@@ -27,7 +29,18 @@ from typing import Literal, cast
 
 from quant_research.search.bandit import FamilyBandit
 
-CauseCode = Literal["candidate", "no_signal", "cost_dominated", "sparse", "unstable", "data_missing", "error"]
+CauseCode = Literal[
+    "candidate",
+    "no_signal",
+    "cost_dominated",
+    "sparse",
+    "unstable",
+    "below_bar",  # ADR-050: confirmation SR > 0, the combined confirmation not met
+    "infeasible",  # ADR-050 / ADR-051: the cell's space has no executable point
+    "data_missing",
+    "error",
+]
+BelowBar = Literal["no_cross", "sign_mismatch", "pooled_below"]
 TIMEFRAMES = ("1h", "4h", "1d")
 TOP_MS = (30, 100)
 WINDOWS = ("w2", "w1")
@@ -113,12 +126,28 @@ def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_expos
         return "cost_dominated" if gross > 0 else "no_signal"  # positive before costs, negative after
     if b.s3_sr is None or b.s3_sr <= 0:
         return "unstable"  # positive on selection, not on its own confirmation split
-    if b.cross_sr is None or b.cross_sr <= 0 or b.pooled_sr is None or b.pooled_sr <= b.pooled_threshold:
-        return "unstable"  # ADR-049: signs disagree across the windows, or the pooled SR is within the null bar
+    if _combined_gap(b) is not None:
+        return "below_bar"  # ADR-049 / ADR-050: positive on its own split, the combined confirmation not met
     return "candidate"
 
 
-TRANSITION_CAUSES: tuple[CauseCode, ...] = ("cost_dominated", "sparse", "unstable")
+def _combined_gap(b: BatchSummary) -> BelowBar | None:
+    """Which part of ADR-049 decision 3 a positive own S3 misses (None: it is met)."""
+    if b.cross_sr is None or b.pooled_sr is None:
+        return "no_cross"  # the same spec was not measured on the other window's confirmation split
+    if b.cross_sr <= 0:
+        return "sign_mismatch"
+    if b.pooled_sr <= b.pooled_threshold:
+        return "pooled_below"  # within the best-of-N null of every S3 judged on the two splits
+    return None
+
+
+def below_bar_reason(b: BatchSummary) -> BelowBar | None:
+    """The sub-reason of a `below_bar` batch; None for any other cause (the 5 % exposure rule is the runner's)."""
+    return _combined_gap(b) if classify(b, min_exposure=0.0) == "below_bar" else None
+
+
+TRANSITION_CAUSES: tuple[CauseCode, ...] = ("cost_dominated", "sparse", "unstable", "below_bar")
 
 # ADR-049: the pre-registered grid, one group per round, in this order (windows, timeframes, top-M)
 GRID_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...]], ...] = (
@@ -167,7 +196,7 @@ def transitions(cell: Cell, cause: CauseCode) -> list[Cell]:
         case "sparse":
             wider = [m for m in TOP_MS if m > cell.top_m]
             return [Cell(cell.family, cell.timeframe, wider[0], cell.window)] if wider else []
-        case "unstable":
+        case "unstable" | "below_bar":
             return [Cell(cell.family, cell.timeframe, cell.top_m, w) for w in WINDOWS if w != cell.window]
         case _:
             return []
@@ -252,7 +281,7 @@ class CampaignState:
                 if ds not in self.data_requests:
                     self.data_requests.append(ds)
         used = self.pulls[key] - self.pull_base.get(key, 0)
-        done = cause in ("candidate", "data_missing", "error") or used >= self.max_pulls
+        done = cause in ("candidate", "data_missing", "infeasible", "error") or used >= self.max_pulls
         if done and key not in self.retired:
             self.retired.append(key)
 
@@ -376,6 +405,76 @@ def _summary_json(s: BatchSummary) -> dict[str, object]:
         "pooled_threshold": s.pooled_threshold,
         "cross_trial_id": s.cross_trial_id,
     }
+
+
+def summary_from_json(raw: Mapping[str, object]) -> BatchSummary:
+    """A stored batch summary (boundary: a state file). Fields added later (ADR-049) default; the counts must be
+    there."""
+
+    def count(name: str) -> int:
+        v = raw.get(name)
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(f"batch summary: {name} must be an integer, got {v!r}")
+        return v
+
+    def number(name: str) -> float | None:
+        v = raw.get(name)
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, int | float):
+            raise ValueError(f"batch summary: {name} must be a number or null, got {v!r}")
+        return float(v)
+
+    def trial(name: str) -> int | None:
+        return None if raw.get(name) is None else count(name)
+
+    missing = raw.get("data_missing", [])
+    if not isinstance(missing, list):
+        raise ValueError(f"batch summary: data_missing must be a list, got {missing!r}")
+    return BatchSummary(
+        s1_scored=count("s1_scored"),
+        s1_finite=count("s1_finite"),
+        s2_done=count("s2_done"),
+        s2_exposed=count("s2_exposed"),
+        best_sr_net=number("best_sr_net"),
+        best_total_return=number("best_total_return"),
+        best_cost_fraction=number("best_cost_fraction"),
+        best_gross_exposure=number("best_gross_exposure"),
+        s3_sr=number("s3_sr"),
+        data_missing=tuple(str(d) for d in cast(list[object], missing)),
+        s3_threshold=number("s3_threshold") or 0.0,
+        s3_trial_id=trial("s3_trial_id"),
+        error=str(raw.get("error", "")),
+        cross_sr=number("cross_sr"),
+        pooled_sr=number("pooled_sr"),
+        pooled_threshold=number("pooled_threshold") or 0.0,
+        cross_trial_id=trial("cross_trial_id"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Relabelled:
+    """One stored batch under the current cause rules (ADR-050); nothing is evaluated again."""
+
+    cell: str
+    old: str  # the cause the batch was recorded with
+    new: CauseCode
+    reason: BelowBar | None
+    s3_judged: bool  # a confirmation run was judged, whatever the cause (it counts towards the S3 null N)
+    s3_sr: float | None
+
+
+def relabel(history: Sequence[Mapping[str, object]], *, min_exposure: float) -> list[Relabelled]:
+    """Every batch of a campaign history under the current `classify`, in order (one row per batch)."""
+    out: list[Relabelled] = []
+    for h in history:
+        raw = h.get("summary")
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"campaign history: batch of {h.get('cell')!r} has no summary")
+        b = summary_from_json(cast(Mapping[str, object], raw))
+        new = classify(b, min_exposure=min_exposure)
+        out.append(Relabelled(str(h["cell"]), str(h["cause"]), new, below_bar_reason(b), b.s3_sr is not None, b.s3_sr))
+    return out
 
 
 def candidate_trials(history: Sequence[Mapping[str, object]]) -> list[int]:

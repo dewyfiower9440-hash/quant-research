@@ -378,7 +378,7 @@ def with_cross(
     other = Cell(cell.family, cell.timeframe, cell.top_m, next(w for w in WINDOWS if w != cell.window))
     _selection, other_confirmation = panels(other)
     if missing_data(other, other_confirmation):
-        return summary  # the other window lacks the family's data: no cross run, the cell stays unstable
+        return summary  # the other window lacks the family's data: no cross run, the cell is below_bar (no_cross)
     space = space_of(cell.space)
     x = cross_confirm(
         ledger,

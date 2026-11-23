@@ -12,10 +12,13 @@ from quant_research.search.campaign import (
     BatchSummary,
     CampaignState,
     Cell,
+    below_bar_reason,
     classify,
     negative_report,
     next_round,
     preregistered_groups,
+    relabel,
+    summary_from_json,
     transitions,
 )
 
@@ -63,9 +66,11 @@ def test_a_cell_key_round_trips_and_names_its_v2_space() -> None:
         ({"s2_exposed": 0, "best_sr_net": None}, "sparse"),
         ({"error": "ValueError: boom"}, "error"),
         ({"s3_threshold": 0.08}, "candidate"),  # ADR-049: the own-window bar is reported, the pooled bar decides
-        ({"pooled_threshold": 0.05}, "unstable"),  # pooled SR 0.045 below the best-of-N null of both splits
-        ({"cross_sr": -0.01}, "unstable"),  # signs disagree between the two windows
-        ({"cross_sr": None, "pooled_sr": None}, "unstable"),  # the cross run did not happen
+        ({"pooled_threshold": 0.05}, "below_bar"),  # pooled SR 0.045 below the best-of-N null of both splits
+        ({"pooled_threshold": 0.045}, "below_bar"),  # the bar itself is not passed (strictly above)
+        ({"cross_sr": -0.01}, "below_bar"),  # signs disagree between the two windows
+        ({"cross_sr": 0.0}, "below_bar"),
+        ({"cross_sr": None, "pooled_sr": None}, "below_bar"),  # the cross run did not happen
         ({"s3_sr": 0.0}, "unstable"),
         ({"best_sr_net": -0.02, "best_total_return": -0.01, "best_cost_fraction": 0.05}, "cost_dominated"),
         ({"best_sr_net": -0.02, "best_total_return": -0.06, "best_cost_fraction": 0.05}, "no_signal"),
@@ -77,12 +82,63 @@ def test_every_batch_is_given_exactly_one_cause(changes: dict[str, object], caus
     assert classify(_summary(**changes), min_exposure=MIN_EXPOSURE) == cause
 
 
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"cross_sr": None, "pooled_sr": None}, "no_cross"),
+        ({"cross_sr": -0.01}, "sign_mismatch"),
+        ({"pooled_threshold": 0.05}, "pooled_below"),
+        ({}, None),  # a candidate is not below the bar
+        ({"s3_sr": -0.01}, None),  # unstable: the own confirmation split already failed
+    ],
+)
+def test_below_bar_names_why_the_combined_confirmation_failed(changes: dict[str, object], reason: str | None) -> None:
+    """ADR-050: a positive confirmation SR that is not a candidate used to be `unstable` like a negative one."""
+    assert below_bar_reason(_summary(**changes)) == reason
+
+
+def test_a_summary_round_trips_through_its_json_and_old_files_still_load() -> None:
+    state = CampaignState.new("j", [Cell("trend", "4h", 100, "w2")])
+    state.record(Cell("trend", "4h", 100, "w2"), "candidate", BASE, reward=0.1)
+    stored = json.loads(json.dumps(state.history[0]["summary"]))
+    assert summary_from_json(stored) == BASE
+    for field in ("cross_sr", "pooled_sr", "pooled_threshold", "cross_trial_id"):  # a c1 file from before ADR-049
+        del stored[field]
+    old = summary_from_json(stored)
+    assert old.cross_sr is None and old.pooled_threshold == 0.0 and old.s3_sr == BASE.s3_sr
+    with pytest.raises(ValueError, match="s1_scored"):
+        summary_from_json({"s2_done": 1})
+
+
+def test_relabelling_a_history_keeps_every_batch_and_counts_the_judged_s3() -> None:
+    """ADR-050 / v2.3 section 2.2: c1 had 78 S3 verdicts and 59 `unstable` batches: S3 also ran under earlier causes."""
+    cell = Cell("trend", "4h", 100, "w2")
+    state = CampaignState.new("r", [cell], max_pulls=9)
+    old_rule = replace(BASE, cross_sr=None, pooled_sr=None, pooled_threshold=0.0)  # before the cross step existed
+    state.record(cell, "unstable", old_rule, reward=0.0)  # S3 > 0, under the old single-window bar
+    state.record(cell, "unstable", replace(old_rule, s3_sr=-0.02), reward=0.0)
+    state.record(cell, "no_signal", replace(old_rule, best_sr_net=-0.01, best_total_return=-0.05), reward=0.0)
+    state.record(cell, "sparse", replace(old_rule, s2_exposed=0, best_sr_net=None, s3_sr=None), reward=0.0)
+    table = relabel(state.history, min_exposure=MIN_EXPOSURE)
+    assert [(r.old, r.new, r.s3_judged) for r in table] == [
+        ("unstable", "below_bar", True),
+        ("unstable", "unstable", True),
+        ("no_signal", "no_signal", True),  # the confirmation ran although selection was not positive
+        ("sparse", "sparse", False),
+    ]
+    assert table[0].reason == "no_cross" and table[0].cell == cell.key and table[0].s3_sr == BASE.s3_sr
+    assert len(table) == len(state.history)
+
+
 def test_transitions_turn_a_cause_into_the_next_experiment() -> None:
     cell = Cell("trend", "1h", 30, "w2")
     assert transitions(cell, "cost_dominated") == [Cell("trend", "4h", 30, "w2")]  # slower bars, fewer trades
     assert transitions(Cell("trend", "1d", 30, "w2"), "cost_dominated") == []  # nothing slower
     assert transitions(cell, "sparse") == [Cell("trend", "1h", 100, "w2")]  # a wider universe
     assert transitions(cell, "unstable") == [Cell("trend", "1h", 30, "w1")]  # the other research window
+    # ADR-050 is a relabel: a positive own S3 that misses the combined bar still asks for the other window
+    assert transitions(cell, "below_bar") == [Cell("trend", "1h", 30, "w1")]
+    assert transitions(cell, "infeasible") == []
     assert transitions(cell, "no_signal") == [] and transitions(cell, "data_missing") == []
     assert transitions(cell, "candidate") == []
 

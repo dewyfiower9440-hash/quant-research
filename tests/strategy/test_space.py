@@ -250,3 +250,21 @@ def test_templates_stay_the_v1_defaults_and_all_templates_add_the_new_families()
     from quant_research.strategy.templates import ALL_FAMILIES, all_templates, templates
 
     assert tuple(templates()) == FAMILIES and tuple(all_templates()) == ALL_FAMILIES
+
+
+def test_lookback_caps_follow_the_ninety_day_warmup_per_timeframe() -> None:
+    """ADR-051: window operators may look back 90 days, an EMA a third of that (span x 3 to converge)."""
+    from quant_research.strategy.space import ema_cap_bars, exceeds_cap, window_cap_bars
+
+    assert [window_cap_bars(tf) for tf in ("1h", "4h", "1d")] == [2160, 540, 90]
+    assert [ema_cap_bars(tf) for tf in ("1h", "4h", "1d")] == [720, 180, 30]
+    assert not exceeds_cap("momentum", "1d", {"lookback": 90.0, "quantile": 0.8})
+    assert exceeds_cap("momentum", "1d", {"lookback": 96.0, "quantile": 0.8})
+    assert not exceeds_cap("momentum", "4h", {"lookback": 540.0, "quantile": 0.8})
+    assert exceeds_cap("volatility", "1d", {"short": 12.0, "long": 96.0, "ratio": 0.7})  # the longest window counts
+    assert not exceeds_cap("trend", "4h", {"fast": 24.0, "slow": 168.0})  # EMA spans use the EMA cap
+    assert exceeds_cap("trend", "4h", {"fast": 24.0, "slow": 192.0})
+    assert exceeds_cap("trend", "1d", {"fast": 6.0, "slow": 48.0})
+    assert not exceeds_cap("mean_reversion", "1d", {"window": 84.0, "threshold": 2.5})  # thresholds are not windows
+    with pytest.raises(ValueError, match="timeframe"):
+        window_cap_bars("1w")

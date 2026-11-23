@@ -185,6 +185,35 @@ SPACES: dict[str, Space] = {
 }
 
 
+# ADR-051 (v2.3 design section 5): a research block gives every decision WARMUP_DAYS of warm-up (w2 starts right
+# after a sealed holdout, so the warm-up comes out of the block). A window operator may look back that far; an EMA
+# needs about three spans to converge, so its span is capped at a third.
+WARMUP_DAYS = 90
+EMA_SPANS = 3
+WINDOW_PARAMS = ("window", "lookback", "short", "long", "fast", "slow")
+EMA_FAMILIES = ("trend",)  # families whose window parameters are EMA spans
+
+
+def window_cap_bars(timeframe: str) -> int:
+    """The longest window (bars) a window operator may use on this timeframe."""
+    if timeframe not in TIMEFRAME_NS:
+        raise ValueError(f"unknown timeframe {timeframe!r} (known: {', '.join(TIMEFRAME_NS)})")
+    return WARMUP_DAYS * 86_400_000_000_000 // TIMEFRAME_NS[timeframe]
+
+
+def ema_cap_bars(timeframe: str) -> int:
+    """The longest EMA span (bars) on this timeframe."""
+    return window_cap_bars(timeframe) // EMA_SPANS
+
+
+def exceeds_cap(family: str, timeframe: str, params: Mapping[str, float]) -> bool:
+    """Whether a point's longest SIGNAL window is beyond the family's cap on this timeframe. The structural axes
+    (sizing volatility window, smoothing) are not looked at: the S0 warm-up check of ADR-051 covers the whole
+    spec."""
+    cap = ema_cap_bars(timeframe) if family in EMA_FAMILIES else window_cap_bars(timeframe)
+    return any(v > cap for k, v in params.items() if k in WINDOW_PARAMS)
+
+
 # v2.2 B5 (D5, ADR-046 addendum): the same families on 1h / 4h / 1d bars with a rebalance interval and a no-trade
 # band. Signal windows stay in bars (the timeframe scales their horizon); volatility windows and time stops are
 # chosen per timeframe so the warm-up fits a research window. Pre-registered before any 2020-2022 data is read.
