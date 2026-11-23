@@ -43,6 +43,7 @@ from quant_research.search.cost_model import spec_ops
 from quant_research.search.multiplicity import expected_max_sr, s3_power_table
 from quant_research.search.optimizers import RandomSearcher
 from quant_research.search.pipeline import (
+    DATA_COLUMNS,
     SearchBudget,
     SearchResult,
     existing_trial,
@@ -116,9 +117,24 @@ class CampaignOutcome:
 PanelProvider = Callable[[Cell], tuple[Panel, Panel]]
 
 
-def missing_data(cell: Cell, selection: Panel) -> tuple[str, ...]:
-    """Datasets the cell's family needs that have no rows in its selection panel (pipeline.missing_inputs)."""
-    return missing_inputs(cell.family, selection)
+FUNDING_DATASET = DATA_COLUMNS["funding"][1]
+
+
+def missing_data(cell: Cell, panel: Panel, *, require_funding: bool = False) -> tuple[str, ...]:
+    """Datasets the cell's family needs that the panel does not cover (pipeline.missing_inputs). With
+    `require_funding` (ADR-052, v3 campaigns) every cell also needs the funding rate column and at least one
+    settlement: a perpetual backtest without funding cash flows is not judged."""
+    if not require_funding:
+        return missing_inputs(cell.family, panel)
+    missing = missing_inputs(cell.family, panel, also=("funding",))
+    if panel.funding.height == 0 and FUNDING_DATASET not in missing:
+        missing = (*missing, FUNDING_DATASET)
+    return missing
+
+
+def requires_funding(config: CampaignConfig) -> bool:
+    """ADR-052 applies to the campaigns pre-registered after it (space version 3); c1 keeps its rule."""
+    return config.space_version == 3
 
 
 def _number(metrics: Mapping[str, object], key: str) -> float | None:
@@ -144,6 +160,7 @@ def summarize(
     if best is not None:
         s3 = next((o for o in result.s3 if o.status == "done" and o.metrics.get("s2_trial_id") == best.trial_id), None)
     costs = None if best is None else _number(best.metrics, "costs")
+    funding = None if best is None else _number(best.metrics, "funding")
     return BatchSummary(
         s1_scored=len(result.s1),
         s1_finite=len(finite),
@@ -157,6 +174,7 @@ def summarize(
         data_missing=(),
         s3_threshold=s3_threshold,
         s3_trial_id=None if s3 is None else s3.trial_id,
+        best_funding_fraction=None if funding is None else funding / capital,
     )
 
 
@@ -356,7 +374,15 @@ def run_batch(
     if infeasible(cell, config.space_version):  # before any panel is loaded: nothing is evaluated, no N
         return "infeasible", BatchSummary(0, 0, 0, 0, None, None, None, None, None, (), infeasible=True), 0.0
     selection, confirmation = panels(cell)
-    missing = missing_data(cell, selection)
+    funded = requires_funding(config)
+    missing = tuple(
+        dict.fromkeys(
+            [
+                *missing_data(cell, selection, require_funding=funded),
+                *(missing_data(cell, confirmation, require_funding=True) if funded else ()),
+            ]
+        )
+    )
     if missing:
         return "data_missing", BatchSummary(0, 0, 0, 0, None, None, None, None, None, missing), 0.0
     pull = state.pulls.get(cell.key, 0)
@@ -403,6 +429,7 @@ def run_batch(
                 seed=seed,
                 fold=f"{state.run_id}:{cell.key}:{pull}",
                 prior_s3=prior_s3 or {},
+                require_funding=funded,
             ),
             cell=cell,
         )
@@ -435,6 +462,7 @@ def with_cross(
     seed: int,
     fold: str,
     prior_s3: Mapping[str, int],
+    require_funding: bool = False,
 ) -> BatchSummary:
     """ADR-049 decision 3 for a batch whose best S2 and its own S3 are both positive: the same spec on the other
     window's confirmation split, pooled with the own S3 and judged against the two splits' best-of-N null bar."""
@@ -445,7 +473,7 @@ def with_cross(
         return summary
     other = Cell(cell.family, cell.timeframe, cell.top_m, next(w for w in WINDOWS if w != cell.window))
     _selection, other_confirmation = panels(other)
-    if missing_data(other, other_confirmation):
+    if missing_data(other, other_confirmation, require_funding=require_funding):
         return summary  # the other window lacks the family's data: no cross run, the cell is below_bar (no_cross)
     space = space_of(source.candidate.point.family)  # the space the point was drawn from (v2 or v3)
     x = cross_confirm(

@@ -103,6 +103,20 @@ def test_reference_funding_longs_pay_and_shorts_receive_at_settlement() -> None:
         assert (ev[-1] < C0 - cost_in - cost_out) == (side > 0)
 
 
+def test_reference_funding_two_settlements_in_one_interval_are_both_paid() -> None:
+    """v2.4 step 5 (design v2.3 section 4): a symbol whose funding interval changed (8 h -> 4 h) settles twice
+    inside one bar; each settlement pays its own rate on its own mark."""
+    events = {(0, 0): [(0.001, 100.0), (0.0005, 102.0)]}
+    m, t = market([[100.0], [100.0]], events=events), targets([[1.0], [1.0]])
+    q = C0 / 100.0
+    flow = -q * 100.0 * 0.001 - q * 102.0 * 0.0005  # hand calculation: 10 + 5.1 paid by the long
+    expected_final = C0 - R * C0 + flow - R * q * 100.0
+    ev, vec = both(m, t)
+    assert ev[-1] == pytest.approx(expected_final, rel=1e-12)
+    assert vec[-1] == pytest.approx(expected_final, rel=1e-12)
+    assert run_event(m, t, COST, capital=C0, fidelity="L1", n_universe=1).funding == pytest.approx(flow, rel=1e-12)
+
+
 def test_reference_no_orders_on_missing_data_the_position_is_held() -> None:
     m = market([[100.0], [120.0], [120.0]], tradable=[[True], [False], [True]])
     t = targets([[1.0], [0.0], [0.0]])  # the exit signal at t=1 cannot be executed: data missing

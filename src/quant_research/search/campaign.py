@@ -110,6 +110,7 @@ class BatchSummary:
     pooled_threshold: float = 0.0
     cross_trial_id: int | None = None
     infeasible: bool = False  # ADR-051: the cell has no executable space (nothing was evaluated)
+    best_funding_fraction: float | None = None  # funding cash flow of the best S2 / capital (negative: paid)
 
 
 def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_exposure: applied by the runner
@@ -408,6 +409,7 @@ def _summary_json(s: BatchSummary) -> dict[str, object]:
         "pooled_threshold": s.pooled_threshold,
         "cross_trial_id": s.cross_trial_id,
         "infeasible": s.infeasible,
+        "best_funding_fraction": s.best_funding_fraction,
     }
 
 
@@ -454,6 +456,7 @@ def summary_from_json(raw: Mapping[str, object]) -> BatchSummary:
         pooled_threshold=number("pooled_threshold") or 0.0,
         cross_trial_id=trial("cross_trial_id"),
         infeasible=raw.get("infeasible") is True,
+        best_funding_fraction=number("best_funding_fraction"),
     )
 
 

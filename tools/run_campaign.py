@@ -350,14 +350,19 @@ def main() -> int:
         "",
         "## 배치",
         "",
-        "| # | 셀 | 원인 | 보상 | best S2 SR | S3 SR | 교차 S3 SR | 결합 SR | 결합 기준 | S3 trial | 오류 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "> best S2의 손익 분해(자본 대비): 순수익 = 가격 손익 - 비용 + 펀딩. 펀딩이 음수면 지급이다.",
+        "",
+        "| # | 셀 | 원인 | 보상 | best S2 SR | 순수익 | 비용 | 펀딩 | S3 SR | 교차 S3 SR | 결합 SR | 결합 기준 "
+        "| S3 trial | 오류 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, h in enumerate(state.history, 1):
         raw = h.get("summary")
         sm: dict[str, object] = cast(dict[str, object], raw) if isinstance(raw, dict) else {}
         lines.append(
-            f"| {i} | {md(h['cell'])} | {h['cause']} | {h['reward']} | {sm.get('best_sr_net')} | {sm.get('s3_sr')} "
+            f"| {i} | {md(h['cell'])} | {h['cause']} | {h['reward']} | {sm.get('best_sr_net')} "
+            f"| {sm.get('best_total_return')} | {sm.get('best_cost_fraction')} | {sm.get('best_funding_fraction')} "
+            f"| {sm.get('s3_sr')} "
             f"| {sm.get('cross_sr')} | {sm.get('pooled_sr')} | {sm.get('pooled_threshold')} "
             f"| {sm.get('s3_trial_id')} | {md(sm.get('error', ''))} |"
         )

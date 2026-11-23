@@ -167,13 +167,16 @@ def panel_datasets(template_family: str) -> tuple[str, ...]:
 MIN_INPUT_COVERAGE = 0.8  # share of member rows with a value (pre-registered, ADR-049 addendum 2)
 
 
-def missing_inputs(template_family: str, panel: Panel) -> tuple[str, ...]:
+def missing_inputs(template_family: str, panel: Panel, *, also: Sequence[str] = ()) -> tuple[str, ...]:
     """Datasets the family needs whose column covers less than MIN_INPUT_COVERAGE of the panel's member rows
     (ADR-049 addendum 2: an input present for a fraction of the universe would judge the family on that
-    fraction; the cell is data_missing until the data covers the members)."""
+    fraction; the cell is data_missing until the data covers the members). `also`: data needs required whatever
+    the family reads (ADR-052: funding for every futures cell)."""
+    if unknown := [n for n in also if n not in DATA_COLUMNS]:
+        raise ValueError(f"unknown data need {unknown[0]!r} (known: {', '.join(DATA_COLUMNS)})")
     out: list[str] = []
     members = panel.frame.filter(pl.col("member"))
-    for need in REQUIRED_DATA.get(template_family, ()):
+    for need in (*REQUIRED_DATA.get(template_family, ()), *also):
         if need not in DATA_COLUMNS:
             continue
         column, dataset = DATA_COLUMNS[need]
