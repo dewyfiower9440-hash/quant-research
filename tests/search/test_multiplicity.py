@@ -127,3 +127,23 @@ def test_onc_treats_a_perfectly_correlated_group_as_one_trial_and_caps_k_by_sqrt
     assert onc_clusters(same).n_eff == 1
     # the cap grows like 2 sqrt(n) but stops at 40: k-means x silhouette costs ~n^2.5 (n=400: 30 -> 45 s)
     assert onc_k_cap(5) == 4 and onc_k_cap(100) == 30 and onc_k_cap(300) == 35 and onc_k_cap(2_500) == 40
+
+
+def test_s3_power_is_the_chance_a_true_sharpe_clears_the_best_of_n_null() -> None:
+    """Design v2.3 section 3: reported per round; the bar itself (expected_max_sr) is unchanged."""
+    from quant_research.search.multiplicity import s3_power, s3_power_table
+
+    assert s3_power(400, 1, 0.0) == pytest.approx(0.5)  # one trial: the bar is 0
+    bar = expected_max_sr(78, 1 / 485)
+    daily = 2.0 / math.sqrt(365)
+    expected = 1.0 - 0.5 * (1.0 + math.erf((bar - daily) * math.sqrt(485) / math.sqrt(2)))
+    assert s3_power(485, 78, 2.0) == pytest.approx(expected, rel=1e-9)
+    assert 0.35 < s3_power(485, 78, 2.0) < 0.55  # the design's estimate for the pooled split
+    assert s3_power(485, 300, 2.0) < s3_power(485, 78, 2.0)  # more trials, a higher bar
+    assert s3_power(150, 78, 2.0) < s3_power(485, 78, 2.0)  # a shorter split, less power
+    assert s3_power(485, 78, 3.0) > s3_power(485, 78, 2.0)
+    bar_ann, rows = s3_power_table(485, 78)
+    assert bar_ann == pytest.approx(annualised(bar, 365))
+    assert [r[0] for r in rows] == [1.0, 1.5, 2.0, 2.5, 3.0] and rows[2][1] == pytest.approx(s3_power(485, 78, 2.0))
+    with pytest.raises(ValueError, match="days"):
+        s3_power(0, 5, 1.0)

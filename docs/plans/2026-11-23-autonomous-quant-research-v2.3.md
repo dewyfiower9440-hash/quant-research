@@ -85,7 +85,7 @@ base: 2026-11-08-autonomous-quant-research.md (v2.1), 2026-11-20-autonomous-quan
 | 4h | 540 | 180 |
 | 1d | 90 | 30 |
 
-- **적용 규칙(기계적).** 각 축은 v2 공간의 시작값과 간격을 유지하고 끝값만 상한으로 자른다. 축의 시작값이 상한보다 크면 그 (계열, 주기) 셀은 `infeasible`이다.
+- **적용 규칙(기계적).** 각 축은 v2 공간의 시작값과 간격을 유지하고 끝값만 상한 미만으로 자른다. 축의 시작값이 상한 이상이면 그 (계열, 주기) 셀은 `infeasible`이다.
   - 결과: `trend@1d`(slow 시작 48 > 30), `volatility@1d`(long 시작 96 > 90)는 `infeasible`. 그 밖의 계열은 범위만 줄어든다.
   - 비중의 변동성 창과 신호 평활도 같은 상한을 지켜야 한다. 넘는 선택지는 그 주기의 축에서 뺀다.
 - **S0 검사.** spec의 필요 워밍업(`strategy/ops.lookback`의 중첩 합)이 블록 워밍업의 봉 수를 넘으면 S0에서 거부한다.
@@ -159,7 +159,7 @@ base: 2026-11-08-autonomous-quant-research.md (v2.1), 2026-11-20-autonomous-quan
 | 축 상한 | §5 표. 시작값·간격 유지, 끝값만 자름 |
 | 기준 매개변수 규칙 | 상한 적용 뒤 축의 중간 격자점: `lo + step × floor(((hi − lo) / step) / 2)` |
 | 기준 매개변수 4h | xs_reversal lookback 24 · momentum lookback 264 · low_vol window 264 · liquidity window 264 · premium_basis window 84 · funding_carry window 168 · funding_basis window 90 · oi_positioning window 168 · taker_flow window 84 · spot_basis window 84 |
-| 기준 매개변수 1d | xs_reversal 24 · momentum 48 · low_vol 48 · liquidity 48 · premium_basis 44 · funding_carry 48 · funding_basis 50 · oi_positioning 44 · taker_flow 45 · spot_basis 44 |
+| 기준 매개변수 1d | xs_reversal 24 · momentum 48 · low_vol 48 · liquidity 48 · premium_basis 44 · funding_carry 48 · funding_basis 40 · oi_positioning 44 · taker_flow 45 · spot_basis 44 |
 | M0·M1-R 포트폴리오 | 분위 0.8 양방향, 변동성 목표, 리밸런스 24h, 밴드 2%, 거래 종목 수 20, 평활 없음, 시간 손절 없음 |
 | M0 설정 | `lin_eq`, `lin_ic`(앞 75%의 IC HAC t, 음수 0, 합 1) |
 | M1-R 설정 | Ridge α ∈ {1, 10, 100}, 절편 없음(특징·라벨 중심화) |

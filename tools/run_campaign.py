@@ -89,6 +89,13 @@ def main() -> int:
     ap.add_argument("--max-batches", type=int, default=None)
     ap.add_argument("--max-hours", type=float, default=None)
     ap.add_argument("--max-pulls", type=int, default=3)
+    ap.add_argument(
+        "--space-version",
+        type=int,
+        choices=(2, 3),
+        default=2,
+        help="3: the capped spaces and the 90-day warm-up of ADR-051 (a new run id; c1 was run with 2)",
+    )
     ap.add_argument("--s1-count", type=int, default=60)
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
@@ -126,9 +133,12 @@ def main() -> int:
     from quant_research.search.campaign_runner import (
         CampaignConfig,
         Rounds,
+        SplitRule,
         earlier_histories,
         judged_s3_counts,
+        pooled_power,
         run_campaign,
+        split_bounds,
         split_window,
     )
     from quant_research.search.pipeline import panel_datasets
@@ -150,7 +160,10 @@ def main() -> int:
     else:
         grid = [Cell(f, tf, m, w) for w in a.windows for tf in a.timeframes for m in a.top_m for f in families]
         groups = [grid]
-    config = CampaignConfig(seed=a.seed, s1_count=a.s1_count, top_k=a.top_k, max_batches=a.max_batches)
+    config = CampaignConfig(
+        seed=a.seed, s1_count=a.s1_count, top_k=a.top_k, max_batches=a.max_batches, space_version=a.space_version
+    )
+    split_rule = SplitRule.of(a.space_version)
     settings: dict[str, object] = {
         "grid": [c.key for c in grid],
         "grid_mode": a.grid,
@@ -237,7 +250,7 @@ def main() -> int:
                     rule=PIT_RULE,
                     datasets=datasets,
                 )
-                loaded[key] = split_window(universe.panel, window)
+                loaded[key] = split_window(universe.panel, window, rule=split_rule)
                 print(
                     json.dumps(
                         {
@@ -283,6 +296,13 @@ def main() -> int:
                 return 1  # the S3 null N would silently drop its runs
         prior_s3 = judged_s3_counts(earlier_histories(others, a.run_id))
         print(json.dumps({"prior_s3": prior_s3, "round": state.round}))
+        # design v2.3 section 3: the pooled bar and its power at this tick's N (a report; the bar is unchanged)
+        pooled_days = 0
+        for lo, hi in WINDOWS.values():
+            _sel, conf_from, end = split_bounds(Window(month_ns(*lo), month_ns(*hi)), rule=split_rule)
+            pooled_days += (end - conf_from) // (86_400 * 10**9)
+        n0, bar0, power0 = pooled_power(state.history, prior_s3, pooled_days)
+        print(json.dumps({"pooled_n": n0, "pooled_days": pooled_days, "bar_sr_ann": round(bar0, 3), "power": power0}))
 
         outcome = run_campaign(
             state,
@@ -306,6 +326,7 @@ def main() -> int:
         catalog.close()
         lock.__exit__(None, None, None)
     report = negative_report(state) | {"status": outcome.status, "reason": outcome.reason, "ran": outcome.batches}
+    n1, bar1, power1 = pooled_power(state.history, prior_s3, pooled_days)
     write_json(root / "run" / "data-queue.json", {"run_id": a.run_id, "next_data": report["next_data"]})
     out = a.report or repo_root() / "docs" / "measurements" / f"campaign-{a.run_id}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -318,17 +339,27 @@ def main() -> int:
         "|---|---|",
         *(f"| {k} | {md(json.dumps(v, ensure_ascii=False))} |" for k, v in report.items()),
         "",
+        "## 다음 배치의 결합 기준과 검정력 (보고용, 기준선은 바꾸지 않는다)",
+        "",
+        f"- 누적 N(두 확인 구간, 다음 배치의 2건 포함): {n1}",
+        f"- 결합 확인 구간: {pooled_days}일, 기준: 연 SR {bar1:.2f}",
+        "",
+        "| 참 연 SR | 통과 확률(iid 근사) |",
+        "|---|---|",
+        *(f"| {level:g} | {power:.2f} |" for level, power in power1),
+        "",
         "## 배치",
         "",
-        "| # | 셀 | 원인 | 보상 | best S2 SR | S3 SR | S3 기준 | S3 trial | 오류 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| # | 셀 | 원인 | 보상 | best S2 SR | S3 SR | 교차 S3 SR | 결합 SR | 결합 기준 | S3 trial | 오류 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, h in enumerate(state.history, 1):
         raw = h.get("summary")
         sm: dict[str, object] = cast(dict[str, object], raw) if isinstance(raw, dict) else {}
         lines.append(
             f"| {i} | {md(h['cell'])} | {h['cause']} | {h['reward']} | {sm.get('best_sr_net')} | {sm.get('s3_sr')} "
-            f"| {sm.get('s3_threshold')} | {sm.get('s3_trial_id')} | {md(sm.get('error', ''))} |"
+            f"| {sm.get('cross_sr')} | {sm.get('pooled_sr')} | {sm.get('pooled_threshold')} "
+            f"| {sm.get('s3_trial_id')} | {md(sm.get('error', ''))} |"
         )
     out.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
     print(json.dumps({"status": outcome.status, "reason": outcome.reason, "report": str(out)}, ensure_ascii=False))

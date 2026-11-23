@@ -20,7 +20,16 @@ from optuna.samplers import TPESampler
 from optuna.trial import Trial, TrialState
 
 from quant_research.strategy.s0 import check
-from quant_research.strategy.space import Candidate, Choice, FloatAxis, IntAxis, Point, Space, build_point
+from quant_research.strategy.space import (
+    Candidate,
+    Choice,
+    FloatAxis,
+    IntAxis,
+    Point,
+    Space,
+    build_point,
+    s0_context,
+)
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -69,7 +78,7 @@ def candidate_of(space: Space, point: Point) -> Candidate:
     if (why := space.violation(point.params_dict())) is not None:
         return Candidate(point, None, (f"constraint: {why}",))
     spec = build_point(space, point)
-    reasons = tuple(check(spec))
+    reasons = tuple(check(spec, s0_context(space)))
     return Candidate(point, None if reasons else spec, reasons)
 
 

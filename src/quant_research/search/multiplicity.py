@@ -85,6 +85,26 @@ def expected_max_sr(n: int, var_sr: float, *, rho: float = 0.0) -> float:
     return math.sqrt(var_sr) * math.sqrt(1 - rho) * z
 
 
+POWER_LEVELS = (1.0, 1.5, 2.0, 2.5, 3.0)  # true annual SR levels of the reported power table
+
+
+def s3_power(days: int, n: int, true_sr_ann: float, *, periods: int = 365) -> float:
+    """P(a daily-SR estimate over `days` clears the best-of-N null bar) for a true annual SR (iid normal
+    approximation, variance 1 / days). A report: the bar is `expected_max_sr` and is not changed by it."""
+    if days < 1:
+        raise ValueError(f"days must be >= 1, got {days}")
+    bar = expected_max_sr(n, 1.0 / days)
+    return 1.0 - _N.cdf((bar - true_sr_ann / math.sqrt(periods)) * math.sqrt(days))
+
+
+def s3_power_table(
+    days: int, n: int, levels: Sequence[float] = POWER_LEVELS, *, periods: int = 365
+) -> tuple[float, list[tuple[float, float]]]:
+    """(the bar as an annual SR, [(true annual SR, power)])."""
+    bar_ann = annualised(expected_max_sr(n, 1.0 / max(days, 1)), periods)
+    return bar_ann, [(level, s3_power(days, n, level, periods=periods)) for level in levels]
+
+
 def max_sr_quantile(n: int, var_sr: float, level: float, *, rho: float = 0.0) -> float:
     """Exact quantile of the max of N iid N(0, V) estimates: sqrt(V)·Φ⁻¹(level^(1/N)) (xsqrt(1-rho))."""
     if n < 1 or not 0.0 < level < 1.0:

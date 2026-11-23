@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from quant_research.strategy.canonical import Arg, expanded_trees
-from quant_research.strategy.ops import MAX_ABS_CONST, MAX_DEPTH, MAX_NODES, MAX_WINDOW, OPS
+from quant_research.strategy.ops import MAX_ABS_CONST, MAX_DEPTH, MAX_NODES, MAX_WINDOW, OPS, lookback
 from quant_research.strategy.spec import TIMEFRAME_NS, Node, StrategySpec
 
 ValueType = Literal["num", "bool"]
@@ -25,6 +25,21 @@ class S0Context:
     # Upper bound (always in the market, a round trip every time stop) per year, as a fraction of capital.
     # Initial prior (ADR-021): only pathological churn is refused statically; realized cost is reported per run.
     max_annual_cost: float = 10.0
+    # ADR-051: bars of warm-up the research block gives every decision (None: not checked, e.g. v1 / v2 spaces)
+    max_warmup_bars: int | None = None
+
+
+def _tree_lookback(arg: Arg) -> int:
+    if not isinstance(arg, Node) or arg.op not in OPS:
+        return 0
+    return lookback(arg.op, arg.window, [_tree_lookback(a) for a in arg.args])
+
+
+def warmup_bars(spec: StrategySpec) -> int:
+    """Bars of history the spec needs before its first decision: the deepest window chain of its signal and entry
+    trees (nested windows add up), or the sizing volatility window if that is longer."""
+    trees = [t for t in expanded_trees(spec).values() if t is not None]
+    return max([spec.sizing.vol_window, *(_tree_lookback(t) for t in trees)])
 
 
 def _type(arg: Arg) -> ValueType:
@@ -91,6 +106,9 @@ def check(spec: StrategySpec, ctx: S0Context | None = None) -> list[str]:
         out.append(f"spec: {total} nodes exceed {MAX_NODES}")
     if spec.entry.long is None and spec.entry.short is None:
         out.append("entry: needs a long or a short condition")
+    # >= : one bar of margin, a shifted operator (ret over w bars) reads w + 1 rows with the current one
+    if c.max_warmup_bars is not None and (need := warmup_bars(spec)) >= c.max_warmup_bars:
+        out.append(f"infeasible: needs {need} bars of warm-up, the research block gives {c.max_warmup_bars}")
     # venue rules (§7): no short selling on Binance spot or Upbit
     if spec.venue == "upbit" and spec.market != "spot":
         out.append("venue: Upbit has spot markets only")

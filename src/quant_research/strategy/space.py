@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from quant_research.strategy.s0 import check
+from quant_research.strategy.s0 import S0Context, check
 from quant_research.strategy.spec import TIMEFRAME_NS, StrategySpec, Timeframe
 from quant_research.strategy.templates import build
 
@@ -107,6 +107,7 @@ class Space:
     constraint: Constraint | None = field(default=None, compare=False)
     template: str = ""  # the template family (strategy/templates.py); empty = `family`
     timeframe: Timeframe = "1h"
+    warmup_bars: int | None = None  # ADR-051 (v3): points that need more warm-up are refused at S0
 
     @property
     def template_family(self) -> str:
@@ -252,9 +253,51 @@ SPACES_V2: dict[str, Space] = {
 }
 
 
+def _capped(axis: NumAxis, cap: int) -> NumAxis | None:
+    """The axis with its end cut below the cap (start and step kept): S0 refuses a warm-up need equal to the cap,
+    so the cap itself is not a value. None when even the start does not fit."""
+    if not isinstance(axis, IntAxis) or axis.name not in WINDOW_PARAMS or axis.hi < cap:
+        return axis
+    if axis.lo >= cap:
+        return None
+    return IntAxis(axis.name, axis.lo, axis.lo + (cap - 1 - axis.lo) // axis.step * axis.step, axis.step)
+
+
+def _v3_space(name: str, v2: Space) -> Space | None:
+    cap = window_cap_bars(v2.timeframe)
+    axis_cap = ema_cap_bars(v2.timeframe) if v2.template_family in EMA_FAMILIES else cap
+    params = [_capped(a, axis_cap) for a in v2.params]
+    if any(a is None for a in params):
+        return None
+    struct: list[ChoiceAxis] = []
+    for a in v2.struct:
+        if a.name == "sizing":  # volatility windows beyond the warm-up go (1d: vol_target:120)
+            keep = tuple(v for v in a.choices if not str(v).startswith("vol_target:") or int(str(v)[11:]) <= cap)
+            struct.append(ChoiceAxis("sizing", keep))
+        else:
+            struct.append(a)
+    return Space(
+        name + SPACE_V3_SUFFIX,
+        tuple(a for a in params if a is not None),
+        tuple(struct),
+        v2.constraint,
+        template=v2.template_family,
+        timeframe=v2.timeframe,
+        warmup_bars=cap,
+    )
+
+
+# ADR-051 (design v2.3 section 5): the v2 spaces with every window axis cut to what a 90-day warm-up can feed. A
+# registered name is the v2 name + "/v3"; a (family, timeframe) whose axis starts beyond the cap has no v3 space.
+SPACE_V3_SUFFIX = "/v3"
+_V3 = {name: _v3_space(name, v2) for name, v2 in SPACES_V2.items()}
+SPACES_V3: dict[str, Space] = {s.family: s for s in _V3.values() if s is not None}
+INFEASIBLE_V3: frozenset[str] = frozenset(name for name, s in _V3.items() if s is None)
+
+
 def space_of(name: str) -> Space:
-    """The registered space a Point's `family` names (v1 family or v2 `family@timeframe`)."""
-    space = SPACES.get(name) or SPACES_V2.get(name)
+    """The registered space a Point's `family` names (v1 family, v2 `family@timeframe` or v3 `...@timeframe/v3`)."""
+    space = SPACES.get(name) or SPACES_V2.get(name) or SPACES_V3.get(name)
     if space is None:
         raise KeyError(f"unknown space {name!r}")
     return space
@@ -307,6 +350,11 @@ def build_point(space: Space, point: Point) -> StrategySpec:
     return StrategySpec.model_validate(body)
 
 
+def s0_context(space: Space) -> S0Context:
+    """The S0 context of a space's points (ADR-051: v3 spaces check the warm-up)."""
+    return S0Context(max_warmup_bars=space.warmup_bars)
+
+
 def generate(space: Space, *, seed: int, count: int) -> list[Candidate]:
     """`count` uniform draws (with replacement) from the space; deterministic for a seed. Constraint and
     S0 violations are returned as rejected candidates with reasons, never dropped."""
@@ -322,6 +370,6 @@ def generate(space: Space, *, seed: int, count: int) -> list[Candidate]:
             out.append(Candidate(point, None, (f"constraint: {why}",)))
             continue
         spec = build_point(space, point)
-        reasons = tuple(check(spec))
+        reasons = tuple(check(spec, s0_context(space)))
         out.append(Candidate(point, None if reasons else spec, reasons))
     return out

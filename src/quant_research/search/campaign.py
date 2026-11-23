@@ -109,12 +109,15 @@ class BatchSummary:
     pooled_sr: float | None = None
     pooled_threshold: float = 0.0
     cross_trial_id: int | None = None
+    infeasible: bool = False  # ADR-051: the cell has no executable space (nothing was evaluated)
 
 
 def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_exposure: applied by the runner
     """Exactly one cause per batch, checked in this order."""
     if b.error:
         return "error"
+    if b.infeasible:
+        return "infeasible"
     if b.data_missing:
         return "data_missing"
     if b.s1_finite == 0 or b.s2_done == 0:
@@ -404,6 +407,7 @@ def _summary_json(s: BatchSummary) -> dict[str, object]:
         "pooled_sr": s.pooled_sr,
         "pooled_threshold": s.pooled_threshold,
         "cross_trial_id": s.cross_trial_id,
+        "infeasible": s.infeasible,
     }
 
 
@@ -449,6 +453,7 @@ def summary_from_json(raw: Mapping[str, object]) -> BatchSummary:
         pooled_sr=number("pooled_sr"),
         pooled_threshold=number("pooled_threshold") or 0.0,
         cross_trial_id=trial("cross_trial_id"),
+        infeasible=raw.get("infeasible") is True,
     )
 
 

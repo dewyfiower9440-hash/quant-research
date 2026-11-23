@@ -55,7 +55,8 @@ def test_the_campaign_runs_batches_persists_each_and_reports_missing_data(
     if missing_data(CELLS[1], panels[0]):  # the synthetic panels carry no funding: the carry cell asks for it
         assert causes[CELLS[1].key] == "data_missing" and "binance.um.bulk.funding" in state.data_requests
     assert all(
-        c in ("candidate", "no_signal", "cost_dominated", "sparse", "unstable", "data_missing") for c in causes.values()
+        c in ("candidate", "no_signal", "cost_dominated", "sparse", "unstable", "below_bar", "data_missing")
+        for c in causes.values()
     )
 
 
@@ -564,3 +565,41 @@ def test_a_cell_without_data_is_recorded_as_error_not_a_campaign_stop(
     )
     causes = {str(h["cell"]): str(h["cause"]) for h in state.history}
     assert causes[CELLS[0].key] == "error" and out.status == "exhausted"
+
+
+def test_the_round_power_table_uses_the_same_n_as_the_pooled_bar() -> None:
+    """v2.4 step 3: the reported power must describe the bar that judges, not a smaller N."""
+    import pytest
+
+    from quant_research.search.campaign_runner import pooled_null_threshold, pooled_power
+    from quant_research.search.multiplicity import annualised
+
+    def entry(window: str, cross: float | None) -> dict[str, object]:
+        summary = BatchSummary(1, 1, 1, 1, 0.1, 0.1, 0.0, 0.5, 0.01, (), cross_sr=cross)
+        state = CampaignState.new("p", [Cell("trend", "4h", 100, window)])
+        state.record(Cell("trend", "4h", 100, window), "unstable", summary, reward=0.0)
+        return state.history[0]
+
+    history = [entry("w2", 0.02), entry("w1", None)]
+    prior = {"w1": 36, "w2": 42}
+    n, bar_ann, rows = pooled_power(history, prior, 480)
+    assert n == 36 + 42 + 3 + 2  # earlier campaigns + this one's own and cross S3 + the next batch's two
+    assert bar_ann == pytest.approx(annualised(pooled_null_threshold(history, prior, 480), 365))
+    assert all(0.0 < p < 1.0 for _sr, p in rows)
+
+
+def test_split_bounds_are_month_boundaries_computed_without_a_panel() -> None:
+    from datetime import UTC, datetime
+
+    import pytest
+
+    from quant_research.backtest.panel_store import Window
+    from quant_research.search.campaign_runner import split_bounds
+
+    def ns(y: int, m: int) -> int:
+        return int(datetime(y, m, 1, tzinfo=UTC).timestamp()) * 10**9
+
+    sel, conf, end = split_bounds(Window(ns(2024, 12), ns(2026, 7)))
+    assert (sel, conf, end) == (ns(2025, 1), ns(2026, 2), ns(2026, 7))  # 1 warm-up month, 13 + 5 months
+    with pytest.raises(ValueError, match="at least 3 months"):
+        split_bounds(Window(ns(2025, 1), ns(2025, 3)))
