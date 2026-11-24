@@ -20,8 +20,8 @@ Stack: Python (uv)
 ## Project map
 - Design (v2.1 base + v2.2 / v2.3 deltas, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`,
   `docs/plans/2026-11-20-autonomous-quant-research-v2.2.md`, `docs/plans/2026-11-23-autonomous-quant-research-v2.3.md` (ADR-040..055)
-- Execution plans: `docs/plans/2026-11-23-v24-feasible-rerun.md` (v2.4: executable spaces v3, funding required,
-  model cells, regime gates, campaign c2); done: `2026-11-22-v23-never-stop.md`, `2026-11-20-v22-rebuild.md`
+- Last execution plan (done): `docs/plans/2026-11-23-v24-feasible-rerun.md` (v2.4: executable spaces v3, funding
+  required, model cells, regime gates, campaign c2); earlier: `2026-11-22-v23-never-stop.md`, `2026-11-20-v22-rebuild.md`
 - v2.4 code: `strategy/space.py` (`SPACES_V3` = `family@tf/v3` with 90-day lookback caps, `MODEL_SPACES`,
   `REGIME_SPACES`), `strategy/templates.py` (`constituent`, `build_model`, `regime_gate`), `search/model_cells.py`
   (combination and ridge weights fitted on the first 75 % of selection), `search/campaign.py`
