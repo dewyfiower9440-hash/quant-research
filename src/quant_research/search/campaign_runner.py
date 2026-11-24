@@ -40,8 +40,9 @@ from quant_research.search.campaign import (
     next_round,
 )
 from quant_research.search.cost_model import spec_ops
+from quant_research.search.model_cells import model_points
 from quant_research.search.multiplicity import expected_max_sr, s3_power_table
-from quant_research.search.optimizers import RandomSearcher
+from quant_research.search.optimizers import FixedSearcher, RandomSearcher, Searcher
 from quant_research.search.pipeline import (
     DATA_COLUMNS,
     SearchBudget,
@@ -51,9 +52,11 @@ from quant_research.search.pipeline import (
     outcome_from_trial,
     point_json,
     run_family_search,
+    split_for_reward,
 )
 from quant_research.search.s1 import S1Config
 from quant_research.strategy.space import INFEASIBLE_V3, SPACE_V3_SUFFIX, Point, Space, build_point, space_of
+from quant_research.strategy.templates import MODEL_FAMILIES
 
 F64 = NDArray[np.float64]
 log = structlog.get_logger(__name__)
@@ -98,8 +101,18 @@ class CampaignConfig:
 
 
 def space_name(cell: Cell, version: int) -> str:
-    """The registered space of a cell under a space version."""
+    """The registered space of a cell under a space version (model cells exist from version 3 on)."""
+    if version != 3 and cell.family in MODEL_FAMILIES:
+        raise ValueError(f"{cell.key}: model cells need space version 3 (ADR-053)")
     return cell.space + (SPACE_V3_SUFFIX if version == 3 else "")
+
+
+MODEL_VALIDATION_SHARE = 0.25  # the last quarter of selection: where a model cell's points compete
+
+
+def is_model(cell: Cell) -> bool:
+    """ADR-053: a cell whose family combines other families' signals (fixed points, no search)."""
+    return cell.family in MODEL_FAMILIES
 
 
 def infeasible(cell: Cell, version: int) -> bool:
@@ -388,27 +401,52 @@ def run_batch(
     pull = state.pulls.get(cell.key, 0)
     seed = batch_seed(config.seed, cell, pull)
     name = space_name(cell, config.space_version)
-    one_arm = FamilyBandit((name,), BanditPrior(min_pulls=0.0))  # only for the A4 validation run
-    result = run_family_search(
-        ledger,
-        name,
-        RandomSearcher(space_of(name), seed),  # one study per batch: TPE would only see its random start
-        selection=selection,
-        confirmation=confirmation,
-        catalog=catalog,
-        config={"campaign": state.run_id, "cell": cell.key, "pull": pull, "seed": seed},
-        s1=S1Config(horizon_bars=S1_HORIZON_BARS[cell.timeframe]),
-        budget=SearchBudget(
+    horizon = S1_HORIZON_BARS[cell.timeframe]
+    batch_config: dict[str, object] = {"campaign": state.run_id, "cell": cell.key, "pull": pull, "seed": seed}
+    if is_model(cell):
+        # ADR-053: the weights are estimated on the fit part of selection and the points compete on the validation
+        # part, which the weights never saw; nothing is searched, so every point goes to S2
+        fit, selection = split_for_reward(selection, MODEL_VALIDATION_SHARE)
+        points, fitted = model_points(space_of(name), fit)
+        del fit
+        batch_config["model"] = fitted
+        if not points:  # nothing could be estimated (no positive IC and no rows): nothing to evaluate
+            empty = BatchSummary(0, 0, 0, 0, None, None, None, None, None, ())
+            return classify(empty, min_exposure=config.min_exposure), empty, 0.0
+        searcher: Searcher = FixedSearcher(space_of(name), points)
+        budget = SearchBudget(
+            s1_count=len(points),
+            top_k=len(points),
+            promote_rate=1.0,  # whatever the S1 score: a point without enough S1 events is still backtested
+            s3_top=1,
+            s3_random_rate=0.0,
+            min_s3_exposure=config.min_exposure,
+        )
+        bandit = None  # the validation part is already the selection of this batch
+    else:
+        searcher = RandomSearcher(space_of(name), seed)  # one study per batch: TPE would only see its random start
+        budget = SearchBudget(
             s1_count=config.s1_count,
             top_k=config.top_k,
             promote_rate=config.promote_rate,
             s3_top=config.s3_top,
             s3_random_rate=config.s3_random_rate,
             min_s3_exposure=config.min_exposure,
-        ),
+        )
+        bandit = FamilyBandit((name,), BanditPrior(min_pulls=0.0))  # only for the A4 validation run
+    result = run_family_search(
+        ledger,
+        name,
+        searcher,
+        selection=selection,
+        confirmation=confirmation,
+        catalog=catalog,
+        config=batch_config,
+        s1=S1Config(horizon_bars=horizon),
+        budget=budget,
         seed=seed,
         fold=f"{state.run_id}:{cell.key}:{pull}",
-        bandit=one_arm,
+        bandit=bandit,
     )
     prior = (prior_s3 or {}).get(cell.window, 0)
     threshold = s3_null_threshold(state.history, cell.window, _days(confirmation), prior=prior)
@@ -434,6 +472,8 @@ def run_batch(
             cell=cell,
         )
     validation = None if result.validation is None else _number(result.validation.metrics, "sr_daily")
+    if is_model(cell):  # its S2 already ran on the validation part of selection
+        validation = summary.best_sr_net
     reward = max(0.0, validation or 0.0)
     return classify(summary, min_exposure=config.min_exposure), summary, reward
 

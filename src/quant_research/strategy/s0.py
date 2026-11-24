@@ -10,8 +10,11 @@ from typing import Literal
 from quant_research.strategy.canonical import Arg, expanded_trees
 from quant_research.strategy.ops import MAX_ABS_CONST, MAX_DEPTH, MAX_NODES, MAX_WINDOW, OPS, lookback
 from quant_research.strategy.spec import TIMEFRAME_NS, Node, StrategySpec
+from quant_research.strategy.templates import MODEL_FAMILIES
 
 ValueType = Literal["num", "bool"]
+MODEL_MAX_DEPTH = 14  # rank(sum tree(mul(w, zscore_xs(value)))) inside an entry comparison
+MODEL_MAX_NODES = 512  # three expanded trees (signal, long, short) of a dozen weighted terms
 HOUR_NS = 3_600 * 10**9
 YEAR_NS = 365 * 86_400 * 10**9
 SUPPORTED_MARKETS = {("binance", "usdm_futures")}  # Phase 2 panel; spot / Upbit need OPS-003/006 data
@@ -29,17 +32,18 @@ class S0Context:
     max_warmup_bars: int | None = None
 
 
-def _tree_lookback(arg: Arg) -> int:
+def tree_lookback(arg: Arg) -> int:
+    """Bars of history one expression needs (nested windows add up)."""
     if not isinstance(arg, Node) or arg.op not in OPS:
         return 0
-    return lookback(arg.op, arg.window, [_tree_lookback(a) for a in arg.args])
+    return lookback(arg.op, arg.window, [tree_lookback(a) for a in arg.args])
 
 
 def warmup_bars(spec: StrategySpec) -> int:
     """Bars of history the spec needs before its first decision: the deepest window chain of its signal and entry
     trees (nested windows add up), or the sizing volatility window if that is longer."""
     trees = [t for t in expanded_trees(spec).values() if t is not None]
-    return max([spec.sizing.vol_window, *(_tree_lookback(t) for t in trees)])
+    return max([spec.sizing.vol_window, *(tree_lookback(t) for t in trees)])
 
 
 def _type(arg: Arg) -> ValueType:
@@ -91,19 +95,23 @@ def check(spec: StrategySpec, ctx: S0Context | None = None) -> list[str]:
     if "signal" in _refs(spec.signal):
         out.append("signal: may not reference itself")
     trees = expanded_trees(spec)
+    # ADR-053: a model family is a pre-registered sum of other families' signals, not a searched structure; its
+    # size is fixed by the registered term list, so the complexity limits of searched specs do not apply to it
+    model = spec.family in MODEL_FAMILIES
+    max_depth, max_nodes = (MODEL_MAX_DEPTH, MODEL_MAX_NODES) if model else (MAX_DEPTH, MAX_NODES)
     total = 0
     for where, tree in trees.items():
         if tree is None:
             continue
         depth, nodes = _walk(tree, where, 1, out)
         total += nodes
-        if depth > MAX_DEPTH:
-            out.append(f"{where}: depth {depth} exceeds {MAX_DEPTH}")
+        if depth > max_depth:
+            out.append(f"{where}: depth {depth} exceeds {max_depth}")
         want: ValueType = "num" if where == "signal" else "bool"
         if _type(tree) != want:
             out.append(f"{where}: must be a {'number' if want == 'num' else 'condition'}")
-    if total > MAX_NODES:
-        out.append(f"spec: {total} nodes exceed {MAX_NODES}")
+    if total > max_nodes:
+        out.append(f"spec: {total} nodes exceed {max_nodes}")
     if spec.entry.long is None and spec.entry.short is None:
         out.append("entry: needs a long or a short condition")
     # >= : one bar of margin, a shifted operator (ret over w bars) reads w + 1 rows with the current one

@@ -105,7 +105,51 @@ REQUIRED_DATA: dict[str, tuple[str, ...]] = {
     "oi_positioning": ("klines", "open_interest"),
     "taker_flow": ("klines", "taker_ratio"),
     "spot_basis": ("klines", "spot"),
+    "combo": ("klines", "premium", "funding"),  # the union of its constituents
+    "ridge": ("klines", "premium", "funding"),
 }
+# v2.4 step 6 (ADR-053): model families combine the signals of other families; they are not searched like one
+MODEL_FAMILIES: tuple[str, ...] = ("combo", "ridge")
+# the cross-sectional rank families whose data the default panel carries (prices, premium, funding)
+CONSTITUENTS: tuple[str, ...] = (
+    "xs_reversal",
+    "momentum",
+    "low_vol",
+    "liquidity",
+    "premium_basis",
+    "funding_carry",
+    "funding_basis",
+)
+MODEL_QUANTILE = 0.8  # the one portfolio construction of a model cell: long above it, short below 1 - it
+# ADR-054: the fixed auxiliary features of the ridge cell (bars; all far inside the lookback caps of ADR-051)
+AUX_WINDOW = 20
+AUX_TERMS: tuple[str, ...] = ("ret1", "ret5", "ret20", "vol20", "volume20", "premium_z20")
+
+
+def aux_tree(name: str) -> Json:
+    ret1: Json = {"op": "ret", "args": [_close()], "window": 1}
+    match name:
+        case "ret1":
+            return ret1
+        case "ret5":
+            return {"op": "ret", "args": [_close()], "window": 5}
+        case "ret20":
+            return {"op": "ret", "args": [_close()], "window": AUX_WINDOW}
+        case "vol20":
+            return {"op": "std", "args": [ret1], "window": AUX_WINDOW}
+        case "volume20":
+            return {"op": "sma", "args": [{"op": "quote_volume"}], "window": AUX_WINDOW}
+        case "premium_z20":
+            return {"op": "zscore", "args": [{"op": "premium_close"}], "window": AUX_WINDOW}
+        case _:
+            raise ValueError(f"unknown auxiliary feature {name!r} ({', '.join(AUX_TERMS)})")
+
+
+def model_term_names(family: str) -> tuple[str, ...]:
+    """The terms of a model family, in their registered order."""
+    if family not in MODEL_FAMILIES:
+        raise ValueError(f"{family!r} is not a model family ({', '.join(MODEL_FAMILIES)})")
+    return CONSTITUENTS if family == "combo" else (*CONSTITUENTS, *AUX_TERMS)
 
 
 def _close() -> Json:
@@ -247,8 +291,72 @@ def build(family: str, params: Params, *, n: int = 10) -> StrategySpec:
         case "spot_basis":  # contract over spot: short the richest futures, long the cheapest (cash-and-carry)
             basis = {"op": "sub", "args": [{"op": "div", "args": [_close(), {"op": "spot_close"}]}, 1.0]}
             return _ranked("spot_basis", {"op": "sma", "args": [basis], "window": int(p["window"])}, p, n)
+        case "combo" | "ridge":
+            return build_model(family, p, n)
         case _:
             raise ValueError(f"unknown family {family!r} (families: {', '.join(ALL_FAMILIES)})")
+
+
+def window_key(family: str) -> str:
+    """The name of a rank family's window parameter."""
+    keys = [k for k in GRID[family][0] if k != "quantile"]
+    if len(keys) != 1:
+        raise ValueError(f"{family} is not a one-window rank family (parameters: {', '.join(GRID[family][0])})")
+    return keys[0]
+
+
+def constituent(family: str, window: int) -> tuple[Json, float]:
+    """(the value a rank family ranks, +1 if the family is long its high values else -1), read off the family's
+    own template so a combination can never drift from the single-family definition."""
+    spec = build(family, {**GRID[family][0], window_key(family): float(window)})
+    nodes = list(spec.features.values())
+    long = spec.entry.long
+    if len(nodes) != 1 or nodes[0].op != "rank_xs" or long is None or isinstance(long, str):
+        raise ValueError(f"{family} is not a cross-sectional rank family")
+    inner = nodes[0].args[0]
+    if isinstance(inner, str | float | int):
+        raise ValueError(f"{family}: the ranked value must be an expression")
+    return inner.model_dump(mode="json", exclude_none=True), 1.0 if long.op == "gt" else -1.0
+
+
+def model_terms(family: str, params: Params) -> list[tuple[str, Json, float]]:
+    """(name, value tree, orientation) of every term of a model family; `params` carries the constituents' windows
+    as `p_<family>`."""
+    terms: list[tuple[str, Json, float]] = []
+    for name in model_term_names(family):
+        if name in CONSTITUENTS:
+            terms.append((name, *constituent(name, int(params[f"p_{name}"]))))
+        else:
+            terms.append((name, aux_tree(name), 1.0))  # no assumed direction: the coefficient carries the sign
+    return terms
+
+
+def _sum(terms: list[Json]) -> Json:
+    """A balanced tree of additions (a chain would exceed the depth limit for a dozen terms)."""
+    if len(terms) == 1:
+        return terms[0]
+    mid = len(terms) // 2
+    return {"op": "add", "args": [_sum(terms[:mid]), _sum(terms[mid:])]}
+
+
+def build_model(family: str, params: Params, n: int) -> StrategySpec:
+    """signal = cross-sectional rank of sum_i w_i * orientation_i * zscore_xs(value_i); the weights `w_<name>`
+    are numbers of the point, so the spec alone reproduces the model (the validator needs nothing else)."""
+    terms: list[Json] = []
+    for name, tree, sign in model_terms(family, params):
+        weight = float(params[f"w_{name}"]) * sign
+        if weight != 0.0:
+            terms.append({"op": "mul", "args": [round(weight, 10), {"op": "zscore_xs", "args": [tree]}]})
+    if not terms:
+        raise ValueError(f"{family}: every weight is zero")
+    q = MODEL_QUANTILE
+    return _common(
+        family,
+        {},
+        {"op": "rank_xs", "args": [_sum(terms)]},
+        {"long": {"op": "gt", "args": ["signal", q]}, "short": {"op": "lt", "args": ["signal", round(1 - q, 10)]}},
+        n,
+    )
 
 
 def _ranked(family: str, value: Json, p: dict[str, float], n: int) -> StrategySpec:

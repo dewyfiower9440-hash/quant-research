@@ -109,6 +109,32 @@ class RandomSearcher:
 
 
 @dataclass
+class FixedSearcher:
+    """A given list of points, in order (the model cells of ADR-053: nothing is searched). Asking for more than
+    the list holds repeats it; a repeated spec is evaluated once by the pipeline."""
+
+    space: Space
+    points: Sequence[Point]
+    name: str = "fixed"
+    _asked: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        if not self.points:
+            raise ValueError("a fixed searcher needs at least one point")
+
+    def ask(self) -> Point:
+        point = self.points[self._asked % len(self.points)]
+        self._asked += 1
+        return point
+
+    def tell(self, point: Point, score: float | None) -> None:
+        return None
+
+    def asked(self) -> int:
+        return self._asked
+
+
+@dataclass
 class TpeSearcher:
     """Optuna TPE over the registered axes (maximise). Every asked trial must be told exactly once."""
 

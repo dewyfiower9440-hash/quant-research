@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from quant_research.search.bandit import FamilyBandit
+from quant_research.strategy.templates import MODEL_FAMILIES
 
 CauseCode = Literal[
     "candidate",
@@ -285,7 +286,9 @@ class CampaignState:
                 if ds not in self.data_requests:
                     self.data_requests.append(ds)
         used = self.pulls[key] - self.pull_base.get(key, 0)
-        done = cause in ("candidate", "data_missing", "infeasible", "error") or used >= self.max_pulls
+        # ADR-053: a model cell's points are a function of its panel, so a second batch would repeat the first
+        once = cell.family in MODEL_FAMILIES
+        done = cause in ("candidate", "data_missing", "infeasible", "error") or once or used >= self.max_pulls
         if done and key not in self.retired:
             self.retired.append(key)
 

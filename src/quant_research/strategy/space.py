@@ -17,7 +17,7 @@ import numpy as np
 
 from quant_research.strategy.s0 import S0Context, check
 from quant_research.strategy.spec import TIMEFRAME_NS, StrategySpec, Timeframe
-from quant_research.strategy.templates import build
+from quant_research.strategy.templates import CONSTITUENTS, MODEL_FAMILIES, build, model_term_names, window_key
 
 Choice = str | int
 Constraint = Callable[[dict[str, float]], str | None]
@@ -295,9 +295,60 @@ SPACES_V3: dict[str, Space] = {s.family: s for s in _V3.values() if s is not Non
 INFEASIBLE_V3: frozenset[str] = frozenset(name for name, s in _V3.items() if s is None)
 
 
+def canonical_window(family: str, timeframe: str) -> int:
+    """ADR-053: the canonical parameter of a constituent is the middle grid point of its capped window axis
+    (rounded down). Mechanical: no result decides it."""
+    space = SPACES_V3[f"{family}@{timeframe}{SPACE_V3_SUFFIX}"]
+    axis = next(a for a in space.params if isinstance(a, IntAxis) and a.name == window_key(family))
+    return axis.lo + (axis.hi - axis.lo) // axis.step // 2 * axis.step
+
+
+MODEL_UNIVERSE = 20
+MODEL_REBALANCE_HOURS = 24
+MODEL_BAND_BP = 200
+WEIGHT_STEP = 0.0001
+
+
+def _model_space(family: str, tf: Timeframe) -> Space:
+    """A model space fixes everything but the term weights: the constituents' canonical windows are single-valued
+    axes and the portfolio construction has one choice per structural axis (design v2.3 appendix A)."""
+    hours = TIMEFRAME_NS[tf] // 3_600_000_000_000
+    params: list[NumAxis] = []
+    for name in model_term_names(family):
+        if name in CONSTITUENTS:
+            window = canonical_window(name, tf)
+            params.append(IntAxis(f"p_{name}", window, window, 1))
+        params.append(FloatAxis(f"w_{name}", -1.0, 1.0, WEIGHT_STEP))
+    struct = (
+        ChoiceAxis("side", ("long_short",)),
+        ChoiceAxis("smooth", (0,)),
+        ChoiceAxis("universe_n", (MODEL_UNIVERSE,)),
+        ChoiceAxis("sizing", (f"vol_target:{_VOL_WINDOWS[tf][1]}",)),
+        ChoiceAxis("time_stop", (0,)),
+        ChoiceAxis("rebalance", (max(1, MODEL_REBALANCE_HOURS // hours),)),
+        ChoiceAxis("band", (MODEL_BAND_BP,)),
+    )
+    return Space(
+        f"{family}@{tf}{SPACE_V3_SUFFIX}",
+        tuple(params),
+        struct,
+        template=family,
+        timeframe=tf,
+        warmup_bars=window_cap_bars(tf),
+    )
+
+
+# ADR-053: the model cells' spaces (same naming as v3). They are not drawn from: `search.model_cells` builds
+# their few points from weights estimated on the fit part of a selection block.
+MODEL_SPACES: dict[str, Space] = {
+    s.family: s for s in (_model_space(family, tf) for family in MODEL_FAMILIES for tf in V2_TIMEFRAMES)
+}
+
+
 def space_of(name: str) -> Space:
-    """The registered space a Point's `family` names (v1 family, v2 `family@timeframe` or v3 `...@timeframe/v3`)."""
-    space = SPACES.get(name) or SPACES_V2.get(name) or SPACES_V3.get(name)
+    """The registered space a Point's `family` names (v1 family, v2 `family@timeframe`, v3 `...@timeframe/v3`
+    or a model space)."""
+    space = SPACES.get(name) or SPACES_V2.get(name) or SPACES_V3.get(name) or MODEL_SPACES.get(name)
     if space is None:
         raise KeyError(f"unknown space {name!r}")
     return space

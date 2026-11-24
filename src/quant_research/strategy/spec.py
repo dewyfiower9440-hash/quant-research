@@ -77,6 +77,8 @@ Family = Literal[
     "oi_positioning",
     "taker_flow",
     "spot_basis",  # v2.3 step 8
+    "combo",  # v2.4 step 6 (ADR-053): a linear combination of the cross-sectional families' signals
+    "ridge",  # v2.4 step 7 (ADR-054): the same terms plus fixed auxiliary features, ridge coefficients
 ]
 Timeframe = Literal["5m", "15m", "1h", "4h", "1d"]
 TIMEFRAME_NS: dict[str, int] = {
