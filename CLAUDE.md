@@ -18,8 +18,15 @@ Stack: Python (uv)
 - ci: required
 
 ## Project map
-- Design (v2.1 base + v2.2 delta, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`, `docs/plans/2026-11-20-autonomous-quant-research-v2.2.md` (ADR-040..049)
-- Last execution plan (done): `docs/plans/2026-11-22-v23-never-stop.md` (v2.3: the campaign that does not stop; `2026-11-20-v22-rebuild.md` is closed)
+- Design (v2.1 base + v2.2 / v2.3 deltas, reference): `docs/plans/2026-11-08-autonomous-quant-research.md`,
+  `docs/plans/2026-11-20-autonomous-quant-research-v2.2.md`, `docs/plans/2026-11-23-autonomous-quant-research-v2.3.md` (ADR-040..055)
+- Execution plans: `docs/plans/2026-11-23-v24-feasible-rerun.md` (v2.4: executable spaces v3, funding required,
+  model cells, regime gates, campaign c2); done: `2026-11-22-v23-never-stop.md`, `2026-11-20-v22-rebuild.md`
+- v2.4 code: `strategy/space.py` (`SPACES_V3` = `family@tf/v3` with 90-day lookback caps, `MODEL_SPACES`,
+  `REGIME_SPACES`), `strategy/templates.py` (`constituent`, `build_model`, `regime_gate`), `search/model_cells.py`
+  (combination and ridge weights fitted on the first 75 % of selection), `search/campaign.py`
+  (`preregistered_groups_v3`, causes `below_bar` / `infeasible`); tools `relabel_campaign.py`,
+  `measure_combined_null.py`; campaign c2 = `run_campaign.py --run-id c2 --space-version 3`
 - Autonomous loop (v2.3, ADR-049): `search/campaign.py` (cells, causes, rounds), `search/campaign_runner.py` (driver,
   cross-window confirmation), `catalog/coverage.py`, `bulk/tiers.py` (data queue planning); tools `run_campaign.py`,
   `run_data_queue.py`, `run_validator.py`; user-run tasks `tools/register_campaign_task.ps1`,
@@ -89,5 +96,10 @@ Stack: Python (uv)
 - A scheduled campaign tick wrote its report into `docs/measurements/` and would have rewritten a committed file every hour → scheduled runs write under `qr-data/run/`; copy a report into docs/ only to commit it (2026-11-22)
 - A dataset counted as available as soon as one file existed, so a campaign cell ran on a tier that was 20 % downloaded → research uses a tier only when `run/data-queue-state.json` says `done`, and an input must cover 80 % of the member rows (2026-11-23)
 - `--top N` in `tools/bulk_extras.py` ranks symbols by member months up to today (look-ahead, 41 % of a 2025 month's universe) → tiers a family reads download the whole universe file, never a top-N of it (2026-11-23)
+- The supervisor restart test (`tests/capture/test_run_orchestration.py`) failed the gate twice while a download tick and Defender were busy (child start took 10-16 s instead of 1 s); it passes alone → when the gate fails only there, stop the `qr-data-queue` tick (and its orphaned `bulk_extras.py` children) and rerun; do not run other pytest jobs beside the gate (2026-11-23)
+- pyright infers `list[str]` for a list built from `Literal`-returning calls, and `x in set_of_tuples` narrows a loop variable to the set's element type → annotate the list (`nulls: list[NullKind] = [...]`) and compare with an explicit key (2026-11-24)
+- A polars join does not promise the left frame's row order: values from `evaluate(order(frame), ...)` attached after a join can be misaligned → attach them to the ordered frame first, then join (2026-11-24)
+- A model-cell or S1 fixture with a constant funding rate / premium per symbol has no rolling variance, so `zscore` is null and every combined signal (any null term) disappears → give test inputs movement over time (2026-11-24)
+- A long measurement beside pytest runs took 4 minutes per replication instead of 35 seconds → run resumable measurements alone, with a JSON-lines state file (2026-11-24)
 - structlog's JSON tracebacks print frame locals by default → `configure_logging(show_locals=False)` wherever locals can hold holdout results (the validator) (2026-11-22)
 - Background shells in a Claude Code session are killed when the whole system runs low on memory (bulk funding download stopped at 280/632) → run long jobs in the foreground (20 min per call, resumable tools) or register a scheduled task (`tools/register_campaign_task.ps1`, user-run) (2026-11-21)

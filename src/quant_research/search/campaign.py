@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from quant_research.search.bandit import FamilyBandit
-from quant_research.strategy.templates import MODEL_FAMILIES
+from quant_research.strategy.space import INFEASIBLE_V3
+from quant_research.strategy.templates import MODEL_FAMILIES, REGIME_SUFFIX, base_family
 
 CauseCode = Literal[
     "candidate",
@@ -168,6 +169,38 @@ def preregistered_groups(families: Sequence[str]) -> list[list[Cell]]:
     return [
         [Cell(f, tf, m, w) for w in windows for tf in tfs for m in tops for f in families]
         for windows, tfs, tops in GRID_GROUPS
+    ]
+
+
+def preregistered_groups_v3(families: Sequence[str]) -> list[list[Cell]]:
+    """ADR-055 decision 2, the round order of a v3 campaign: G1' (w2, 4h / 1d, top 100) and G2' (w1) for the
+    searched families, the model cells M0 (`combo`) and M1-R (`ridge`) on that grid in both windows, G3 (1h) and
+    G4 (top 30) with the model cells, then the regime-gated families through the four grid groups. A (family,
+    timeframe) without a v3 space (ADR-051) is left out, so it never takes a batch. New-data families are in
+    every group like any other: they wait as data_missing and reopen when their tier arrives (round D)."""
+
+    def grid(fams: Sequence[str], windows: Sequence[str], tfs: Sequence[str], tops: Sequence[int]) -> list[Cell]:
+        return [
+            Cell(f, tf, m, w)
+            for w in windows
+            for tf in tfs
+            for m in tops
+            for f in fams
+            if f"{base_family(f)}@{tf}" not in INFEASIBLE_V3
+        ]
+
+    searched = list(families)
+    models = list(MODEL_FAMILIES)
+    gated = [f + REGIME_SUFFIX for f in families]
+    (w_a, tf_a, top_a), (w_b, _tf_b, _top_b) = GRID_GROUPS[0], GRID_GROUPS[1]
+    both = (*w_a, *w_b)
+    return [
+        grid(searched, *GRID_GROUPS[0]),
+        grid(searched, *GRID_GROUPS[1]),
+        *(grid([model], both, tf_a, top_a) for model in models),
+        grid([*searched, *models], *GRID_GROUPS[2]),
+        grid([*searched, *models], *GRID_GROUPS[3]),
+        *(grid(gated, *group) for group in GRID_GROUPS),
     ]
 
 

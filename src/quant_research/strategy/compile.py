@@ -16,10 +16,10 @@ from dataclasses import dataclass
 import polars as pl
 
 from quant_research.strategy.canonical import Arg, expanded_trees
-from quant_research.strategy.ops import OPS
+from quant_research.strategy.ops import EXPANDING_MIN_HISTORY, OPS
 from quant_research.strategy.spec import Node, StrategySpec
 
-EXPANDING_MIN_HISTORY = 30
+REFERENCE_SYMBOL = "BTCUSDT"  # ADR-055: the asset whose own past defines the market regime
 
 
 class CompileError(ValueError):
@@ -126,6 +126,16 @@ def evaluate(frame: pl.DataFrame, arg: Arg) -> pl.Series:
             for _sym, group in work.group_by("symbol", maintain_order=True):
                 out += _expanding_quantile(group["a0"].to_list())
             return pl.Series("v", out, dtype=pl.Float64)
+        case "ref_quantile":
+            # computed once on the reference asset's rows and looked up by decision: the same value for every
+            # symbol, null where the reference has no value (or is not in the panel at all)
+            ref = work.filter(pl.col("symbol") == REFERENCE_SYMBOL).sort("decision_ns")
+            quantiles = _expanding_quantile(ref["a0"].to_list())
+            table = {int(d): q for d, q in zip(ref["decision_ns"].to_list(), quantiles, strict=True) if q is not None}
+            if not table:
+                return pl.Series("v", [None] * work.height, dtype=pl.Float64)
+            lookup = pl.col("decision_ns").replace_strict(table, default=None, return_dtype=pl.Float64)
+            return work.select(lookup.alias("v"))["v"]
         case _:
             raise CompileError(f"operator {arg.op!r} has no evaluator")
     return work.select(expr.alias("v"))["v"]

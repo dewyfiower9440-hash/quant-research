@@ -136,7 +136,7 @@ base: 2026-11-08-autonomous-quant-research.md (v2.1), 2026-11-20-autonomous-quan
 | G4 | 상위 30 |
 | R | 국면 게이트 축 |
 
-- **국면 게이트 축(R).** BTC 기준 확장 창 분위(`expanding_quantile`): 추세 국면(90일 수익률), 변동성 국면(30일 실현 변동성). `regime_gate ∈ {none, trend_up, trend_not_down, vol_low, vol_not_high}`. 국면이 맞지 않으면 포지션 0. 늘어나는 trial과 S3는 모두 회계에 들어간다.
+- **국면 게이트 축(R).** BTC 기준 확장 창 분위(`ref_quantile`): 추세 국면(45일 수익률; 90일은 워밍업에 들어가지 않아 첫 실행 전에 고침), 변동성 국면(30일 실현 변동성). `regime_gate ∈ {none, trend_up, trend_not_down, vol_low, vol_not_high}`. 국면이 맞지 않으면 포지션 0. 늘어나는 trial과 S3는 모두 회계에 들어간다.
 - **결합 단계의 거짓양성.** 첫 실행 전에 귀무 하네스(블록 순열·부호 뒤집기)로 (선택 → S3 → 교차 → 결합 판정)과 M0·M1-R 전체의 거짓양성률을 잰다(200회 이상, Wilson 95% 구간). 점추정이 0.05를 넘으면 c2를 시작하지 않고 보고한다.
 
 ## 9. 완료 기준 (v2.2 §7 보강)
@@ -165,6 +165,6 @@ base: 2026-11-08-autonomous-quant-research.md (v2.1), 2026-11-20-autonomous-quan
 | M1-R 설정 | Ridge α ∈ {1, 10, 100}, 절편 없음(특징·라벨 중심화) |
 | M1-R 보조 특징 | ret 1·5·20봉, std(ret1) 20봉, quote_volume 순위(sma 20봉), premium_close z점수 20봉 |
 | 확인 구간 재학습 | 하지 않는다(가중치·계수 고정) |
-| 국면 라벨 | BTC 90일 수익률·30일 실현 변동성의 확장 창 분위, 3단계(1/3, 2/3 경계) |
+| 국면 라벨 | BTC 45일 수익률·30일 실현 변동성의 확장 창 분위, 3단계(1/3, 2/3 경계) |
 | 귀무 하네스 반복 | 200회 이상(축소 예산) |
 - 기준 매개변수 표는 코드(`strategy/combo.py`)가 같은 규칙으로 계산하고 테스트가 이 값과 대조한다. 공간 v3와 이 부록의 해시는 구현 단계(계획 4·6·7)에서 `docs/decisions.md`에 기록한다.

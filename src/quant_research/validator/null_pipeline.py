@@ -212,11 +212,70 @@ def synthetic_returns(closes: F64, spec: SyntheticSpec, rng: np.random.Generator
     return out
 
 
+FUNDING_INTERVAL_HOURS = 8
+
+
+def null_inputs(
+    symbols: Sequence[str], grid: NDArray[np.int64], timeframe_ns: int, rng: np.random.Generator
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """(premium bars, funding settlements) drawn independently of the returns: a slowly moving premium level per
+    symbol (AR(1) noise) and an 8-hourly funding rate (its own AR(1) noise). They let a v3 campaign (ADR-052:
+    funding required; ADR-053: families that read premium and funding) run on a null market; by construction
+    they predict nothing."""
+    n = len(grid)
+    premium: list[pl.DataFrame] = []
+    funding: list[pl.DataFrame] = []
+    every = FUNDING_INTERVAL_HOURS * HOUR_NS // timeframe_ns
+    for s in symbols:
+        shocks = rng.standard_normal(n)
+        level = np.zeros(n)
+        for k in range(1, n):  # AR(1), half-life about a day of hourly bars
+            level[k] = 0.97 * level[k - 1] + 0.00005 * shocks[k]
+        premium.append(
+            pl.DataFrame(
+                {
+                    "symbol": [s] * n,
+                    "event_ns": grid - timeframe_ns,
+                    "open": level,
+                    "high": level,
+                    "low": level,
+                    "close": level,
+                    "available_ns": grid,
+                }
+            )
+        )
+        at = grid[:: max(1, int(every))]
+        rate = np.zeros(len(at))
+        noise = rng.standard_normal(len(at))
+        for k in range(1, len(at)):
+            rate[k] = 0.8 * rate[k - 1] + 0.00005 * noise[k]
+        funding.append(
+            pl.DataFrame(
+                {
+                    "symbol": [s] * len(at),
+                    "event_ns": at,
+                    "last_funding_rate": rate,
+                    "funding_interval_hours": [FUNDING_INTERVAL_HOURS] * len(at),
+                    "available_ns": at,
+                }
+            )
+        )
+    return pl.concat(premium), pl.concat(funding)
+
+
 def synthetic_panel(
-    base: Panel, spec: SyntheticSpec, *, seed: int, start_price: float = 100.0, latency_ns: int | None = None
+    base: Panel,
+    spec: SyntheticSpec,
+    *,
+    seed: int,
+    start_price: float = 100.0,
+    latency_ns: int | None = None,
+    inputs: bool = False,
 ) -> Panel:
     """A panel on the SAME decision grid as `base`, rebuilt from synthetic hourly bars (one bar = one hour).
-    The same seed gives the same synthetic market at any `latency_ns` (the lag stress re-assembles it)."""
+    The same seed gives the same synthetic market at any `latency_ns` (the lag stress re-assembles it).
+    `inputs`: also premium bars and funding settlements that are independent of the returns (`null_inputs`), from
+    a random stream of their own, so the price market of a seed is the same with and without them."""
     symbols, grid, closes = hourly_closes(base)
     if spec.hours is not None:  # a longer (or shorter) market on the base's hourly grid
         grid = int(grid[0]) + np.arange(spec.hours, dtype=np.int64) * base.config.timeframe_ns
@@ -247,14 +306,16 @@ def synthetic_panel(
     lat = base.config.latency_ns if latency_ns is None else latency_ns
     cfg = PanelConfig(tf, decision_delay_ns=0, latency_ns=lat)
     decisions = decision_grid(int(grid[0]), int(grid[-1]), cfg)
-    frame = assemble(decisions, symbols, minutes, cfg).with_columns(
+    premium, funding = null_inputs(symbols, grid, tf, np.random.default_rng([seed, 1])) if inputs else (None, None)
+    frame = assemble(decisions, symbols, minutes, cfg, premium=premium, funding=funding).with_columns(
         # one synthetic bar per hour by construction: every execution interval is complete
         pl.lit(True).alias("complete"),
         pl.lit(tf // MINUTE_NS).alias("exec_minutes"),
     )
     # the synthetic spec is part of the data identity (a reused S1 result must come from the same market)
-    files = [(f"synthetic:{spec.alpha}:{spec.strength}:{spec.block_len}:{spec.null}:{spec.hours}", seed)]
-    return Panel(frame, settlements(None, None), files, cfg, evaluate_from_ns=base.evaluate_from_ns)
+    tag = f"synthetic:{spec.alpha}:{spec.strength}:{spec.block_len}:{spec.null}:{spec.hours}"
+    files = [(tag + (":inputs" if inputs else ""), seed)]
+    return Panel(frame, settlements(funding, None), files, cfg, evaluate_from_ns=base.evaluate_from_ns)
 
 
 @dataclass(frozen=True, slots=True)

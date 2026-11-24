@@ -297,6 +297,47 @@ def build(family: str, params: Params, *, n: int = 10) -> StrategySpec:
             raise ValueError(f"unknown family {family!r} (families: {', '.join(ALL_FAMILIES)})")
 
 
+# ADR-055 decision 3: regime gates. The trend of the reference asset is its 45-day return, its volatility the
+# 30-day standard deviation of bar returns; each is ranked against its own past (three levels at 1/3 and 2/3).
+# 45 days: window + the quantile's minimum history (30 values) must fit the 90-day warm-up of ADR-051 on daily
+# bars (45 + 30 = 75 < 90) and the warm-up rows a split keeps on hourly bars (1,080 + 30 < 1,200).
+REGIME_SUFFIX = "~regime"
+REGIME_GATES: tuple[str, ...] = ("trend_up", "trend_not_down", "vol_low", "vol_not_high")
+REGIME_TREND_DAYS = 45
+REGIME_VOL_DAYS = 30
+REGIME_LOW, REGIME_HIGH = 0.3333, 0.6667
+_BARS_PER_DAY = {"1h": 24, "4h": 6, "1d": 1}
+
+
+def base_family(family: str) -> str:
+    """The template family of a cell family (`momentum~regime` is `momentum` with a regime gate axis)."""
+    return family.removesuffix(REGIME_SUFFIX)
+
+
+def regime_gate(name: str, timeframe: str) -> Json:
+    """The condition a gated family adds to its entries."""
+    if timeframe not in _BARS_PER_DAY:
+        raise ValueError(f"regime gates exist for {', '.join(_BARS_PER_DAY)}, not {timeframe!r}")
+    per_day = _BARS_PER_DAY[timeframe]
+    trend: Json = {
+        "op": "ref_quantile",
+        "args": [{"op": "ret", "args": [_close()], "window": REGIME_TREND_DAYS * per_day}],
+    }
+    ret1: Json = {"op": "ret", "args": [_close()], "window": 1}
+    vol: Json = {"op": "ref_quantile", "args": [{"op": "std", "args": [ret1], "window": REGIME_VOL_DAYS * per_day}]}
+    match name:
+        case "trend_up":
+            return {"op": "gt", "args": [trend, REGIME_HIGH]}
+        case "trend_not_down":
+            return {"op": "gt", "args": [trend, REGIME_LOW]}
+        case "vol_low":
+            return {"op": "lt", "args": [vol, REGIME_LOW]}
+        case "vol_not_high":
+            return {"op": "lt", "args": [vol, REGIME_HIGH]}
+        case _:
+            raise ValueError(f"unknown regime gate {name!r} ({', '.join(REGIME_GATES)})")
+
+
 def window_key(family: str) -> str:
     """The name of a rank family's window parameter."""
     keys = [k for k in GRID[family][0] if k != "quantile"]

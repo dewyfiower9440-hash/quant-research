@@ -12,12 +12,22 @@ import itertools
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 
 from quant_research.strategy.s0 import S0Context, check
 from quant_research.strategy.spec import TIMEFRAME_NS, StrategySpec, Timeframe
-from quant_research.strategy.templates import CONSTITUENTS, MODEL_FAMILIES, build, model_term_names, window_key
+from quant_research.strategy.templates import (
+    CONSTITUENTS,
+    MODEL_FAMILIES,
+    REGIME_GATES,
+    REGIME_SUFFIX,
+    build,
+    model_term_names,
+    regime_gate,
+    window_key,
+)
 
 Choice = str | int
 Constraint = Callable[[dict[str, float]], str | None]
@@ -345,10 +355,33 @@ MODEL_SPACES: dict[str, Space] = {
 }
 
 
+def _regime_space(v3: Space) -> Space:
+    return Space(
+        f"{v3.template_family}{REGIME_SUFFIX}@{v3.timeframe}{SPACE_V3_SUFFIX}",
+        v3.params,
+        (*v3.struct, ChoiceAxis("regime_gate", REGIME_GATES)),
+        v3.constraint,
+        template=v3.template_family,
+        timeframe=v3.timeframe,
+        warmup_bars=v3.warmup_bars,
+    )
+
+
+# ADR-055 decision 3: every searched v3 space again with a regime gate axis (the ungated point is the v3 space
+# itself, so `none` is not a choice here). Cell family `<family>~regime`; opened in the last round.
+REGIME_SPACES: dict[str, Space] = {s.family: s for s in (_regime_space(v3) for v3 in SPACES_V3.values())}
+
+
 def space_of(name: str) -> Space:
-    """The registered space a Point's `family` names (v1 family, v2 `family@timeframe`, v3 `...@timeframe/v3`
-    or a model space)."""
-    space = SPACES.get(name) or SPACES_V2.get(name) or SPACES_V3.get(name) or MODEL_SPACES.get(name)
+    """The registered space a Point's `family` names (v1 family, v2 `family@timeframe`, v3 `...@timeframe/v3`,
+    a model space or a regime-gated space)."""
+    space = (
+        SPACES.get(name)
+        or SPACES_V2.get(name)
+        or SPACES_V3.get(name)
+        or MODEL_SPACES.get(name)
+        or REGIME_SPACES.get(name)
+    )
     if space is None:
         raise KeyError(f"unknown space {name!r}")
     return space
@@ -398,6 +431,13 @@ def build_point(space: Space, point: Point) -> StrategySpec:
         body["sizing"] = {"method": method, "target_ann_vol": 0.15, "max_leverage": 1.0, "vol_window": int(window)}
     if (stop := int(struct.get("time_stop", 0))) > 0:
         body["exit"] = {"time_stop_bars": stop, "stop_loss_atr": None}
+    if "regime_gate" in struct:  # ADR-055: both entries only while the gate holds
+        gate = regime_gate(str(struct["regime_gate"]), space.timeframe)
+        entry = cast(dict[str, object], body["entry"])
+        body["entry"] = {
+            side: None if entry.get(side) is None else {"op": "and", "args": [entry[side], gate]}
+            for side in ("long", "short")
+        }
     return StrategySpec.model_validate(body)
 
 

@@ -13,7 +13,9 @@
     Candidates go to the validator outbox at the end of every tick (register_validator_task.ps1 judges them).
     Each tick runs at most $MaxHours hours and appends its output (refusals, gate stops, tracebacks) to
     $LogDir\campaign-<run>.log. Stop early: create qr-data\run\STOP-campaign.
-    The default run id c1 continues the first campaign (its grid is group G1), so the S3 null bar keeps its N.
+    The default run id c2 is the v2.4 campaign (ADR-051..055: -SpaceVersion 3 = lookback caps, funding required,
+    model cells, regime gates); the S3 verdicts of c1 are added to its null bar. c1 itself is finished: resume it
+    only with -RunId c1 -SpaceVersion 2 (a state file never resumes under another space version).
     -Grid cli runs only -Timeframes / -TopM / -Windows (plain text lists, comma or space separated, because
     `powershell -File` does not parse arrays):
         powershell -NoProfile -File C:/dev/auto/code/tools/register_campaign_task.ps1 -WhatIf
@@ -23,8 +25,9 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-campaign',
-    [ValidatePattern('^[A-Za-z0-9_-]{1,32}$')][string]$RunId = 'c1',
+    [ValidatePattern('^[A-Za-z0-9_-]{1,32}$')][string]$RunId = 'c2',
     [ValidateSet('preregistered', 'cli')][string]$Grid = 'preregistered',
+    [ValidateSet(2, 3)][int]$SpaceVersion = 3,
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
     [ValidateNotNullOrEmpty()][string]$Timeframes = '4h,1d',
     [ValidateNotNullOrEmpty()][string]$TopM = '100',
@@ -59,7 +62,8 @@ $user = "$env:USERDOMAIN\$env:USERNAME"
 # outside the repository: a scheduled tick must not rewrite the committed measurement (copy it to docs/ to commit)
 $report = Join-Path (Join-Path (Split-Path -Parent $LogDir) 'run') "campaign-$RunId.md"
 $logFile = Join-Path $LogDir "campaign-$RunId.log"
-$arguments = "tools\run_campaign.py --run-id $RunId --grid $Grid --timeframes $($tfList -join ' ') " +
+$arguments = "tools\run_campaign.py --run-id $RunId --grid $Grid --space-version $SpaceVersion " +
+    "--timeframes $($tfList -join ' ') " +
     "--top-m $($topList -join ' ') --windows $($winList -join ' ') --max-hours $MaxHours " +
     "--polars-threads $PolarsThreads --report `"$report`" --log-file `"$logFile`""
 $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $Project

@@ -109,11 +109,14 @@ def test_no_v3_point_needs_more_warmup_than_a_split_keeps() -> None:
     """Review (step 4): on 1h the S0 limit (2,160 bars) is above what `split_window` keeps as warm-up rows
     (MAX_WARMUP_BARS); the axes must stay below the smaller of the two."""
     from quant_research.search.campaign_runner import MAX_WARMUP_BARS
+    from quant_research.strategy.space import REGIME_SPACES
 
-    for name, space in SPACES_V3.items():
-        longest = max(
-            (warmup_bars(c.spec) for c in generate(space, seed=3, count=200) if c.spec is not None), default=0
-        )
+    # review (step 9): the regime-gated spaces too (a 60-day reference return on 1h bars needed 1,440 + 30 rows,
+    # more than a split keeps), with enough accepted points left in each
+    for name, space in {**SPACES_V3, **REGIME_SPACES}.items():
+        accepted = [c.spec for c in generate(space, seed=3, count=200) if c.spec is not None]
+        assert len(accepted) > 100, name
+        longest = max(warmup_bars(spec) for spec in accepted)
         assert longest < min(MAX_WARMUP_BARS, window_cap_bars(space.timeframe)), name
 
 

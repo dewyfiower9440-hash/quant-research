@@ -129,7 +129,13 @@ def main() -> int:
     from quant_research.research.ledger import TrialLedger
     from quant_research.research.store import ResearchStore
     from quant_research.search.bandit import BanditPrior, FamilyBandit
-    from quant_research.search.campaign import CampaignState, Cell, negative_report, preregistered_groups
+    from quant_research.search.campaign import (
+        CampaignState,
+        Cell,
+        negative_report,
+        preregistered_groups,
+        preregistered_groups_v3,
+    )
     from quant_research.search.campaign_runner import (
         CampaignConfig,
         Rounds,
@@ -142,7 +148,7 @@ def main() -> int:
         split_window,
     )
     from quant_research.search.pipeline import panel_datasets
-    from quant_research.strategy.templates import ALL_FAMILIES
+    from quant_research.strategy.templates import ALL_FAMILIES, base_family
     from quant_research.validator.process import submit_campaign_candidates
     from quant_research.validator.verdict import DecisionRule
 
@@ -155,7 +161,8 @@ def main() -> int:
     # rewards are validation-split daily SRs (~0.01-0.1): a prior on that scale, no minimum-budget lottery
     prior = BanditPrior(mu0=0.0, k0=1.0, sigma=0.05, gamma=0.98, min_pulls=0.0)
     if a.grid == "preregistered":
-        groups = preregistered_groups(families)
+        # ADR-055: a v3 campaign follows its own round order (model cells, regime gates); c1 keeps ADR-049's
+        groups = preregistered_groups_v3(families) if a.space_version == 3 else preregistered_groups(families)
         grid = groups[0]
     else:
         grid = [Cell(f, tf, m, w) for w in a.windows for tf in a.timeframes for m in a.top_m for f in families]
@@ -233,7 +240,7 @@ def main() -> int:
 
         def panels(cell: Cell) -> tuple[Panel, Panel]:
             # v2.3 step 7: metrics / spot only for the families that read them; step 11: only finished tiers
-            datasets = usable_datasets(panel_datasets(cell.family), unready_now(), keep=DEFAULT_DATASETS)
+            datasets = usable_datasets(panel_datasets(base_family(cell.family)), unready_now(), keep=DEFAULT_DATASETS)
             key = (cell.window, cell.timeframe, cell.top_m, datasets)
             if key not in loaded:
                 loaded.clear()  # one panel in memory at a time

@@ -83,7 +83,12 @@ OPS: dict[str, OpSpec] = {
     "zscore_xs": OpSpec("xs", 1, 1, False),
     # regime: quantile of the value within its own past (expanding window, §7)
     "expanding_quantile": OpSpec("regime", 1, 1, False),
+    # ADR-055: the same quantile of the REFERENCE asset's value (BTCUSDT), on every symbol's rows (a market regime)
+    "ref_quantile": OpSpec("regime", 1, 1, False),
 }
+
+
+EXPANDING_MIN_HISTORY = 30  # values a quantile against the own past needs before its first output
 
 
 def lookback(op: str, window: int | None, child_lookbacks: list[int]) -> int:
@@ -92,4 +97,6 @@ def lookback(op: str, window: int | None, child_lookbacks: list[int]) -> int:
     spec = OPS[op]
     if spec.kind == "ts" or op == "atr":
         return inner + int(window or 0)
+    if spec.kind == "regime":  # review (v2.4 step 9): undefined until the past holds EXPANDING_MIN_HISTORY values
+        return inner + EXPANDING_MIN_HISTORY
     return inner

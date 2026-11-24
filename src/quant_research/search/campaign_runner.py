@@ -56,7 +56,7 @@ from quant_research.search.pipeline import (
 )
 from quant_research.search.s1 import S1Config
 from quant_research.strategy.space import INFEASIBLE_V3, SPACE_V3_SUFFIX, Point, Space, build_point, space_of
-from quant_research.strategy.templates import MODEL_FAMILIES
+from quant_research.strategy.templates import MODEL_FAMILIES, base_family
 
 F64 = NDArray[np.float64]
 log = structlog.get_logger(__name__)
@@ -117,7 +117,7 @@ def is_model(cell: Cell) -> bool:
 
 def infeasible(cell: Cell, version: int) -> bool:
     """ADR-051: the cell's (family, timeframe) has no v3 space (an axis starts beyond the lookback cap)."""
-    return version == 3 and cell.space in INFEASIBLE_V3
+    return version == 3 and f"{base_family(cell.family)}@{cell.timeframe}" in INFEASIBLE_V3
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +137,10 @@ def missing_data(cell: Cell, panel: Panel, *, require_funding: bool = False) -> 
     """Datasets the cell's family needs that the panel does not cover (pipeline.missing_inputs). With
     `require_funding` (ADR-052, v3 campaigns) every cell also needs the funding rate column and at least one
     settlement: a perpetual backtest without funding cash flows is not judged."""
+    family = base_family(cell.family)  # a regime-gated cell reads what its family reads
     if not require_funding:
-        return missing_inputs(cell.family, panel)
-    missing = missing_inputs(cell.family, panel, also=("funding",))
+        return missing_inputs(family, panel)
+    missing = missing_inputs(family, panel, also=("funding",))
     if panel.funding.height == 0 and FUNDING_DATASET not in missing:
         missing = (*missing, FUNDING_DATASET)
     return missing

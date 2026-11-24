@@ -18,16 +18,29 @@ BeforeAll {
 }
 
 Describe 'register_campaign_task.ps1' {
-    It 'continues campaign c1 on the pre-registered grid by default' {
+    It 'runs campaign c2 with the v3 spaces on the pre-registered grid by default' {
         $r = Invoke-RegisterScript -Name 'register_campaign_task'
         $r.ExitCode | Should -Be 0
-        $r.Output | Should -Match '--run-id c1 --grid preregistered'
+        $r.Output | Should -Match '--run-id c2 --grid preregistered --space-version 3'
         $r.Output | Should -Match 'Register per-user scheduled task'
+    }
+
+    It 'can still address the finished campaign c1 under its own space version' {
+        $r = Invoke-RegisterScript -Name 'register_campaign_task' -Arguments @('-RunId', 'c1', '-SpaceVersion', '2')
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Match '--run-id c1 --grid preregistered --space-version 2'
+    }
+
+    It 'refuses a space version that does not exist' {
+        $r = Invoke-RegisterScript -Name 'register_campaign_task' -Arguments @('-SpaceVersion', '4')
+        $r.ExitCode | Should -Not -Be 0
+        # the console wraps the parameter name; the set itself stays on one line
+        $r.Output | Should -Match 'does not belong to the set "2,3"'
     }
 
     It 'writes its report outside the repository (a tick must not rewrite a committed file)' {
         $r = Invoke-RegisterScript -Name 'register_campaign_task'
-        $r.Output | Should -Match '--report "C:\\dev\\qr-data\\run\\campaign-c1\.md"'
+        $r.Output | Should -Match '--report "C:\\dev\\qr-data\\run\\campaign-c2\.md"'
     }
 
     It 'refuses an unknown grid mode before registering anything' {

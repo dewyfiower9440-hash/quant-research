@@ -276,3 +276,27 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
 - validator 질의 예산(k = 20)은 자동 제출된 후보가 판정될 때마다 줄어든다. 사전 조건 미달로 거부된 요청은 예산을 쓰지 않는다.
 - 세션에서 손으로 돌리는 `run_data_queue.py`와 예약 작업은 `run/data-queue.lock`으로 겹치지 않는다(늦게 온 쪽이 exit 2).
 - 첫 등록 뒤 첫 캠페인 틱은 패널 캐시를 다시 만든다(패널 코드 변경, 창·주기·top-M 조합마다 약 8~10분).
+
+## 19. 캠페인 c2 (v2.4, ADR-050~055, 2026-11-24)
+- c1은 끝난 캠페인이다. 상태 파일(`qr-data/run/campaign-c1.json`)은 보관하고, 그 S3 판정 수는 c2의 결합 기준 N에 더해진다.
+- c2는 공간 v3로 돈다: lookback 상한(워밍업 90일), 펀딩 데이터 필수, 결합·Ridge 셀, 국면 게이트.
+- 등록 명령(사용자 실행). 기본값이 c2와 공간 v3다. 이미 등록된 `qr-campaign`을 같은 이름으로 덮어쓰고 다시 켠다.
+  - `! powershell -NoProfile -File C:/dev/auto/code/tools/register_campaign_task.ps1`
+  - 먼저 확인만 하려면 끝에 `-WhatIf`를 붙인다.
+  - c1을 다시 돌릴 일이 있으면 `-RunId c1 -SpaceVersion 2`를 준다. 상태 파일은 다른 공간 버전으로 재개되지 않는다(exit 1).
+- 라운드 순서(사전 등록): G1′(w2·4h/1d·상위 100) → G2′(w1) → 결합(`combo`) → Ridge(`ridge`) → 1h → 상위 30 → 국면 게이트(`<계열>~regime`).
+  - 새 데이터 계열(OI·테이커·현물)은 처음에는 `data_missing`으로 닫히고, 해당 tier가 `done`이 되면 다음 라운드에 다시 열린다.
+  - `trend@1d`, `volatility@1d`는 90일 워밍업에 들어가지 않아 격자에 없다.
+  - 결합·Ridge 셀은 한 배치만 돈다(같은 패널에서는 같은 점이 나오기 때문).
+- 상태 확인: `qr-data/run/campaign-c2.md`.
+  - 배치 표에 순수익·비용·펀딩, 자기 S3, 교차 S3, 결합 SR, 결합 기준이 나온다.
+  - "다음 배치의 결합 기준과 검정력" 표: 그 시점 누적 N에서의 기준(연 SR)과 참 SR별 통과 확률이다. N이 늘면 기준이 오른다.
+- 원인 코드(라벨 v3):
+  - `below_bar`: 확인 구간 SR은 양수지만 결합 확인을 넘지 못했다(교차 측정 없음 / 교차 SR ≤ 0 / 결합 SR ≤ 기준).
+  - `unstable`: 확인 구간 SR ≤ 0.
+  - `infeasible`: 실행 가능한 공간이 없다.
+  - `data_missing`에 `binance.um.bulk.funding`이 보이면 펀딩 커버리지 80% 미만이거나 정산 이벤트가 없는 것이다.
+- 읽기 전용 도구:
+  - `uv run python tools/relabel_campaign.py --run-id c1`: 저장된 캠페인을 현재 라벨 규칙으로 다시 분류한다(평가 없음).
+  - `uv run python tools/measure_combined_null.py`: 귀무 시장에서 결합 판정의 거짓 후보 비율을 잰다. 임시 DB만 쓰고, 진행 상태는 `qr-data/run/combined-null.jsonl`에 쌓여 이어서 돈다. 다른 pytest와 함께 돌리면 매우 느려진다.
+- 게이트(`pytest`)를 돌릴 때: 다운로드 틱이나 다른 무거운 작업이 돌면 수집기 supervisor 타이밍 테스트가 실패할 수 있다. 그 테스트만 실패하면 `Stop-ScheduledTask qr-data-queue`(남은 `bulk_extras.py` 프로세스도 종료) 뒤 다시 돌린다. 다운로드는 다음 틱에 이어진다.
