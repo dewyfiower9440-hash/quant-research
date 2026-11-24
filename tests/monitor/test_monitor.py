@@ -243,3 +243,96 @@ def test_writing_the_supervisor_state_never_raises(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(os, "replace", busy)
     write_supervisor_state(target, {"ws": 2})  # falls back to an in-place write
     assert json.loads(target.read_text(encoding="utf-8"))["streaks"] == {"ws": 2}
+
+
+def test_a_one_hertz_job_without_a_success_for_five_minutes_is_critical() -> None:
+    """v2.5 N01: the process beat its heartbeat for 53 hours while every request failed."""
+    stale = evaluate(_obs(job_ok_ns={"book_ticker": NOW - 301 * S, "upbit_orderbook": NOW - 10 * S}), Thresholds())
+    assert [(f.key, f.severity) for f in stale] == [("stale_job:book_ticker", "critical")]
+    assert "301 s" in stale[0].detail
+    assert evaluate(_obs(job_ok_ns={"book_ticker": NOW - 300 * S}), Thresholds()) == []  # the boundary itself
+    both = evaluate(_obs(job_ok_ns={"book_ticker": NOW - 900 * S, "upbit_orderbook": NOW - 900 * S}), Thresholds())
+    assert keys(both) == {"stale_job:book_ticker", "stale_job:upbit_orderbook"}
+
+
+def test_the_monitor_reads_the_last_success_of_the_watched_jobs_from_the_rest_heartbeat(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "ws.heartbeat.json").write_text(json.dumps({"at_ns": NOW - 5 * S}), encoding="utf-8")
+    beat = {
+        "at_ns": NOW - 5 * S,
+        "started_ns": NOW - 7_200 * S,
+        "last_ok_ns": {"book_ticker": NOW - 2 * S, "clock": NOW - 4_000 * S},  # clock is not a watched job
+        "fail_streak": {"upbit_orderbook": 7_100, "clock": 60},
+    }
+    (run / "rest.heartbeat.json").write_text(json.dumps(beat), encoding="utf-8")
+    Catalog.open(tmp_path / "meta" / "catalog.db").close()
+    clock = ClockReference()
+    clock.update([(40.0, 20)], measured_ns=NOW - 10 * S)
+    found = monitor_once(tmp_path, clock, lambda _f: None, since_ns=NOW - 60 * S, now_ns=lambda: NOW)
+    # upbit_orderbook never succeeded since the start two hours ago: counted from the start
+    assert [f.detail for f in found if f.key.startswith("stale_job:")] == ["upbit_orderbook: no success for 7200 s"]
+
+
+def test_a_rest_heartbeat_without_the_new_field_reports_no_stale_job(tmp_path: Path) -> None:
+    """A heartbeat written by the previous version (no last_ok_ns at all), from a process started two hours ago,
+    says nothing about its jobs: no alarm (review: the first version of this test passed only because the process
+    had just started)."""
+    found = _stale_findings(tmp_path, {"at_ns": NOW - 5 * S, "started_ns": NOW - 7_200 * S})
+    assert found == []
+
+
+def _stale_findings(tmp_path: Path, rest_beat: dict[str, object], stale_state: str | None = None) -> list[Finding]:
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "ws.heartbeat.json").write_text(json.dumps({"at_ns": NOW - 5 * S}), encoding="utf-8")
+    (run / "rest.heartbeat.json").write_text(json.dumps(rest_beat), encoding="utf-8")
+    if stale_state is not None:
+        (run / "rest.stale.json").write_text(stale_state, encoding="utf-8")
+    Catalog.open(tmp_path / "meta" / "catalog.db").close()
+    clock = ClockReference()
+    clock.update([(40.0, 20)], measured_ns=NOW - 10 * S)
+    found = monitor_once(tmp_path, clock, lambda _f: None, since_ns=NOW - 60 * S, now_ns=lambda: NOW)
+    return [f for f in found if f.key.startswith("stale_")]
+
+
+def test_a_heartbeat_that_is_itself_behind_reports_no_stale_job(tmp_path: Path) -> None:
+    """Resume from standby: the monitor runs before the heartbeat is rewritten. The last success it reads is the
+    one from before the standby, not evidence of five minutes of failing."""
+    beat: dict[str, object] = {
+        "at_ns": NOW - 3_600 * S,
+        "started_ns": NOW - 9_000 * S,
+        "last_ok_ns": {"book_ticker": NOW - 3_601 * S, "upbit_orderbook": NOW - 3_601 * S},
+    }
+    assert _stale_findings(tmp_path, beat) == []
+
+
+def test_an_old_last_success_without_a_run_of_failures_is_not_a_stale_job(tmp_path: Path) -> None:
+    """Re-review: after a standby the heartbeat job may run before the monitor, so the heartbeat is current while
+    the last success is from before the standby. Only a run of failures makes a job stale, as in the collector."""
+    beat: dict[str, object] = {
+        "at_ns": NOW - 1 * S,
+        "started_ns": NOW - 9_000 * S,
+        "last_ok_ns": {"book_ticker": NOW - 3_600 * S, "upbit_orderbook": NOW - 3_600 * S},
+        "fail_streak": {"book_ticker": 1},
+    }
+    assert _stale_findings(tmp_path, beat) == []
+
+
+def test_a_stale_restart_is_reported_even_though_the_new_process_looks_healthy(tmp_path: Path) -> None:
+    """Review: the process exits at the same age the check fires, and the new one starts counting again. The
+    restart itself has to be the incident."""
+    healthy: dict[str, object] = {
+        "at_ns": NOW - 5 * S,
+        "started_ns": NOW - 60 * S,
+        "last_ok_ns": {"book_ticker": NOW - 1 * S, "upbit_orderbook": NOW - 1 * S},
+    }
+    state = json.dumps({"upbit_orderbook": NOW - 90 * S, "book_ticker": NOW - 7 * 3_600 * S})
+    found = _stale_findings(tmp_path, healthy, state)
+    assert [(f.key, f.severity) for f in found] == [(f"stale_restart:upbit_orderbook:{NOW - 90 * S}", "critical")]
+    assert "restarted" in found[0].detail
+
+
+def test_an_unreadable_stale_restart_state_reports_nothing(tmp_path: Path) -> None:
+    healthy: dict[str, object] = {"at_ns": NOW - 5 * S, "started_ns": NOW - 60 * S, "last_ok_ns": {}}
+    assert _stale_findings(tmp_path, healthy, "[1, 2") == []

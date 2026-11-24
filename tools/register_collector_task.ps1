@@ -6,11 +6,14 @@
     Triggers: at logon, then repeated every $RepeatMinutes minute(s) so a crashed supervisor is restarted.
     MultipleInstances=IgnoreNew plus the collectors' own instance locks prevent duplicates.
     Runs pythonw.exe (no console window); logs go to C:\dev\qr-data\logs\<role>.log.
+    The interpreter is the collector environment built by tools\build_collector_env.ps1, not the project's
+    .venv (v2.5 N01: a dependency added to .venv broke the running collectors for 53 hours).
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateNotNullOrEmpty()][string]$TaskName = 'qr-collector-supervisor',
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })][string]$Project = 'C:\dev\auto\code',
+    [ValidateNotNullOrEmpty()][string]$EnvDir = 'C:\dev\qr-collector-env',
     [ValidateNotNullOrEmpty()][string]$LogDir = 'C:\dev\qr-data\logs',
     # Supervisor-death detection latency. 1 min is the Task Scheduler minimum; IgnoreNew makes ticks
     # free while the instance runs (2026-11-08 decision 6).
@@ -18,8 +21,11 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$python = Join-Path $Project '.venv\Scripts\pythonw.exe'
-if (-not (Test-Path -LiteralPath $python)) { throw "pythonw.exe not found: $python (run uv sync first)" }
+$python = Join-Path $EnvDir 'Scripts\pythonw.exe'
+if (-not (Test-Path -LiteralPath $python)) {
+    throw "pythonw.exe not found: $python (run tools\build_collector_env.ps1 first)"
+}
+Write-Output "collector interpreter: $python"
 
 $user = "$env:USERDOMAIN\$env:USERNAME"
 $action = New-ScheduledTaskAction -Execute $python `

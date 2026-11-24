@@ -265,6 +265,7 @@
 - **영향:** 강제청산 WS(`binance.um.force_order`, 공개 이력 없음)는 2026-11-12 09:42Z부터 재가동 시각까지 **영구 손실**입니다. REST 수집기(bookTicker, Upbit 호가·체결, 지표)는 같은 기간 동작했습니다(heartbeat `ok` 카운터 기준, 커버리지 수치 대조는 미실시).
 - **상태:** 코드 수정 완료(테스트 먼저). 운영 재가동은 저장소 이동 계획 단계 5(예약 작업 재등록, 사용자 실행) 뒤에 확인합니다. 재경보 주기는 OPS-004 해결 계획에 묶어 별도 결정합니다.
 - **재가동(2026-11-19 17:05 KST):** 사용자가 `register_collector_task.ps1`을 실행해 새 경로로 등록, Start 후 ws가 `heartbeat.unreadable` 경고 1회 뒤 정상 기동(PID 6724, `force_order` 수신). 해결.
+- **정정(2026-11-24, 감사 v2.5):** 위 두 문장은 원자료와 다릅니다. (1) 11-09 19:14Z~11-12의 3,407분 공백은 "PC 정지"가 아닙니다. 프로세스는 살아 있었고 모든 요청이 `AttributeError: module 'sniffio' has no attribute 'current_async_library'`로 실패했습니다(`rest.log` 285행~, 11-12 00:12Z까지). F-022로 따로 기록합니다. (2) "REST 수집기는 같은 기간 동작했다"도 틀립니다. Upbit 호가는 11-16 06:00Z~11-19 07:00Z에 HTTP 404로 262,487회 실패했습니다(4,445분 공백). `ok` 카운터가 아니라 `gap` 테이블과 대조했어야 합니다.
 
 ## F-018 (2026-11-19, Phase 4 단계 10) 실데이터 S2의 71%가 "벡터 엔진은 경로 의존 손절을 지원하지 않음"으로 거부
 - **증상:** 1차 실데이터 배치(`search-s7-20261119`, 계열 5 × 탐색기 2, S1 200씩)에서 S2 trial 178건 중 127건이 `rejected`, 사유 "vector engine: time stop / ATR stop are path dependent (use the event engine)". 회계는 정확했지만(trial 4,173 = 단계 합) S2 통과율이 의미를 잃었다.
@@ -307,3 +308,23 @@
 - **재집계(`docs/measurements/v24-relabel.md`):** 103배치. `unstable` 59 → `unstable` 45 + `below_bar` 14(모두 `no_cross`: 교차 측정이 생기기 전 배치). 확인 SR 양수 18 = `below_bar` 14 + `no_signal`로 기록된 4.
 - **함께 측정:** `sparse` 배치의 S2 점 123개 중 45개(37%)가 ADR-051 lookback 상한을 넘는다. `low_vol@1d|top100|w2`는 8개 전부다.
 - **남은 것:** 앞 단계 사유로 끝난 배치의 S3는 계속 누적 N에 들어간다(의도된 동작, ADR-050 결정 4).
+
+## F-022 (2026-11-24, 운영, 감사 v2.5 N01) 수집기가 "살아 있지만 실패"하는 상태로 53시간·74시간 동안 데이터를 잃음
+- **증상:** 실시간 수집 15.9일 중 5분 이상 공백이 Upbit 호가 8,746분(38%), Binance bookTicker 4,141분(18%). 가장 긴 두 구간이 대부분이다.
+  1. 2026-11-09 19:14Z ~ 11-12 00:12Z(3,407분, 모든 소스): `AttributeError: module 'sniffio' has no attribute 'current_async_library'`. 프로세스와 heartbeat는 살아 있었다.
+  2. 2026-11-16 06:00Z ~ 11-19 07:00Z(4,445분, Upbit 호가만): `GET /v1/orderbook -> HTTP 404 Code not found` 262,487회.
+- **발견:** v2.5 감사의 반박 서브에이전트가 `rest.log`에서 찾았고, 메인이 로그의 첫·마지막 줄과 코드로 확인했다. 그 전까지 F-017은 1번을 "PC 정지 추정"으로 적고 있었다.
+- **재현:** `tests/capture/test_stale_recovery.py`(목록에 없는 코드가 섞이면 404, 실패만 하는 작업), `tests/monitor/test_monitor.py`의 `stale_job` 테스트 3개. 수정 전 코드에는 해당 함수가 없어 전부 실패한다.
+- **근본 원인**
+  1. 수집기가 개발용 `.venv`에서 돌았다. 같은 시각 커밋 74f38e0(11-09 19:24Z)이 `anthropic==2.7.0`을 더했고 그 의존성(httpx·anyio·sniffio 계열)이 도는 프로세스 밑에서 바뀌었다. 설치 행위 자체의 기록은 없다(**미확인**, 시각 일치와 오류 내용으로 판단).
+  2. Upbit 시장 목록을 시작할 때 한 번만 정했다(`capture/run.py`의 `top_krw_markets` 1회 호출). 호가 요청은 목록 전체를 한 요청에 묶으므로 상장폐지된 코드 하나가 전체를 404로 만든다.
+  3. 실패하는 작업이 있어도 프로세스는 계속 돌고 heartbeat는 갱신됐다. 모니터는 heartbeat와 사후 gap만 봤다(gap은 warn이었다).
+- **수정(이 커밋)**
+  - `upbit.orderbook_refreshing`: 404면 목록을 다시 받아 한 번 더 요청한다. 목록은 하루 한 번도 갱신한다(`upbit_universe` 작업).
+  - `periodic(restart_after_s=300)`: 1초 작업(bookTicker, Upbit 호가)이 5분 동안 성공 없이 실패만 하면 `StaleJobError`로 프로세스를 끝낸다(exit 5). supervisor가 새 프로세스를 띄운다. 거래소가 정말 내려간 경우에 5분마다 재시작하지 않도록 작업당 6시간에 한 번만 허용한다(`run/<role>.stale.json`).
+  - 모니터: heartbeat의 `last_ok_ns`로 `stale_job:<작업>` critical을 낸다(5분).
+  - 수집기 전용 실행 환경 `C:\dev\qr-collector-env`(`tools/build_collector_env.ps1`). 등록 스크립트는 그 환경의 `pythonw.exe`를 쓴다.
+- **영향:** 해당 구간의 bookTicker·Upbit 호가·강제청산은 영구 손실이다(공개 이력 없음).
+- **리뷰에서 고친 것(같은 커밋, 각각 테스트로 재현):** (1) Upbit가 내려가 있을 때 재시작된 프로세스가 시작 단계의 목록 조회에서 죽어 Binance 수집까지 멈추던 경로 → Upbit 목록 없이 시작하고, 거래소가 응답하지 않는 실패는 재시작 사유로 세지 않는다. (2) 목록 갱신의 간격 제한 예외가 404를 덮어 재시작 조건이 영영 차지 않던 문제 → 404를 그대로 다시 던진다. (3) 재시작이 거절되면 다시 묻지 않던 문제. (4) 절전 앞뒤의 실패 두 번이 5분 실패로 계산되던 문제 → 연속 30회도 함께 요구한다(모니터도 같다). (5) 재시작이 일어나면 경보 없이 지나가던 문제 → `stale_restart` critical. (6) 환경 바꿔 끼우기 실패 때 이전 환경이 사라지던 문제.
+- **남은 한계:** 시작 격리는 Upbit 쪽만이다. Binance가 응답하지 않을 때 다른 이유로 재시작되면 Upbit 수집도 Binance가 돌아올 때까지 시작하지 못한다(`measure_clock`·`top_symbols`가 시작 단계에 있다). 깨진 의존성이 전송 오류 모양으로 나타나면(예: 인증서 묶음 손상) 재시작 대상에서 빠지고 `stale_job` 경보만 난다.
+- **남은 것:** 프로젝트 소스는 여전히 저장소에서 읽는다(편집 가능한 설치). 수집기 코드를 고치면 재시작해야 반영되고, 도는 동안 아직 import하지 않은 모듈을 고치면 같은 종류의 문제가 생길 수 있다. Binance 종목 목록도 시작 때 한 번 정하지만 bookTicker는 전체를 받아 걸러 쓰므로 상장폐지로 실패하지 않는다(새 상위 종목이 빠질 뿐이다).

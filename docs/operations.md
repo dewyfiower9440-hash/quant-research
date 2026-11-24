@@ -301,3 +301,13 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
   - `uv run python tools/relabel_campaign.py --run-id c1`: 저장된 캠페인을 현재 라벨 규칙으로 다시 분류한다(평가 없음).
   - `uv run python tools/measure_combined_null.py`: 귀무 시장에서 결합 판정의 거짓 후보 비율을 잰다. 임시 DB만 쓰고, 진행 상태는 `qr-data/run/combined-null.jsonl`에 쌓여 이어서 돈다. 다른 pytest와 함께 돌리면 매우 느려진다.
 - 게이트(`pytest`)를 돌릴 때: 다운로드 틱이나 다른 무거운 작업이 돌면 수집기 supervisor 타이밍 테스트가 실패할 수 있다. 그 테스트만 실패하면 `Stop-ScheduledTask qr-data-queue`(남은 `bulk_extras.py` 프로세스도 종료) 뒤 다시 돌린다. 다운로드는 다음 틱에 이어진다.
+
+## 20. 수집기 실행 환경과 자동 복구 (v2.5, F-022, 2026-11-24)
+- **실행 환경:** 수집기는 `C:\dev\qr-collector-env`의 `pythonw.exe`로 돈다. 의존성은 `uv.lock`에 고정된 것만(개발 도구 없음), 프로젝트는 편집 가능한 설치다. 저장소에서 `uv add`·`uv sync`를 해도 이 환경은 바뀌지 않는다.
+- **만들기·다시 만들기:** `powershell -NoProfile -File tools\build_collector_env.ps1`. 수집기가 도는 동안에는 거부한다(잠금 파일로 확인). 옆 폴더에 만든 뒤 바꿔 끼우므로 실패해도 기존 환경이 남는다. `qr-env.json`에 만든 시각과 `uv.lock` 해시가 남는다.
+- **언제 다시 만드나:** `uv.lock`이 바뀐 뒤 수집기에 그 변경이 필요할 때, 그리고 수집기 코드(`capture/`, `monitor/`, `catalog/`, `data/compact`·`gapscan`)를 고친 뒤. 순서: `Disable-ScheduledTask qr-collector-supervisor`(작업이 1분마다 다시 띄우고 STOP 파일을 지우므로 먼저 끈다) → `C:\dev\qr-data\run\STOP` 파일을 만들어 멈춤 → 잠금이 풀리면 환경 다시 만들기 → `Enable-ScheduledTask` → `Start-ScheduledTask qr-collector-supervisor`. 멈춘 동안은 공백이 생기므로 한 번에 모아서 한다. 바꿔 끼우기가 실패하면 스크립트가 이전 환경을 되돌려 놓는다.
+- **등록:** `register_collector_task.ps1`은 이 환경이 없으면 등록을 거부한다(`-EnvDir`로 바꿀 수 있다).
+- **자동 복구:** 1초 작업이 5분 동안 성공이 없으면 프로세스가 exit 5로 끝나고 supervisor가 다시 띄운다. 작업당 6시간에 한 번이고, 거절된 뒤에도 실패가 이어지면 5분마다 다시 묻는다. 세는 것은 재시작으로 고칠 수 있는 실패뿐이다: 거래소가 응답하지 않는 경우(재시도 뒤 포기한 요청)는 세지 않는다. 연속 30회 이상 실패해야 하므로 절전 앞뒤의 실패 두 번은 해당하지 않는다. 기록은 `run/rest.stale.json`, 로그는 `collector.stale`.
+- **경보:** 재시작이 일어나면 모니터가 `stale_restart:<작업>:<시각>` critical을 6시간 동안 열어 둔다. 재시작 예산이 없어 프로세스가 계속 실패하는 동안에는 `stale_job:<작업>` critical이 난다(heartbeat가 2분 이상 뒤처져 있으면 판단하지 않는다).
+- **Upbit가 내려가 있을 때 시작하면:** Upbit 목록 없이 시작해 Binance 소스를 먼저 받는다. 목록은 1초 작업이 60초에 한 번씩 다시 시도해 채운다.
+- **Upbit 시장 목록:** 하루 한 번, 그리고 호가 요청이 404일 때 즉시 다시 받는다. 바뀌면 `collector.universe` 레코드(`reason`: `daily_refresh` 또는 `unknown_market`)가 남는다.

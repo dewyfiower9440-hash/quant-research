@@ -7,7 +7,8 @@
 Each process holds a single-instance lock, measures the exchange clock itself, writes a heartbeat,
 fsyncs its segments every 2 s, records a restart gap from its previous heartbeat, and stops cleanly
 when `<data_root>/run/STOP` appears. Exit codes: 3 = Binance IP ban (supervisor stops everything),
-4 = location blocked for this process (supervisor retires only this child).
+4 = location blocked for this process (supervisor retires only this child), 5 = a 1 Hz job only failed for
+five minutes (the supervisor restarts the process; at most once per job in six hours).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import multiprocessing.process
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
@@ -38,19 +39,25 @@ from quant_research.capture import binance, upbit
 from quant_research.capture.backup import backup_closed_files, snapshot_catalog
 from quant_research.capture.clockref import ClockReference
 from quant_research.capture.compress import compress_closed_segments
-from quant_research.capture.http import Fetcher, VenueGate
+from quant_research.capture.http import Fetcher, HttpStatusError, ThrottledError, VenueGate
 from quant_research.capture.lock import AlreadyRunningError, InstanceLock
 from quant_research.capture.ratelimit import BannedError, GeoBlockedError
 from quant_research.capture.recovery import Gap
 from quant_research.capture.sinks import Sinks
 from quant_research.capture.thermal import heavy_work_allowed, read_state
 from quant_research.config import Settings, load_settings
+from quant_research.errors import ExternalServiceError
 from quant_research.log import configure_logging
 from quant_research.monitor.observe import monitor_once
 
 EXIT_STOP_ALL = 3
 EXIT_RETIRE = 4
+EXIT_STALE = 5  # a 1 Hz job did nothing but fail for STALE_AFTER_S: the supervisor restarts the process
 STOP_FILE = "STOP"
+STALE_AFTER_S = 300.0
+STALE_MIN_FAILURES = 30  # consecutive failures a stretch needs as well (a clock jump over a standby is not one)
+UNIVERSE_REFRESH_MIN_S = 60.0  # the market list is asked for at most this often while a 404 lasts
+STALE_RESTART_GAP_NS = 6 * 3_600 * 10**9  # at most one such restart per job in this window
 if TYPE_CHECKING:  # the collector process itself never imports Polars (compaction runs in a child)
     from quant_research.data.compact import CompactResult
     from quant_research.data.gapscan import GapScanResult
@@ -82,6 +89,8 @@ class Health:
     path: Path
     started_ns: int = field(default_factory=time.time_ns)
     ok: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    last_ok_ns: dict[str, int] = field(default_factory=lambda: dict[str, int]())  # the monitor's "alive but failing"
+    fail_streak: dict[str, int] = field(default_factory=lambda: dict[str, int]())  # consecutive failures per job
     errors: dict[str, int] = field(default_factory=lambda: dict[str, int]())
     last_error: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
@@ -110,6 +119,8 @@ class Health:
             "at_ns": time.time_ns(),
             "started_ns": self.started_ns,
             "ok": self.ok,
+            "last_ok_ns": self.last_ok_ns,
+            "fail_streak": self.fail_streak,
             "errors": self.errors,
             "last_error": self.last_error,
         }
@@ -121,10 +132,83 @@ class Health:
             self.path.write_text(json.dumps(body), encoding="utf-8")
             tmp.unlink(missing_ok=True)
 
+    def succeed(self, job: str) -> None:
+        self.ok[job] = self.ok.get(job, 0) + 1
+        self.last_ok_ns[job] = time.time_ns()
+        self.fail_streak[job] = 0
+
     def fail(self, job: str, error: Exception) -> str:
         self.errors[job] = self.errors.get(job, 0) + 1
+        self.fail_streak[job] = self.fail_streak.get(job, 0) + 1
         self.last_error[job] = f"{type(error).__name__}: {error}"[:500]
         return self.last_error[job]
+
+
+class StaleJobError(Exception):
+    """A job did nothing but fail for its whole limit: the process is alive and useless for it (v2.5 N01: broken
+    imports under a running process, a market list gone stale). The process exits and the supervisor starts a new
+    one, which reads its code and its lists again."""
+
+    def __init__(self, job: str, failing_for_s: float, last_error: str) -> None:
+        super().__init__(f"{job} failed for {failing_for_s:.0f} s without one success: {last_error}")
+        self.job = job
+
+
+@dataclass
+class StaleRestarts:
+    """One stale restart per job and window, kept in a file so the count survives the restart it caused. Without
+    it a venue that is really down would restart the process, and with it the other venue's collection, every
+    few minutes."""
+
+    path: Path
+    min_gap_ns: int = STALE_RESTART_GAP_NS
+    now_ns: Callable[[], int] = time.time_ns
+
+    def allow(self, job: str) -> bool:
+        """Never raises (it is called while a job's failure is being handled). A state that cannot be written
+        refuses: without the record nothing would stop a restart every few minutes."""
+        try:
+            raw: object = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            raw = {}
+        entries = cast(dict[object, object], raw) if isinstance(raw, dict) else {}
+        last = {str(k): v for k, v in entries.items() if isinstance(v, int)}
+        now = self.now_ns()
+        if job in last and now - last[job] < self.min_gap_ns:
+            return False
+        last[job] = now
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(last), encoding="utf-8")
+        except OSError as e:
+            log.warning("collector.stale_state_unwritable", path=str(self.path), error=str(e))
+            return False
+        return True
+
+
+def restart_can_help(error: Exception) -> bool:
+    """Whether a new process could fix this failure. A venue or network that does not answer (the fetcher gave up
+    after its retries: an `ExternalServiceError` that is not a definite HTTP answer) is the same for a new process,
+    and restarting would only interrupt the other venue. A definite answer the venue keeps giving (a stale list) or
+    an error from our own code (imports broken under the process) is what a restart is for."""
+    return isinstance(error, HttpStatusError) or not isinstance(error, ExternalServiceError)
+
+
+def throttled[T](
+    call: Callable[[], Awaitable[T]], *, every_s: float, monotonic: Callable[[], float] = time.monotonic
+) -> Callable[[], Coroutine[Any, Any, T]]:
+    """`call`, but at most once per `every_s`; in between it raises (the 1 Hz order-book job would otherwise ask
+    for the market list every second while a 404 lasts)."""
+    last: list[float] = []
+
+    async def limited() -> T:
+        now = monotonic()
+        if last and now - last[0] < every_s:
+            raise ThrottledError(f"throttled: asked {now - last[0]:.0f} s ago, at most once per {every_s:.0f} s")
+        last[:] = [now]
+        return await call()
+
+    return limited
 
 
 async def periodic(
@@ -136,16 +220,29 @@ async def periodic(
     *,
     sinks: Sinks | None = None,
     initial_delay_s: float = 0.0,
+    restart_after_s: float | None = None,
+    restart_min_failures: int | None = None,
+    allow_restart: Callable[[str], bool] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Run `job` every `every_s` seconds (wall-clock aligned up to 60 s). A failing iteration (including a
     451 for this job) is logged, counted and written to the incident stream; the loop continues.
-    A Binance ban stops the whole process."""
+    A Binance ban stops the whole process.
+
+    With `restart_after_s`, a job raises `StaleJobError` when it has done nothing but fail for that long, with
+    failures a restart can help (`restart_can_help`), at least `restart_min_failures` of them in a row (default
+    `STALE_MIN_FAILURES`: two failures either side of a standby are not a stretch), and `allow_restart` agrees.
+    A refusal is asked again one limit later."""
     if initial_delay_s:
         await _wait(stop, initial_delay_s)
+    min_failures = STALE_MIN_FAILURES if restart_min_failures is None else restart_min_failures
+    failing_since: float | None = None
+    failures, next_ask = 0, 0.0
     while not stop.is_set():
         try:
             await job()
-            health.ok[name] = health.ok.get(name, 0) + 1
+            health.succeed(name)
+            failing_since, failures = None, 0
         except BannedError:
             stop.set()
             raise
@@ -154,6 +251,17 @@ async def periodic(
             log.exception("collector.job_failed", job=name)
             if sinks is not None:
                 sinks.write(f"collector.incidents.{health.name}", {"job": name, "error": message})
+            if restart_after_s is not None and restart_can_help(e):
+                now = monotonic()
+                if failing_since is None:
+                    failing_since, next_ask = now, now + restart_after_s
+                failures += 1
+                if now >= next_ask and failures >= min_failures:
+                    next_ask = now + restart_after_s
+                    if allow_restart is None or allow_restart(name):
+                        raise StaleJobError(name, now - failing_since, message) from e
+            else:
+                failing_since, failures = None, 0  # the venue is not answering: not a stretch a restart ends
         await _wait(stop, every_s - (time.time() % every_s) if every_s <= 60 else every_s)
 
 
@@ -240,13 +348,34 @@ async def rest_main(
         try:
             await binance.measure_clock(f_spot, sinks.clock, sinks)
             fut_syms = set(await binance.top_symbols(f_fut, settings.binance_top_n))
-            up_mkts = await upbit.top_krw_markets(f_up, settings.upbit_top_n)
+            try:
+                up_mkts = await upbit.top_krw_markets(f_up, settings.upbit_top_n)
+            except ExternalServiceError as e:
+                # Upbit down at start must not keep the Binance sources from starting (review of v2.5 step 1: a
+                # restart during an Upbit outage died here until Upbit came back). The 1 Hz job fills the list.
+                health.fail("upbit_universe", e)
+                log.warning("collector.upbit_universe_unavailable", error=str(e))
+                up_mkts = []
             state = upbit.TradeCursorState.load(settings.data_root / "state" / "upbit_trades.json")
             sinks.write("collector.universe", {"binance_um": sorted(fut_syms), "upbit_krw": up_mkts})
 
+            stale = StaleRestarts(settings.data_root / "run" / f"{health.name}.stale.json")
+
             async def trades() -> None:
-                for m in up_mkts:
+                for m in list(up_mkts):  # a copy: the list is replaced in place when the universe is refreshed
                     await upbit.trades_catchup(f_up, sinks, m, state, stop=stop)
+
+            def upbit_markets_now() -> Awaitable[list[str]]:
+                return upbit.top_krw_markets(f_up, settings.upbit_top_n)
+
+            upbit_markets_limited = throttled(upbit_markets_now, every_s=UNIVERSE_REFRESH_MIN_S)
+
+            async def refresh_upbit_universe() -> None:
+                """Daily: delistings and new listings reach the 1 Hz request without a restart (v2.5 N01)."""
+                fresh = await upbit_markets_now()
+                if fresh and fresh != up_mkts:
+                    up_mkts[:] = fresh
+                    sinks.write("collector.universe", {"upbit_krw": list(up_mkts), "reason": "daily_refresh"})
 
             def metric_failed(source: str, symbol: str, e: Exception) -> None:
                 message = health.fail(f"metrics:{source}:{symbol}", e)
@@ -344,9 +473,29 @@ async def rest_main(
                     health,
                     stop,
                     sinks=sinks,
+                    restart_after_s=STALE_AFTER_S,
+                    restart_min_failures=STALE_MIN_FAILURES,
+                    allow_restart=stale.allow,
                 ),
                 periodic(
-                    "upbit_orderbook", 1, lambda: upbit.orderbook_once(f_up, sinks, up_mkts), health, stop, sinks=sinks
+                    "upbit_orderbook",
+                    1,
+                    lambda: upbit.orderbook_refreshing(f_up, sinks, up_mkts, upbit_markets_limited),
+                    health,
+                    stop,
+                    sinks=sinks,
+                    restart_after_s=STALE_AFTER_S,
+                    restart_min_failures=STALE_MIN_FAILURES,
+                    allow_restart=stale.allow,
+                ),
+                periodic(
+                    "upbit_universe",
+                    86_400,
+                    refresh_upbit_universe,
+                    health,
+                    stop,
+                    sinks=sinks,
+                    initial_delay_s=86_400,
                 ),
                 periodic(
                     "reference",
@@ -672,23 +821,29 @@ def main(argv: list[str] | None = None) -> None:
             health = Health(a.role, run_dir / f"{a.role}.heartbeat.json")
             stop = asyncio.Event()
             entry = rest_main if a.role == "rest" else ws_main
-            sys.exit(asyncio.run(_run(entry, settings, stop, health, a.duration)))
+            sys.exit(asyncio.run(run_role(entry, settings, stop, health, a.duration)))
     except AlreadyRunningError as e:
         log.error("collector.already_running", error=str(e))
         sys.exit(2)
 
 
-async def _run(
+async def run_role(
     entry: Callable[[Settings, asyncio.Event, Health], Awaitable[None]],
     settings: Settings,
     stop: asyncio.Event,
     health: Health,
     duration: float | None,
 ) -> int:
+    """One collector role to its exit code (0 clean, 3 ban, 4 location blocked, 5 stale job)."""
     if duration:
         asyncio.get_running_loop().call_later(duration, stop.set)
     try:
         await entry(settings, stop, health)
+    except StaleJobError as e:
+        health.last_error["fatal"] = str(e)
+        health.write()
+        log.error("collector.stale", job=e.job, error=str(e))
+        return EXIT_STALE
     except BannedError as e:
         health.last_error["fatal"] = str(e)
         health.write()

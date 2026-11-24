@@ -86,3 +86,44 @@ Describe 'register_validator_task.ps1' {
         $r.Output | Should -Match 'ParameterArgumentValidationError'  # the parameter name may be wrapped in the output
     }
 }
+
+Describe 'register_collector_task.ps1' {
+    It 'runs the collectors from the collector environment, not from the project .venv' {
+        $envDir = Join-Path $TestDrive 'collector-env'
+        New-Item -ItemType Directory -Path (Join-Path $envDir 'Scripts') -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $envDir 'Scripts/pythonw.exe') | Out-Null
+        $r = Invoke-RegisterScript -Name 'register_collector_task' -Arguments @('-EnvDir', $envDir)
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Match 'collector interpreter: .*collector-env'
+        $r.Output | Should -Not -Match '\.venv'
+        $r.Output | Should -Match 'Register per-user scheduled task'
+    }
+
+    It 'refuses to register when the collector environment was not built' {
+        $missing = Join-Path $TestDrive 'missing'
+        $r = Invoke-RegisterScript -Name 'register_collector_task' -Arguments @('-EnvDir', $missing)
+        $r.ExitCode | Should -Not -Be 0
+        $r.Output | Should -Match 'build_collector_env'
+        $r.Output | Should -Not -Match 'Register per-user scheduled task'
+    }
+}
+
+Describe 'build_collector_env.ps1' {
+    It 'names the environment and the lock file it would build from, and builds nothing with -WhatIf' {
+        $target = Join-Path $TestDrive 'env'
+        $data = Join-Path $TestDrive 'data'
+        $r = Invoke-RegisterScript -Name 'build_collector_env' -Arguments @('-EnvDir', $target, '-DataRoot', $data)
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Match 'uv\.lock sha256 [0-9a-f]{64}'
+        Test-Path -LiteralPath $target | Should -BeFalse
+        Test-Path -LiteralPath "$target.new" | Should -BeFalse
+    }
+
+    It 'refuses a project folder without a lock file' {
+        $data = Join-Path $TestDrive 'data'
+        $r = Invoke-RegisterScript -Name 'build_collector_env' -Arguments @('-Project', "$TestDrive", '-DataRoot', $data)
+        $r.ExitCode | Should -Not -Be 0
+        $r.Output | Should -Match 'Project'  # refused by the parameter check, not by a running collector
+        $r.Output | Should -Not -Match 'collectors are running'
+    }
+}

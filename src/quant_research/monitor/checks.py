@@ -33,6 +33,10 @@ class Observation:
     receive_gaps: Sequence[tuple[str, int, int]]  # (source, start_ns, end_ns) recorded since last check
     # consecutive short runs per supervised child (run/supervisor.state.json; empty: no supervisor state yet)
     restart_streaks: Mapping[str, int] = field(default_factory=lambda: dict[str, int]())
+    # last success of the watched 1 Hz jobs (rest heartbeat; a job that never succeeded counts from the start)
+    job_ok_ns: Mapping[str, int] = field(default_factory=lambda: dict[str, int]())
+    # when each job last made the rest process restart itself (run/rest.stale.json)
+    stale_restarts: Mapping[str, int] = field(default_factory=lambda: dict[str, int]())
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +50,8 @@ class Thresholds:
     ssd_stale_ns: int = 30 * 60 * S  # thermal.STALE_NS
     gap_report_ns: int = 300 * S
     restart_loop: int = 10  # OPS-009: consecutive short runs of one child that make a critical incident
+    stale_job_ns: int = 300 * S  # v2.5 N01: a 1 Hz job alive but failing (the process restarts itself at the same age)
+    stale_restart_report_ns: int = 6 * 3_600 * S  # a stale restart stays an open incident for the budget window
 
 
 def evaluate(o: Observation, t: Thresholds) -> list[Finding]:
@@ -76,6 +82,14 @@ def evaluate(o: Observation, t: Thresholds) -> list[Finding]:
     for name, streak in sorted(o.restart_streaks.items()):
         if streak >= t.restart_loop:
             out.append(Finding(f"restart_loop:{name}", "critical", f"{name} restarted {streak} times in a row"))
+    for job, at in sorted(o.job_ok_ns.items()):
+        if o.now_ns - at > t.stale_job_ns:
+            out.append(Finding(f"stale_job:{job}", "critical", f"{job}: no success for {(o.now_ns - at) // S} s"))
+    for job, at in sorted(o.stale_restarts.items()):
+        if 0 <= o.now_ns - at < t.stale_restart_report_ns:  # its own key per restart: each one notifies
+            out.append(
+                Finding(f"stale_restart:{job}:{at}", "critical", f"rest restarted itself: {job} only failed for 5 min")
+            )
     for source, start, end in o.receive_gaps:
         if end - start >= t.gap_report_ns:
             out.append(Finding(f"gap:{source}:{start}", "warn", f"{source} silent {(end - start) / 60 / S:.1f} min"))

@@ -53,6 +53,49 @@ def _heartbeat_ns(path: Path) -> int | None:
     return at if isinstance(at, int) else None
 
 
+WATCHED_JOBS = ("book_ticker", "upbit_orderbook")  # the 1 Hz sources that cannot be fetched again
+
+
+HEARTBEAT_CURRENT_NS = 120 * 10**9  # an older heartbeat is behind (resume from standby): it says nothing of now
+STALE_MIN_FAILURES = 30  # the same run of failures the collector asks for before it restarts itself
+
+
+def _job_ok_ns(path: Path, now_ns: int) -> dict[str, int]:
+    """Last success per watched job from the rest heartbeat; a job with none yet counts from the process start.
+    Empty when the heartbeat is missing, unreadable, behind, or of the format without `last_ok_ns`."""
+    try:
+        body = cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    started, at_ns, raw = body.get("started_ns"), body.get("at_ns"), body.get("last_ok_ns")
+    if not isinstance(started, int) or not isinstance(at_ns, int) or not isinstance(raw, dict):
+        return {}
+    if now_ns - at_ns > HEARTBEAT_CURRENT_NS:
+        return {}
+    last = cast(dict[object, object], raw)
+    raw_streak = body.get("fail_streak")
+    streak = cast(dict[object, object], raw_streak) if isinstance(raw_streak, dict) else {}
+    out: dict[str, int] = {}
+    for job in WATCHED_JOBS:
+        failing = streak.get(job)
+        if not isinstance(failing, int) or failing < STALE_MIN_FAILURES:
+            continue  # an old last success alone is not failing (a standby leaves one; so does a job not yet run)
+        at = last.get(job)
+        out[job] = at if isinstance(at, int) else started
+    return out
+
+
+def _stale_restarts(path: Path) -> dict[str, int]:
+    """run/rest.stale.json (written by `capture.run.StaleRestarts`): job -> time of its last stale restart."""
+    try:
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in cast(dict[object, object], raw).items() if isinstance(v, int)}
+
+
 def observe(data_root: Path, catalog: Catalog, clock: ClockReference, *, since_ns: int, now_ns: int) -> Observation:
     run = data_root / "run"
     try:
@@ -89,6 +132,8 @@ def observe(data_root: Path, catalog: Catalog, clock: ClockReference, *, since_n
         ssd_level=None if ssd is None else ssd.level,
         receive_gaps=gaps,
         restart_streaks=_restart_streaks(run / "supervisor.state.json", now_ns),
+        job_ok_ns=_job_ok_ns(run / "rest.heartbeat.json", now_ns),
+        stale_restarts=_stale_restarts(run / "rest.stale.json"),
     )
 
 

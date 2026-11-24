@@ -7,11 +7,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from quant_research.capture.http import Fetcher
+from quant_research.capture.http import Fetcher, HttpStatusError, ThrottledError
 from quant_research.capture.recovery import Gap
 from quant_research.capture.sinks import Sinks
 from quant_research.errors import ExternalServiceError
@@ -40,6 +41,39 @@ async def market_snapshot(f: Fetcher, sinks: Sinks) -> None:
 async def orderbook_once(f: Fetcher, sinks: Sinks, markets: list[str]) -> None:
     payload = (await f.get(f"{API}/orderbook", {"markets": ",".join(markets), "count": 1})).json()
     sinks.write("upbit.orderbook_l1_1s", payload)
+
+
+async def orderbook_refreshing(
+    f: Fetcher, sinks: Sinks, markets: list[str], refresh: Callable[[], Awaitable[list[str]]]
+) -> bool:
+    """`orderbook_once`, and when the venue no longer knows one of the codes (404), take a new list from `refresh`
+    and ask once more. `markets` is replaced in place (the trades job reads the same list). True when the list was
+    refreshed. v2.5 N01: the list used to be fixed at start, and one delisted code failed every batched request
+    for 74 hours until a restart."""
+    if not markets:  # the list could not be read at start (the venue was down)
+        fresh = await refresh()
+        if not fresh:
+            raise ExternalServiceError("no Upbit markets to ask for (the market list is empty)")
+        markets[:] = fresh
+        sinks.write("collector.universe", {"upbit_krw": list(markets), "reason": "empty_list"})
+        await orderbook_once(f, sinks, markets)
+        return True
+    try:
+        await orderbook_once(f, sinks, markets)
+        return False
+    except HttpStatusError as e:
+        if e.status != 404:
+            raise
+        try:
+            fresh = await refresh()
+        except ThrottledError:
+            raise e from None  # the 404 is the failure to report and to count, not our own refresh limit
+        if not fresh or fresh == markets:
+            raise  # nothing new to ask with: the same request would fail the same way
+    markets[:] = fresh
+    sinks.write("collector.universe", {"upbit_krw": list(markets), "reason": "unknown_market"})
+    await orderbook_once(f, sinks, markets)
+    return True
 
 
 @dataclass

@@ -25,6 +25,20 @@ from quant_research.capture.ratelimit import (
 )
 from quant_research.errors import ExternalServiceError
 
+
+class HttpStatusError(ExternalServiceError):
+    """A response the venue will keep giving for this request (not retried). `status` lets a caller tell an
+    unknown code (404: a stale market list) from the other client errors."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class ThrottledError(ExternalServiceError):
+    """A call that was not made because it ran too recently (our own limit, not an answer of the venue)."""
+
+
 Venue = Literal["binance", "upbit"]
 Params = Mapping[str, str | int | float]
 
@@ -69,7 +83,7 @@ class Fetcher:
                 await self._pace(r)
                 return r
             if outcome == "fail":
-                raise ExternalServiceError(f"GET {url} -> HTTP {r.status_code}: {r.text[:200]}")
+                raise HttpStatusError(r.status_code, f"GET {url} -> HTTP {r.status_code}: {r.text[:200]}")
             last_error = ExternalServiceError(f"GET {url} -> HTTP {r.status_code}")
             delay = max(wait, self._backoff(attempt))
             self.gate.blocked_until = max(self.gate.blocked_until, self.now_s() + delay)
