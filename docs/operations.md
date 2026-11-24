@@ -286,7 +286,8 @@ Phase 1은 **IMPLEMENTED / OPERATIONAL_VALIDATION_PENDING**입니다(progress �
   - c1을 다시 돌릴 일이 있으면 `-RunId c1 -SpaceVersion 2`를 준다. 상태 파일은 다른 공간 버전으로 재개되지 않는다(exit 1).
 - 라운드 순서(사전 등록): G1′(w2·4h/1d·상위 100) → G2′(w1) → 결합(`combo`) → Ridge(`ridge`) → 1h → 상위 30 → 국면 게이트(`<계열>~regime`).
   - 새 데이터 계열(OI·테이커·현물)은 처음에는 `data_missing`으로 닫히고, 해당 tier가 `done`이 되면 다음 라운드에 다시 열린다.
-  - `trend@1d`, `volatility@1d`는 90일 워밍업에 들어가지 않아 격자에 없다.
+  - `trend@1d`, `volatility@1d`는 90일 워밍업에 들어가지 않아 격자에 없다. 전이(예: `trend@4h`가 `cost_dominated`면 1d로)로 큐에 들어오면 `infeasible`로 기록되고 닫힌다. 그 배치는 패널·trial·S3 N을 쓰지 않는다.
+  - 국면 게이트 셀은 패널에 BTCUSDT가 있어야 한다(연구 패널과 validator 패널에는 있다). 게이트가 걸린 후보를 모의매매에 올릴 때는 심볼 목록에 BTCUSDT를 넣어야 한다. 없으면 게이트가 비어 거래하지 않는다(모의매매 쪽 검사는 아직 없다).
   - 결합·Ridge 셀은 한 배치만 돈다(같은 패널에서는 같은 점이 나오기 때문).
 - 상태 확인: `qr-data/run/campaign-c2.md`.
   - 배치 표에 순수익·비용·펀딩, 자기 S3, 교차 S3, 결합 SR, 결합 기준이 나온다.

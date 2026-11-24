@@ -1,20 +1,26 @@
 """v2.2 B7/B9 + v2.3: the autonomous research campaign (design delta D8, ADR-047, ADR-049) on the real lake.
 
-    uv run python tools/run_campaign.py --run-id c1 [--grid preregistered|cli] [--timeframes 4h 1d] [--top-m 100]
-        [--windows w2] [--families ...] [--max-batches N] [--max-hours H] [--s1-count 60] [--top-k 5]
-        [--polars-threads 2] [--log-file F]
+    uv run python tools/run_campaign.py --run-id c2 --space-version 3 [--grid preregistered|cli]
+        [--timeframes 4h 1d] [--top-m 100] [--windows w2] [--families ...] [--max-batches N] [--max-hours H]
+        [--s1-count 60] [--top-k 5] [--polars-threads 2] [--log-file F] [--report F]
 
 Cells = family x timeframe x top-M x research window (seal epoch 2). `--grid preregistered` (default) starts with
 group G1 and opens rounds (ADR-049): when every cell is retired, data_missing cells whose data has arrived (catalog
-research coverage) reopen and the next group G2..G4 is added; `--grid cli` runs only the --timeframes/--top-m/
---windows grid (still reopening). Panels come from the panel store (B3), built on first use and reused (one panel
+research coverage) reopen and the next group is added; `--grid cli` runs only the --timeframes/--top-m/--windows
+grid (still reopening). `--space-version 2` (default, campaign c1): the v2 spaces and the groups G1..G4.
+`--space-version 3` (campaign c2, ADR-051..055): the capped spaces, funding required, and the round order G1', G2',
+`combo`, `ridge`, 1h, top 30, then the regime-gated families; a state file never resumes under the other version.
+Panels come from the panel store (B3), built on first use and reused (one panel
 in memory at a time). State + bandit are saved after every batch and round to qr-data/run/campaign-<run>.json, so
 a rerun with the same --run-id resumes where it stopped (the replayed batch reuses its trials). The S3 null N
 counts the S3 runs of the other campaign files on the same splits. Stops: a round with nothing to open
 (waiting_data), --max-batches / --max-hours, the research gate (memory, disk, SSD heat; exit 3) or the file
-qr-data/run/STOP-campaign. At the end it writes the report docs/measurements/campaign-<run>.md and the data
-request queue qr-data/run/data-queue.json.
-Exit codes: 0 waiting_data, exhausted or budget, 3 stopped by the gate or the stop file, 1 error."""
+qr-data/run/STOP-campaign. The time budget is checked between batches: a tick that has to build a panel first can
+run far past --max-hours (c2's first tick: 8 and 21 minutes for the two 1d top-100 windows, built in the batch).
+At the end of a tick new candidates go to the validator outbox, and it writes the report (--report, default
+docs/measurements/campaign-<run>.md) and the data request queue qr-data/run/data-queue.json.
+Exit codes: 0 waiting_data, exhausted or budget, 3 stopped by the gate or the stop file, 2 another research process
+holds run/research.lock, 1 error (unreadable state files, a resume with other settings)."""
 
 from __future__ import annotations
 

@@ -5,10 +5,18 @@ the resource gate, the time budget, the stop check and the state persister; the 
 batch's fold is `<run>:<cell>:<pull>` and its seeds are derived from (campaign seed, cell, pull), so a batch
 interrupted before its state was saved repeats with the same proposals and the pipeline reuses its finished trials.
 
-Candidate rule (B7 review): the best S3-eligible S2 survivor's own S3 must beat the expected maximum SR under the
-null of all S3 runs this campaign has judged on the same confirmation split (Bailey-LdP, variance 1 / days), so a
-campaign that tries many cells on one split does not turn noise into validator queries. The bandit's reward is that
-batch's validation-split SR (A4) floored at 0, not per second (a replayed batch costs almost nothing)."""
+Candidate rule (ADR-049 decision 3): the best S3-eligible S2 survivor's own S3 must be positive, the same spec's S3
+on the other research window's confirmation split must be positive too, and the SR of both splits' daily pnl joined
+must beat the expected maximum SR under the null of every S3 judged on the two splits, earlier campaigns included
+(Bailey-LdP, variance 1 / pooled days), so a campaign that tries many cells does not turn noise into validator
+queries. The own-window bar (`s3_threshold`) is still computed and stored with the batch, for reports only. The
+bandit's reward is the batch's validation-split SR (A4) floored at 0, not per second (a replayed batch costs almost
+nothing).
+
+Space version 3 (ADR-051..055, campaign c2): the capped spaces `family@tf/v3` with a three-month warm-up
+(`SplitRule.of(3)`), funding required on every panel a cell is judged on, model cells (`combo`, `ridge`: fixed
+points whose weights are fitted on the first 75 % of selection and compared on the rest) and regime-gated cells
+(`<family>~regime`). A (family, timeframe) without a v3 space ends as `infeasible` without a panel or a trial."""
 
 from __future__ import annotations
 
@@ -61,7 +69,11 @@ from quant_research.strategy.templates import MODEL_FAMILIES, base_family
 F64 = NDArray[np.float64]
 log = structlog.get_logger(__name__)
 S1_HORIZON_BARS: dict[str, int] = {"1h": 24, "4h": 6, "1d": 5}  # about one day, one day, one week ahead
-MAX_WARMUP_BARS = 1_200  # longest v2 lookback (720) + smoothing + volatility windows, with room
+# Warm-up rows a split keeps before its first evaluated decision. It bounds what a spec may need: the longest v2
+# lookback (720) + smoothing + volatility windows, and since v2.4 the regime gates (1,110 bars on 1h); the
+# validator's holdout panel keeps the same number (tools/run_validator.py). An invariant test pins it against
+# every v3 and regime space.
+MAX_WARMUP_BARS = 1_200
 Status = Literal["exhausted", "budget", "stopped", "gate", "waiting_data"]
 
 

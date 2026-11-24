@@ -220,7 +220,8 @@ def ema_cap_bars(timeframe: str) -> int:
 def exceeds_cap(family: str, timeframe: str, params: Mapping[str, float]) -> bool:
     """Whether a point's longest SIGNAL window is beyond the family's cap on this timeframe. The structural axes
     (sizing volatility window, smoothing) are not looked at: the S0 warm-up check of ADR-051 covers the whole
-    spec."""
+    spec. Reporting only (tools/relabel_campaign.py): it counts values above the cap, while the v3 axes and S0
+    also leave out the cap itself."""
     cap = ema_cap_bars(timeframe) if family in EMA_FAMILIES else window_cap_bars(timeframe)
     return any(v > cap for k, v in params.items() if k in WINDOW_PARAMS)
 

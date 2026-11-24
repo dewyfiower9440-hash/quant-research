@@ -102,7 +102,9 @@ class BatchSummary:
     best_gross_exposure: float | None
     s3_sr: float | None  # the S3 of that best S2 on the confirmation split (None: it did not run / was refused)
     data_missing: tuple[str, ...]  # datasets the cell's family needs that had no rows in the panel
-    s3_threshold: float = 0.0  # expected max SR under the null of this campaign's S3 runs on the same split
+    # expected max SR under the null of the S3 runs judged on the same split (earlier campaigns included); kept for
+    # reports only since ADR-049 decision 3: `classify` judges on `pooled_threshold`
+    s3_threshold: float = 0.0
     s3_trial_id: int | None = None  # the candidate's S3 trial (what B8 submits)
     error: str = ""  # the exception of a failed batch
     # ADR-049 decision 3: the same spec's S3 on the other research window's confirmation split, the SR of both
