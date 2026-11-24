@@ -41,6 +41,7 @@ from quant_research.bulk.tiers import (
     parse_state,
     project,
     tier_for,
+    with_tick,
 )
 from quant_research.capture.lock import AlreadyRunningError, InstanceLock
 from quant_research.config import load_settings
@@ -164,8 +165,14 @@ def run_step(
     started = time.monotonic()
     files_before = symbol_months(root, request) if tier.source == "bulk" else 0
     code = asyncio.run(run_child(cmd, a.max_hours * 3_600))
-    progressed = tier.source == "bulk" and symbol_months(root, request) > files_before
+    gained = symbol_months(root, request) - files_before if tier.source == "bulk" else 0
+    progressed = gained > 0
     new = after_exit(state, action, code, progressed=progressed, gate_reason=pause_reason(root) if code == 3 else "")
+    if code < 0 and action == "full" and tier.source == "bulk":
+        # only ticks that ran to the budget are comparable (a gate pause ends early)
+        new = with_tick(new, gained)
+        if "slowing" in new.note:
+            log(f"WARNING {request} {new.note}")
     if action == "pilot" and code == 0 and tier.source == "bulk":
         # bytes per symbol-month from everything this dataset holds (an earlier pilot's files count too: a pilot
         # that found its month already there adds 0 bytes and must not project 0), scaled to what is still missing

@@ -12,7 +12,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast
+
+from quant_research.bulk.plan import slowing
 
 GB = 1024**3
 LAKE_CAP = 200 * GB  # design v2.1 §14 / bulk.guard.Limits.max_bulk_bytes (user decision to raise)
@@ -64,6 +66,7 @@ class TierState:
     attempts: int = 0
     note: str = ""
     stalls: int = 0
+    recent_new: tuple[int, ...] = ()  # new (symbol, month) files of the last budget-long ticks, newest last
 
 
 STATUSES: tuple[Status, ...] = ("pending", "piloted", "running", "deferred", "done", "skipped_cap", "failed")
@@ -83,7 +86,26 @@ def parse_state(request: str, entry: Mapping[str, object]) -> TierState:
         raise ValueError(f"data queue state: tier {request!r} has a bad number in {dict(entry)}")
     if not isinstance(stalls, int):
         raise ValueError(f"data queue state: tier {request!r} has a bad number in {dict(entry)}")
-    return TierState(status, projected, attempts, str(entry.get("note", "")), stalls)
+    raw_recent = entry.get("recent_new", [])
+    if not isinstance(raw_recent, list) or not all(isinstance(n, int) for n in cast(list[object], raw_recent)):
+        raise ValueError(f"data queue state: tier {request!r} has a bad number in {dict(entry)}")
+    recent = tuple(cast(list[int], raw_recent))
+    return TierState(status, projected, attempts, str(entry.get("note", "")), stalls, recent)
+
+
+RECENT_TICKS = 5
+
+
+def with_tick(state: TierState, new_units: int) -> TierState:
+    """The state after a tick that ran to its time budget and brought `new_units` new (symbol, month) files: the
+    count is kept (last RECENT_TICKS) and a slowing download is said in the note (v2.5 N02; `plan.slowing`)."""
+    recent = (*state.recent_new, new_units)[-RECENT_TICKS:]
+    note = state.note
+    if slowing(recent):
+        usual = sorted(recent[:3])[1]
+        warning = f"slowing: {recent[3]}, {recent[4]} new months in the last two ticks ({usual} before)"
+        note = f"{note}; {warning}" if note else warning
+    return replace(state, recent_new=recent, note=note)
 
 
 def unready_datasets(states: Mapping[str, TierState]) -> frozenset[str]:

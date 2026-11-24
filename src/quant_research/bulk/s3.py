@@ -17,6 +17,9 @@ def listing(client: httpx.Client, prefix: str) -> list[tuple[str, int, str]]:
     while True:
         r = client.get(S3, params={"prefix": prefix, "marker": marker})
         r.raise_for_status()
+        if "<ListBucketResult" not in r.text:
+            # a 200 that is not a listing (proxy or portal page, empty body) is not "no files at the source"
+            raise httpx.HTTPError(f"S3 listing of {prefix!r} is not a ListBucketResult: {r.text[:80]!r}")
         for block in re.findall(r"<Contents>(.*?)</Contents>", r.text, flags=re.S):
             key = re.search(r"<Key>([^<]+)</Key>", block)
             size = re.search(r"<Size>(\d+)</Size>", block)

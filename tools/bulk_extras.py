@@ -83,6 +83,7 @@ def main() -> int:
     from quant_research.bulk.flow import AGG_FLOW_DATASET, download_flow_month
     from quant_research.bulk.guard import Limits, Sample, combine, resource_gate
     from quant_research.bulk.klines import MINUTE_NS, parse_kline_csv
+    from quant_research.bulk.plan import RESEARCH_WINDOWS, Checked, coverage, order_symbols, unavailable_months
     from quant_research.bulk.s3 import listing, wanted_months
     from quant_research.capture.lock import AlreadyRunningError, InstanceLock
     from quant_research.capture.thermal import heavy_work_allowed, read_state
@@ -162,6 +163,10 @@ def main() -> int:
     by_months = sorted(symbols, key=lambda s: (-len(wants[s]), s))
     if a.top:
         symbols = sorted(by_months[: a.top])
+    if a.symbols is None:
+        # v2.5 N02: what the open research window still waits for comes first (the alphabetical order never
+        # reached the symbols after 'O'); an explicit --symbols list keeps its own order
+        symbols = order_symbols({s: wants[s] for s in symbols})
     depth_symbols = by_months[:BOOK_DEPTH_TOP] if not a.top else symbols
     flow_symbols = by_months[:AGG_FLOW_TOP] if not a.top else symbols
     limits = Limits()
@@ -181,11 +186,53 @@ def main() -> int:
         s, _mem = sample(current_bulk)
         return combine(heavy_work_allowed(read_state(state_path), now_ns=time.time_ns()), resource_gate(s, limits))
 
-    totals = {"months_downloaded": 0, "files": 0, "already": 0, "rows": 0, "bytes": 0, "gaps": 0, "failed": 0}
+    totals = {
+        "months_downloaded": 0,
+        "files": 0,
+        "already": 0,
+        "rows": 0,
+        "bytes": 0,
+        "gaps": 0,
+        "failed": 0,
+        "symbols_skipped": 0,
+    }
     started = time.time()
     exit_code = EXIT_ERROR
     catalog = Catalog.open(root / "meta" / "catalog.db")
     bootstrap(catalog)
+    # a pilot looks at a few files on purpose; a tier run skips what it saw complete within the last week
+    checked = Checked.load(root / "run" / "bulk-extras-checked.json")
+    held: dict[str, set[tuple[str, str]]] = {}
+
+    kind_targets: dict[str, list[str]] = {}
+    last_coverage: dict[str, list[int]] = {}
+
+    def source_of(kind: str, sym: str) -> str:
+        """The symbol the files are published and catalogued under (spot drops the contract multiplier prefix)."""
+        return split_multiplier(sym.removesuffix("USDT"))[0] + "USDT" if kind == "spotKlines" else sym
+
+    def window_coverage(kind: str) -> dict[str, list[int]]:
+        """[wanted, held] (symbol, month) pairs of each research window for this kind's own targets (a --top or
+        book-depth run wants only its symbols), counted under the catalogued symbol name. After the last kind
+        (`kind` empty) the last kind's numbers stay."""
+        if not kind:
+            return last_coverage
+        dataset_id = kinds[kind][0]
+        if kind not in held:
+            rows = catalog.conn.execute(
+                "select distinct symbol, month from bulk_file where dataset_id = ?", (dataset_id,)
+            )
+            held[kind] = {(str(s), str(m)) for s, m in rows}
+        wanted = {source_of(kind, s): wants[s] for s in kind_targets.get(kind, [])}
+        missing = {(source_of(kind, s), m) for s, m in checked.unavailable(kind)}
+        last_coverage.clear()
+        last_coverage.update(
+            {
+                name: list(coverage(wanted, held[kind], window, unavailable=missing))
+                for name, window in zip(("w2", "w1"), RESEARCH_WINDOWS, strict=True)
+            }
+        )
+        return last_coverage
 
     def progress(state: str, kind: str, n: int, of: int, sym: str, note: str = "") -> None:
         s, mem = sample(current_bulk)
@@ -203,6 +250,7 @@ def main() -> int:
                 "symbol": sym,
                 "elapsed_s": int(time.time() - started),
                 "totals": totals,
+                "coverage": window_coverage(kind),  # [wanted, held] per research window, unavailable months left out
                 "memory_mb": {k: v // 2**20 for k, v in mem.items()},
                 "free_disk_gb": round(s.free_disk / 2**30, 1),
                 "extras_gb": round(current_bulk / 2**30, 2),
@@ -216,8 +264,16 @@ def main() -> int:
             for kind in a.kinds:
                 dataset_id, prefix, daily, parse, grid = kinds[kind]
                 targets = {"bookDepth": depth_symbols, "aggTrades": flow_symbols}.get(kind, symbols)
+                kind_targets[kind] = list(targets)
+                processed = 0
                 for n, sym in enumerate(targets, 1):
-                    source_sym = split_multiplier(sym.removesuffix("USDT"))[0] + "USDT" if kind == "spotKlines" else sym
+                    source_sym = source_of(kind, sym)
+                    if not pilot and checked.fresh(kind, sym, wants[sym]):
+                        # seen complete within a week for at least these months: no listing request
+                        totals["symbols_skipped"] += 1
+                        continue
+                    processed += 1
+                    failed_before = totals["failed"]
                     files = listing(client, prefix.format(s=source_sym))
                     by_month: dict[str, list[BulkTarget]] = {}
                     for key, size, mod in files:
@@ -263,7 +319,21 @@ def main() -> int:
                         totals["failed"] += len(done.failed)
                         for url, why in done.failed:
                             log(f"FAILED {url}: {why}")
-                    if n % 10 == 0 or n == len(targets):
+                        if done.downloaded and kind in held:
+                            held[kind].add((source_sym, month))
+                    if not pilot and totals["failed"] == failed_before and (by_month or not wants[sym]):
+                        # every listed month of this symbol is held now: not listed again for a week, and the
+                        # wanted months the source does not publish are recorded (they leave the coverage).
+                        # A symbol with no listed month at all is not marked: asking again costs one request, and
+                        # an empty answer must not turn every wanted month into "unavailable".
+                        checked.mark(
+                            kind,
+                            sym,
+                            wanted=wants[sym],
+                            unavailable=unavailable_months(wants[sym], listed=by_month),
+                        )
+                        checked.save()
+                    if processed % 10 == 0 or n == len(targets):
                         current_bulk = bulk_bytes()
                     progress("running", kind, n, len(targets), sym)
                     _s, mem = sample(current_bulk)
@@ -272,6 +342,10 @@ def main() -> int:
                         f"elapsed={time.time() - started:.0f}s private_mb={mem['private'] // 2**20} "
                         f"avail_mb={mem['available_ram'] // 2**20} extras_gb={current_bulk / 2**30:.2f}"
                     )
+                # also when every symbol was skipped: the lake size and the coverage of this kind are current
+                current_bulk = bulk_bytes()
+                progress("running", kind, len(targets), len(targets), "")
+                log(f"[{kind}] finished: coverage={last_coverage} skipped={totals['symbols_skipped']}")
         exit_code = EXIT_FAILED_FILES if totals["failed"] else EXIT_OK
         progress("done" if exit_code == EXIT_OK else "done_with_failures", "", 0, 0, "")
         if full_run and exit_code == EXIT_OK:

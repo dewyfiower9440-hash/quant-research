@@ -3,6 +3,8 @@ check -> full run, and how each tool exit moves a tier."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from quant_research.bulk.tiers import (
@@ -20,6 +22,7 @@ from quant_research.bulk.tiers import (
     unready_datasets,
     usable_datasets,
     visible_coverage,
+    with_tick,
 )
 
 
@@ -171,3 +174,28 @@ def test_errors_without_progress_defer_a_tier_instead_of_ending_it() -> None:
         state = after_exit(state, "full", 1, progressed=False)
     assert state.status == "deferred" and state.attempts == 0
     assert next_action([METRICS], {METRICS: state}) == (METRICS, "pilot")  # not terminal: tried again
+
+
+def test_ticks_killed_at_the_budget_keep_their_new_month_counts_and_flag_a_slowing_download() -> None:
+    """v2.5 N02: 'a tick brought at least one file' was the only question, so a download that fell from 806 new
+    months a tick to 77 ran for a day without a word."""
+    state = TierState("running")
+    for n in (806, 720, 610, 77):
+        state = with_tick(state, n)
+    assert state.recent_new == (806, 720, 610, 77) and "slowing" not in state.note
+    state = with_tick(replace(state, note="exit -9"), 89)
+    assert state.recent_new == (806, 720, 610, 77, 89)
+    assert state.note == "exit -9; slowing: 77, 89 new months in the last two ticks (720 before)"
+    fresh = replace(state, note="exit -9")  # after_exit writes a new note every tick
+    steady = with_tick(with_tick(fresh, 700), 650)
+    assert steady.recent_new == (610, 77, 89, 700, 650) and "slowing" not in steady.note  # only five are kept
+
+
+def test_a_saved_state_keeps_its_recent_counts_and_an_old_one_without_them_still_loads() -> None:
+    saved = {"status": "running", "recent_new": [5, 4, 3]}
+    assert parse_state("x", saved).recent_new == (5, 4, 3)
+    assert parse_state("x", {"status": "running"}).recent_new == ()
+    with pytest.raises(ValueError, match="bad number"):
+        parse_state("x", {"status": "running", "recent_new": [1, "two"]})
+    with pytest.raises(ValueError, match="bad number"):
+        parse_state("x", {"status": "running", "recent_new": "many"})

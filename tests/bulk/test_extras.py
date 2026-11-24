@@ -185,11 +185,12 @@ def test_spot_bulk_lake_reads_only_the_newest_version_of_each_month(tmp_path: Pa
 
 def test_listing_follows_s3_pagination_and_keeps_only_zips() -> None:
     pages = {
-        "": "<IsTruncated>true</IsTruncated>"
+        "": "<ListBucketResult><IsTruncated>true</IsTruncated>"
         "<Contents><Key>p/a.zip</Key><Size>3</Size><LastModified>L1</LastModified></Contents>"
-        "<Contents><Key>p/a.zip.CHECKSUM</Key><Size>1</Size><LastModified>L1</LastModified></Contents>",
-        "p/a.zip": "<IsTruncated>false</IsTruncated>"
-        "<Contents><Key>p/b.zip</Key><Size>4</Size><LastModified>L2</LastModified></Contents>",
+        "<Contents><Key>p/a.zip.CHECKSUM</Key><Size>1</Size><LastModified>L1</LastModified></Contents>"
+        "</ListBucketResult>",
+        "p/a.zip": "<ListBucketResult><IsTruncated>false</IsTruncated>"
+        "<Contents><Key>p/b.zip</Key><Size>4</Size><LastModified>L2</LastModified></Contents></ListBucketResult>",
     }
     markers: list[str] = []
 
@@ -200,6 +201,26 @@ def test_listing_follows_s3_pagination_and_keeps_only_zips() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert listing(client, "p/") == [("p/a.zip", 3, "L1"), ("p/b.zip", 4, "L2")]
     assert markers == ["", "p/a.zip"]  # the marker is the last listed zip key
+
+
+@pytest.mark.parametrize("body", ["", "<html><body>Sign in to the network</body></html>", '{"error": "x"}'])
+def test_listing_refuses_an_answer_that_is_not_a_bucket_listing(body: str) -> None:
+    """Review (v2.5 step 2): a 200 that is not a listing (captive portal, proxy page, empty body) read as 'the
+    source has no files', which now would be recorded as unavailable months and hide the symbol for a week."""
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client, pytest.raises(httpx.HTTPError):
+        listing(client, "p/")
+
+
+def test_listing_of_a_prefix_without_files_is_an_empty_list() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert listing(client, "p/") == []
 
 
 def test_wanted_months_adds_warmup_and_treats_the_end_month_as_exclusive() -> None:
