@@ -109,6 +109,11 @@ class Checked:
             "unavailable": list(unavailable),
         }
 
+    def note_unavailable(self, kind: str, symbol: str, months: Sequence[str]) -> None:
+        """Wanted months of a symbol the source lists nothing for. Not a mark: the symbol is asked again next
+        time (one request), its months only leave the coverage."""
+        self.entries.setdefault(kind, {})[symbol] = {"unavailable": list(months)}
+
     def unavailable(self, kind: str) -> set[tuple[str, str]]:
         out: set[tuple[str, str]] = set()
         for symbol, entry in self.entries.get(kind, {}).items():

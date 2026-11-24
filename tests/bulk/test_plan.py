@@ -97,6 +97,20 @@ def test_a_checked_symbol_is_looked_at_again_as_soon_as_more_is_wanted_of_it(tmp
     assert again.fresh("metrics", "BTCUSDT", ["2025-01"]) is False  # another universe file
 
 
+def test_a_symbol_the_source_lists_nothing_for_leaves_the_coverage_but_is_asked_again(tmp_path: Path) -> None:
+    """Re-review: a symbol without any listed month (no spot pair, say) stayed in the coverage for ever, so the
+    tier could never show 100 %. Its months are recorded as unavailable; it is not skipped (one request a tick)."""
+    path = tmp_path / "checked.json"
+    checked = Checked.load(path, now_ns=lambda: 5)
+    checked.note_unavailable("spotKlines", "NOSPOTUSDT", ["2025-01", "2025-02"])
+    checked.save()
+    again = Checked.load(path, now_ns=lambda: 6)
+    assert again.fresh("spotKlines", "NOSPOTUSDT", ["2025-01"]) is False
+    assert again.unavailable("spotKlines") == {("NOSPOTUSDT", "2025-01"), ("NOSPOTUSDT", "2025-02")}
+    wants = {"NOSPOTUSDT": {"2025-01", "2025-02"}, "BTCUSDT": {"2025-01"}}
+    assert coverage(wants, {("BTCUSDT", "2025-01")}, W2, unavailable=again.unavailable("spotKlines")) == (1, 1)
+
+
 def test_a_mark_without_its_wanted_months_is_never_fresh(tmp_path: Path) -> None:
     path = tmp_path / "checked.json"
     path.write_text('{"metrics": {"BTCUSDT": {"checked_ns": 5, "unavailable": []}}}', encoding="utf-8")

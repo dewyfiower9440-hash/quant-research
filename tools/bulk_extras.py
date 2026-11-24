@@ -223,7 +223,9 @@ def main() -> int:
                 "select distinct symbol, month from bulk_file where dataset_id = ?", (dataset_id,)
             )
             held[kind] = {(str(s), str(m)) for s, m in rows}
-        wanted = {source_of(kind, s): wants[s] for s in kind_targets.get(kind, [])}
+        wanted: dict[str, set[str]] = {}
+        for s in kind_targets.get(kind, []):  # two futures symbols may share one spot pair: the union of both
+            wanted.setdefault(source_of(kind, s), set()).update(wants[s])
         missing = {(source_of(kind, s), m) for s, m in checked.unavailable(kind)}
         last_coverage.clear()
         last_coverage.update(
@@ -332,6 +334,10 @@ def main() -> int:
                             wanted=wants[sym],
                             unavailable=unavailable_months(wants[sym], listed=by_month),
                         )
+                        checked.save()
+                    elif not pilot and not by_month and wants[sym]:
+                        # a valid listing without any wanted month (e.g. no spot pair): out of the coverage
+                        checked.note_unavailable(kind, sym, sorted(wants[sym]))
                         checked.save()
                     if processed % 10 == 0 or n == len(targets):
                         current_bulk = bulk_bytes()

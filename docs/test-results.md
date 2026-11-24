@@ -85,3 +85,4 @@
 | 2026-11-24 | v2.4 단계 8·9·10(코드) | db7b285 | 선언 게이트(귀무 측정, 국면 게이트, c2 라운드 순서) + Invoke-Pester tests/powershell(10/10, 게이트 밖) | 1090 passed, 94.69% | run 45311960895 success |
 | 2026-11-24 | v2.4 단계 10·11 | d453da4 | 선언 게이트(c2 첫 틱 측정, 전체 범위 리뷰의 주석·문서 정리) | 1090 passed, 94.69% | run 45338914925 success |
 | 2026-11-25 | v2.5 단계 1(코드) | 83ee5cc | 선언 게이트(수집기 자가 복구, 모니터 경보, 수집기 전용 환경) + Invoke-Pester tests/powershell(14/14, 게이트 밖). 캠페인·다운로드 틱과 겹쳐 포그라운드 20분 제한을 2회 넘겼고(백그라운드 exit 0, 증거로 세지 않음) 3번째에 통과 | 1122 passed, 94.78% | run 45502218303 success |
+| 2026-11-25 | v2.5 단계 2(코드) | 72f2216 | 선언 게이트(카탈로그 인덱스, 다운로드 순서·건너뛰기·커버리지, 감속 경고) + `uv run pyright tools/bulk_extras.py tools/run_data_queue.py`(0 errors, 게이트 밖) | 1141 passed, 94.79% | run 45510011766 success |
