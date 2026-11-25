@@ -80,7 +80,7 @@ task: v25-power-first
 - [ ] 4. **시장 중립 선택(H8).** 선행: UNRESOLVED 해소(독립 서브에이전트가 순매수 편향 건수와 방향별 확인 손익을 원자료에서 다시 계산해 감사 값과 같아야 한다. 다르면 이 단계는 보류하고 보고한다). (가) 안: `residual_sr`(일간 손익, 기준 수익률) 순수 함수, S2 선택 키와 S3 요약·후보 규칙에 적용, 원래 SR 병행 기록. 새 지표는 새 캠페인 run id에서만 쓴다(c2의 등록된 규칙은 그대로 끝까지 간다). — 파일: `src/quant_research/search/**`, `tools/run_campaign.py` — 테스트: 전 종목 동일 드리프트만 있는 합성 시장에서 롱 전용의 잔차 SR이 0 근처, 횡단면 알파의 잔차 SR은 유지, 옛 상태 JSON 호환
   - [필수] 독립 재계산 일치, 구현과 테스트, 옛 지표 병행 보고.
   - [선택] c1·c2의 기존 S3 trial에 대한 잔차 SR 소급 계산표(판정에는 쓰지 않음, trial 증가 0).
-- [ ] 5. **깔때기 회수율 측정 도구.** `tools/measure_funnel_power.py`: 알파 3종(드리프트, 메커니즘, 횡단면 신규) × z × 셀, c2 예산, 단계별 통과 수, 검증기 규칙을 합성 holdout에 적용, 상태 `run/funnel-power.jsonl`에 덧붙이고 이어 돌리기. 횡단면 알파를 `null_pipeline`에 추가. — 파일: `src/quant_research/validator/null_pipeline.py`, `tools/measure_funnel_power.py`, `tests/validator/**`, `tests/search/**` — 테스트: 횡단면 알파의 실현 z가 목표와 맞음, 알파 없음이면 기존 귀무와 같은 시장, 단계별 통과 수의 합 불변식, 이어 돌리기
+- [x] 5. **깔때기 회수율 측정 도구.** `tools/measure_funnel_power.py`: 알파 3종(드리프트, 메커니즘, 횡단면 신규) × z × 셀, c2 예산, 단계별 통과 수, 검증기 규칙을 합성 holdout에 적용, 상태 `run/funnel-power.jsonl`에 덧붙이고 이어 돌리기. 횡단면 알파를 `null_pipeline`에 추가. — 파일: `src/quant_research/validator/null_pipeline.py`, `tools/measure_funnel_power.py`, `tests/validator/**`, `tests/search/**` — 테스트: 횡단면 알파의 실현 z가 목표와 맞음, 알파 없음이면 기존 귀무와 같은 시장, 단계별 통과 수의 합 불변식, 이어 돌리기
   - [필수] 도구와 테스트. 첫 20배치로 배치당 시간을 재고 총 비용을 ADR-056 보강에 적는다(측정 전).
 - [ ] 6. **측정.** z = 6 → 4 → (2). 게이트·캠페인 틱·다운로드와 겹치면 미룬다. 측정표 `docs/measurements/v25-funnel-power.md`. — 파일: 측정표, 상태 파일
   - [필수] z = 4, 6의 40조건 중 해당 조건 전부 43회. 귀무 조건 포함. 단계별 통과 수 표.
@@ -139,3 +139,6 @@ task: v25-power-first
 - 2026-11-25 단계 4 선행 조건: 독립 서브에이전트(메인의 수치를 받지 않음, 인라인 계산)가 S3 판정 집합(c1 78 + c2 앞 18배치 16 = 94)에서 순매수 편향 66건, w1 롱 전용 28건의 선택 SR +0.093 → 확인 SR -0.066, 가격 손익 양수 3건을 냈다. 감사 값과 같다(집합 크기 93 대 94는 c2 스냅샷 1배치 차이). 선행 조건 충족. 구현은 아직 시작하지 않았다.
 - 2026-11-25 단계 5: 횡단면 알파(`null_pipeline`의 `cross`), 순수 모듈 `validator/funnel_power.py`(조건, 단계 집계, 회수율, 분기), 도구 `tools/measure_funnel_power.py` — 계획과 다른 점: 임시 상태 파일로 4배치를 시험 실행했고(결과는 버림), 그 결과로 ADR-056 보강을 썼다(`trend@1d`가 실행 불가라 짝을 고침, 원천 수익률은 2022-04~09의 100종목, 배치당 11.7초). 도구의 실행부는 단위 테스트가 없다(시험 실행으로 확인).
 - 2026-11-25 단계 5 리뷰: 측정을 시작하면 안 되는 문제 2건(합성 시장의 결정·체결 한 봉 간격, 일봉에서 지연 스트레스가 한 봉짜리 평균 회귀를 구조적으로 탈락시킴)과 집계 문제 4건이 나왔다. 간격은 테스트로 재현해 고쳤고, 알파는 사용자 결정으로 여러 봉 지속되는 평균 회귀(`slow_reversion`)로 바꿨다. 집계는 `s2_positive` 단계, 실행 실패 배치의 `incomplete`, 판정 불가·지연 스트레스 탈락의 분리, 귀무의 반복 단위를 넣었다. 모두 ADR-056 보강 2에 측정 전에 적었다. Phase 5의 메커니즘형 검정력 0은 같은 간격의 영향일 수 있다(미확인).
+- 2026-11-25 단계 6 시작: 커밋 3cfd511에서 `tools/measure_funnel_power.py --null --z 6,4,2 --max-minutes 720`을 백그라운드로 시작했다(상태 `C:/dev/qr-data/run/funnel-power.jsonl`, 설정 `funnel-power.setup.json`, 측정표 `funnel-power.md`). 끊기면 같은 명령으로 이어 돈다.
+- 2026-11-25 단계 6: 시작 직후 중단됐다. 시스템 메모리 부족으로 Claude Code가 백그라운드 작업을 끊었고(원천 패널을 읽는 중), 상태 파일과 설정 파일은 생기지 않았다. 기록된 배치 0, 고정된 설정 없음. 사용자가 다시 시작하라고 할 때 다시 돈다.
+- 2026-11-25 단계 1(반영): 사용자가 재등록을 맡겨 01:15Z에 수집기를 새 환경으로 다시 켰다. 공백 약 36초, 두 자식 프로세스가 `C:\dev\qr-collector-env`의 패키지를 읽는 것과 새 코드(heartbeat의 `fail_streak`)를 확인했다(`docs/measurements/v25-data-preservation.md` 1.1). 48시간 판정은 2026-11-27 01:16Z 이후에 한다.

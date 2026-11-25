@@ -11,6 +11,23 @@
 
 기간은 2026-11-08 10:21Z ~ 11-24 08:00Z(22,900분)다. 적용 뒤 48시간 표는 수집기 재시작 뒤에 여기에 덧붙인다.
 
+### 1.1 수집기 반영 (2026-11-25 01:15Z)
+
+사용자가 재등록과 재시작을 맡겼다. 순서: 예약 작업 끔 → STOP 파일 → 잠금 해제 확인 → `register_collector_task.ps1` → 시작.
+
+| 항목 | 값 |
+|---|---|
+| 정지 요청 | 01:15:05Z (supervisor가 01:15:08Z에 STOP을 읽음) |
+| 잠금 해제까지 | 16초 |
+| 새 supervisor 시작 | 01:15:35Z, rest·ws 자식 01:15:41Z |
+| 수집 공백 | 약 36초(5분 미만이라 공백 목록에는 들어가지 않는다) |
+| 실행 파일 | `C:\dev\qr-collector-env\Scripts\pythonw.exe` (이전: `C:\dev\auto\code\.venv\Scripts\pythonw.exe`) |
+| 자식 프로세스가 읽은 패키지 경로 | 두 프로세스 모두 `C:\dev\qr-collector-env\Lib\site-packages` (적재된 모듈 경로로 확인) |
+| 57초 뒤 heartbeat | rest: bookTicker 39회·Upbit 호가 40회 성공, 오류 0. ws: 강제청산 33건, 오류 0 |
+| 새 코드 확인 | heartbeat에 `last_ok_ns`, `fail_streak` 필드가 있다(커밋 83ee5cc 이후에만 있는 필드) |
+
+48시간 판정의 시작 시각은 2026-11-25 01:16Z다.
+
 ## 2. metrics 다운로드 (단계 2)
 
 ### 2.1 카탈로그 조회 (`bulk_file`에서 한 (데이터셋, 종목, 월)의 파일 찾기)
