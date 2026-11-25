@@ -49,3 +49,14 @@ def test_null_inputs_carry_no_information_about_the_returns(base: Panel) -> None
         rows = frame.filter(pl.col(column).is_not_null() & pl.col("fwd").is_not_null())
         corr = float(np.corrcoef(rows[column].to_numpy(), rows["fwd"].to_numpy())[0, 1])
         assert abs(corr) < 0.1, (column, corr)
+
+
+def test_the_synthetic_market_fills_at_the_price_the_decision_just_saw(base: Panel) -> None:
+    """Review of the ADR-056 harness: the base grid carries the one-minute decision delay, the synthetic decisions
+    were rebuilt without it, so every decision saw the bar before the last one and was filled a whole bar later.
+    A strategy that fades the previous bar (the planted mean-reversion alpha) then trades the wrong sign."""
+    assert base.config.decision_delay_ns > 0  # the case that was broken
+    syn = synthetic_panel(base, SyntheticSpec(hours=24 * 20), seed=3)
+    rows = syn.frame.filter(pl.col("exec_open").is_not_null() & pl.col("close").is_not_null())
+    assert rows.height >= 0.9 * syn.frame.height
+    assert np.allclose(rows["close"].to_numpy(), rows["exec_open"].to_numpy())

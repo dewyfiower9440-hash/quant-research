@@ -44,7 +44,9 @@ from quant_research.validator.verdict import DecisionRule, Verdict, decide, shar
 F64 = NDArray[np.float64]
 HOUR_NS = 3_600 * 10**9
 DAY_NS = 24 * HOUR_NS
-Alpha = Literal["none", "random", "mechanism"]
+Alpha = Literal["none", "random", "mechanism", "cross", "slow_reversion"]
+SLOW_BARS = 5  # ADR-056 addendum 2: the bars the slow mean-reversion alpha leans against
+CROSS_VOL_BARS = 20  # ADR-056 decision 3 (c): the realised-volatility window of the cross-sectional alpha
 NullKind = Literal["bootstrap", "permute", "signflip"]
 
 
@@ -56,7 +58,11 @@ class SyntheticSpec:
     volatility and co-movement kept, any direction removed). Every null starts from per-symbol demeaned returns.
     `hours` = length of the output market (None: the base length), so holdouts longer than the base are possible.
     Alphas: `random` adds `strength` to ALL symbols in a random fifth of the hours; `mechanism` makes every symbol
-    lean against its previous hour."""
+    lean against its previous hour; `cross` (ADR-056) adds `strength x (0.5 - rank)` to each symbol's next bar,
+    rank = its place among the symbols by realised volatility of the last CROSS_VOL_BARS bars (0 = calmest), so
+    calm symbols earn and wild ones pay, and the additions of a bar sum to zero (no market drift);
+    `slow_reversion` (ADR-056 addendum 2) leans each bar against the mean of the symbol's last SLOW_BARS bars, so the
+    edge is still there one bar later (on daily bars `mechanism` is gone by then)."""
 
     alpha: Alpha = "none"
     strength: float = 0.0  # per-hour drift (random) or mean-reversion coefficient (mechanism)
@@ -100,6 +106,14 @@ def _permutation_path(source: int, length: int, block_len: int, rng: np.random.G
     return np.concatenate(out)[:length]
 
 
+def parse_alpha(name: str) -> Alpha:
+    """An alpha kind from text (state files, CLI); an unknown name is refused."""
+    for kind in get_args(Alpha):
+        if name == kind:
+            return cast(Alpha, kind)
+    raise ValueError(f"unknown alpha {name!r}; one of {get_args(Alpha)}")
+
+
 def parse_null(name: str) -> NullKind:
     """A null kind from text (CLI); an unknown name is refused, never mapped to another null."""
     for kind in get_args(NullKind):
@@ -108,13 +122,36 @@ def parse_null(name: str) -> NullKind:
     raise ValueError(f"unknown null {name!r}; one of {get_args(NullKind)}")
 
 
+def _calm_tilt(rets: F64) -> F64:
+    """Per bar and symbol, 0.5 - rank of the symbol's realised volatility over the CROSS_VOL_BARS bars BEFORE the
+    bar (rank 0 = calmest, 1 = wildest, evenly spaced: a row sums to zero). Rows without a full window are 0."""
+    t, n = rets.shape
+    tilt = np.zeros((t, n))
+    if n < 2:
+        return tilt
+    for k in range(CROSS_VOL_BARS, t):
+        vol = rets[k - CROSS_VOL_BARS : k].std(axis=0)
+        order = np.argsort(np.argsort(vol, kind="stable"), kind="stable")
+        tilt[k] = 0.5 - order / (n - 1)
+    return tilt
+
+
 def realizable_z(alpha: Alpha, rets: F64) -> float:
     """z (mean / sd * sqrt(T)) on `rets` of the best strategy that can actually be TRADED against the planted alpha
     (A3 review: the old formulas assumed independent symbols and an oracle that knows which hours drift).
     random -> long all symbols equally (the drifting hours are not observable); mechanism -> per symbol, fade the
     last hour (position -sign(r_{t-1})), equal weight; none -> the long-all z (a reference)."""
     simple = np.expm1(rets)  # the engine's returns (re-review: z on log returns differs)
-    pnl = (-np.sign(simple[:-1]) * simple[1:]).mean(axis=1) if alpha == "mechanism" else simple.mean(axis=1)
+    if alpha == "cross":  # long the calm, short the wild, by the volatility of the bars already seen
+        pnl = (_calm_tilt(simple) * simple)[CROSS_VOL_BARS:].mean(axis=1)
+    elif alpha == "mechanism":
+        pnl = (-np.sign(simple[:-1]) * simple[1:]).mean(axis=1)
+    elif alpha == "slow_reversion":  # fade the sum of the last SLOW_BARS bars
+        past = np.cumsum(simple, axis=0)
+        window = past[SLOW_BARS - 1 : -1] - np.vstack([np.zeros((1, simple.shape[1])), past[: -SLOW_BARS - 1]])
+        pnl = (-np.sign(window) * simple[SLOW_BARS:]).mean(axis=1)
+    else:
+        pnl = simple.mean(axis=1)
     sd = float(np.std(pnl, ddof=1))
     return float(np.mean(pnl)) / sd * math.sqrt(pnl.shape[0]) if sd > 0 else 0.0
 
@@ -153,8 +190,8 @@ def calibrate_strength(
         ]
         return float(np.mean(zs))
 
-    lo, hi = 0.0, (0.9 if alpha == "mechanism" else 0.01)
-    while alpha == "random" and mean_z(hi) < z and hi < 1.0:  # widen until the target is bracketed
+    lo, hi = 0.0, (0.9 if alpha == "mechanism" else 0.01)  # per-bar drift (random) or tilt (cross)
+    while alpha != "mechanism" and mean_z(hi) < z and hi < 1.0:  # widen until the target is bracketed
         hi *= 2
     at_lo, at_hi = mean_z(lo), mean_z(hi)
     if not at_lo < z <= at_hi:
@@ -209,6 +246,12 @@ def synthetic_returns(closes: F64, spec: SyntheticSpec, rng: np.random.Generator
     elif spec.alpha == "mechanism" and spec.strength:
         for k in range(1, t):  # tomorrow leans against today: a mean-reversion mechanism
             out[k] -= spec.strength * out[k - 1]
+    elif spec.alpha == "slow_reversion" and spec.strength:
+        for k in range(SLOW_BARS, t):  # lean against the mean of the last few bars (as they came out, alpha included)
+            out[k] -= spec.strength * out[k - SLOW_BARS : k].mean(axis=0)
+    elif spec.alpha == "cross" and spec.strength:
+        # the tilt is read from the null returns (not from the returns it changes), so its size does not feed back
+        out += spec.strength * _calm_tilt(out)
     return out
 
 
@@ -277,6 +320,10 @@ def synthetic_panel(
     `inputs`: also premium bars and funding settlements that are independent of the returns (`null_inputs`), from
     a random stream of their own, so the price market of a seed is the same with and without them."""
     symbols, grid, closes = hourly_closes(base)
+    # The synthetic decisions are made without a decision delay (cfg below). The base grid carries the base's delay
+    # (one minute by default); kept, every synthetic bar became available a minute AFTER the decision that should
+    # see it, so a decision saw the bar before the last one and was filled a whole bar later (ADR-056 review).
+    grid = grid - (grid % base.config.timeframe_ns)
     if spec.hours is not None:  # a longer (or shorter) market on the base's hourly grid
         grid = int(grid[0]) + np.arange(spec.hours, dtype=np.int64) * base.config.timeframe_ns
     rng = np.random.default_rng(seed)
