@@ -63,7 +63,15 @@ from quant_research.search.pipeline import (
     split_for_reward,
 )
 from quant_research.search.s1 import S1Config
-from quant_research.strategy.space import INFEASIBLE_V3, SPACE_V3_SUFFIX, Point, Space, build_point, space_of
+from quant_research.strategy.space import (
+    INFEASIBLE_V3,
+    SPACE_V3_SUFFIX,
+    SPACE_V4_SUFFIX,
+    Point,
+    Space,
+    build_point,
+    space_of,
+)
 from quant_research.strategy.templates import MODEL_FAMILIES, base_family
 
 F64 = NDArray[np.float64]
@@ -75,6 +83,7 @@ S1_HORIZON_BARS: dict[str, int] = {"1h": 24, "4h": 6, "1d": 5}  # about one day,
 # every v3 and regime space.
 MAX_WARMUP_BARS = 1_200
 Status = Literal["exhausted", "budget", "stopped", "gate", "waiting_data"]
+NRule = Literal["raw", "cell"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,11 +106,16 @@ class CampaignConfig:
     s3_random_rate: float = 0.05
     min_exposure: float = 0.05  # ADR-042's verdict precondition, also the S3 eligibility (B5)
     max_batches: int | None = None
-    space_version: int = 2  # 3: the capped spaces of ADR-051 (`family@timeframe/v3`)
+    # 3: the capped spaces of ADR-051 (`family@timeframe/v3`); 4: those with the portfolio-level volatility
+    # target of ADR-059 (`.../v4`), everything else as in 3
+    space_version: int = 2
+    n_rule: NRule = "raw"  # ADR-058 re-examination: "cell" counts cell pairs, not every judged S3
 
     def __post_init__(self) -> None:
-        if self.space_version not in (2, 3):
-            raise ValueError(f"space_version must be 2 or 3, got {self.space_version}")
+        if self.space_version not in (2, 3, 4):
+            raise ValueError(f"space_version must be 2, 3 or 4, got {self.space_version}")
+        if self.n_rule not in ("raw", "cell"):
+            raise ValueError(f"n_rule must be 'raw' or 'cell', got {self.n_rule!r}")
 
     def identity(self) -> dict[str, object]:
         """What defines the batches' proposals and evaluations (a resumed campaign must keep it)."""
@@ -109,14 +123,16 @@ class CampaignConfig:
         out.pop("max_batches")
         if self.space_version == 2:  # campaigns saved before ADR-051 have no such key and must still resume
             out.pop("space_version")
+        if self.n_rule == "raw":  # likewise for the campaigns saved before ADR-058 was re-examined
+            out.pop("n_rule")
         return out
 
 
 def space_name(cell: Cell, version: int) -> str:
     """The registered space of a cell under a space version (model cells exist from version 3 on)."""
-    if version != 3 and cell.family in MODEL_FAMILIES:
-        raise ValueError(f"{cell.key}: model cells need space version 3 (ADR-053)")
-    return cell.space + (SPACE_V3_SUFFIX if version == 3 else "")
+    if version < 3 and cell.family in MODEL_FAMILIES:
+        raise ValueError(f"{cell.key}: model cells need space version 3 or later (ADR-053)")
+    return cell.space + {3: SPACE_V3_SUFFIX, 4: SPACE_V4_SUFFIX}.get(version, "")
 
 
 MODEL_VALIDATION_SHARE = 0.25  # the last quarter of selection: where a model cell's points compete
@@ -129,7 +145,7 @@ def is_model(cell: Cell) -> bool:
 
 def infeasible(cell: Cell, version: int) -> bool:
     """ADR-051: the cell's (family, timeframe) has no v3 space (an axis starts beyond the lookback cap)."""
-    return version == 3 and f"{base_family(cell.family)}@{cell.timeframe}" in INFEASIBLE_V3
+    return version >= 3 and f"{base_family(cell.family)}@{cell.timeframe}" in INFEASIBLE_V3
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,8 +175,8 @@ def missing_data(cell: Cell, panel: Panel, *, require_funding: bool = False) -> 
 
 
 def requires_funding(config: CampaignConfig) -> bool:
-    """ADR-052 applies to the campaigns pre-registered after it (space version 3); c1 keeps its rule."""
-    return config.space_version == 3
+    """ADR-052 applies to the campaigns pre-registered after it (space version 3 on); c1 keeps its rule."""
+    return config.space_version >= 3
 
 
 def _number(metrics: Mapping[str, object], key: str) -> float | None:
@@ -257,6 +273,83 @@ def pooled_n(history: Sequence[Mapping[str, object]], prior: Mapping[str, int]) 
     return sum(prior.get(w, 0) + _judged(history, w) for w in WINDOWS) + 2
 
 
+def pair_key(version: int, cell: Cell, window: str) -> str:
+    """ADR-058 re-examination, decision 1: what the cell rule counts once, however often it is judged."""
+    return f"v{version}|{cell.space}|top{cell.top_m}|{window}"
+
+
+def _other_window(window: str) -> str:
+    return next(w for w in WINDOWS if w != window)
+
+
+def judged_pairs(history: Sequence[Mapping[str, object]], version: int) -> frozenset[str]:
+    """The pairs with an S3 judgment in a history: a batch's own S3 on its window's confirmation split and its
+    cross S3 on the other window's."""
+    out: set[str] = set()
+    for h in history:
+        summary = h.get("summary")
+        if not isinstance(summary, Mapping):
+            continue
+        s = cast(Mapping[str, object], summary)
+        cell = Cell.parse(str(h.get("cell", "")))
+        if s.get("s3_sr") is not None:
+            out.add(pair_key(version, cell, cell.window))
+        if s.get("cross_sr") is not None:
+            out.add(pair_key(version, cell, _other_window(cell.window)))
+    return frozenset(out)
+
+
+def saved_space_version(state: CampaignState) -> int:
+    """The space version a saved campaign ran under (campaigns before ADR-051 have no such key: 2)."""
+    config = state.settings.get("config")
+    raw = cast(Mapping[str, object], config).get("space_version", 2) if isinstance(config, Mapping) else 2
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"campaign {state.run_id}: space_version must be an integer, got {raw!r}")
+    return raw
+
+
+def earlier_pairs(states: Sequence[CampaignState], own_run: str) -> frozenset[str]:
+    """The judged pairs of every other run id, each under the space version it was saved with (one state per run
+    id: the longest history, as in `earlier_histories`)."""
+    best: dict[str, CampaignState] = {}
+    for s in states:
+        if s.run_id != own_run and (s.run_id not in best or len(s.history) >= len(best[s.run_id].history)):
+            best[s.run_id] = s
+    out: set[str] = set()
+    for s in best.values():
+        out |= judged_pairs(s.history, saved_space_version(s))
+    return frozenset(out)
+
+
+def pooled_n_cell(
+    history: Sequence[Mapping[str, object]], version: int, prior_pairs: frozenset[str], cell: Cell
+) -> int:
+    """The N of the pooled bar under the cell rule for a batch of `cell`: the distinct pairs judged so far (earlier
+    campaigns included) together with this batch's own and cross pair."""
+    mine = {pair_key(version, cell, w) for w in WINDOWS}
+    return len(prior_pairs | judged_pairs(history, version) | mine)
+
+
+def cell_group(cell: Cell) -> tuple[str, str, int]:
+    """ADR-058 re-examination, decision 2: the cells of both research windows are one group."""
+    return cell.family, cell.timeframe, cell.top_m
+
+
+def group_record(history: Sequence[Mapping[str, object]], cell: Cell) -> tuple[int, float | None]:
+    """(judged batches of the cell's group in this campaign, the largest pooled SR recorded among them)."""
+    judged, best = 0, None
+    for h in history:
+        summary = h.get("summary")
+        if not isinstance(summary, Mapping) or cell_group(Cell.parse(str(h.get("cell", "")))) != cell_group(cell):
+            continue
+        s = cast(Mapping[str, object], summary)
+        judged += s.get("s3_sr") is not None
+        pooled = s.get("pooled_sr")
+        if isinstance(pooled, int | float) and not isinstance(pooled, bool):
+            best = float(pooled) if best is None else max(best, float(pooled))
+    return judged, best
+
+
 def pooled_power(
     history: Sequence[Mapping[str, object]], prior: Mapping[str, int], days: int
 ) -> tuple[int, float, list[tuple[float, float]]]:
@@ -347,7 +440,7 @@ class SplitRule:
 
     @staticmethod
     def of(space_version: int) -> SplitRule:
-        return SplitRule(3, 9, 4) if space_version == 3 else SplitRule()
+        return SplitRule(3, 9, 4) if space_version >= 3 else SplitRule()
 
 
 def split_bounds(
@@ -396,6 +489,7 @@ def run_batch(
     panels: PanelProvider,
     config: CampaignConfig,
     prior_s3: Mapping[str, int] | None = None,
+    prior_pairs: frozenset[str] = frozenset(),
 ) -> tuple[CauseCode, BatchSummary, float]:
     if infeasible(cell, config.space_version):  # before any panel is loaded: nothing is evaluated, no N
         return "infeasible", BatchSummary(0, 0, 0, 0, None, None, None, None, None, (), infeasible=True), 0.0
@@ -464,6 +558,10 @@ def run_batch(
     prior = (prior_s3 or {}).get(cell.window, 0)
     threshold = s3_null_threshold(state.history, cell.window, _days(confirmation), prior=prior)
     summary = summarize(result, min_exposure=config.min_exposure, s3_threshold=threshold)
+    if config.n_rule == "cell" and summary.s3_sr is not None:
+        # ADR-058 re-examination, decision 3: every judged batch says how often its cell group was judged, also
+        # one that never reaches the cross step (the bars are set there)
+        summary = replace(summary, cell_judged=group_record(state.history, cell)[0] + 1)
     del selection, confirmation  # review (step 4): one window's panels in memory at a time, also for the cross run
     if (summary.best_sr_net or 0.0) > 0 and (summary.s3_sr or 0.0) > 0 and summary.s3_trial_id is not None:
         own = summary
@@ -481,6 +579,9 @@ def run_batch(
                 fold=f"{state.run_id}:{cell.key}:{pull}",
                 prior_s3=prior_s3 or {},
                 require_funding=funded,
+                n_rule=config.n_rule,
+                space_version=config.space_version,
+                prior_pairs=prior_pairs,
             ),
             cell=cell,
         )
@@ -516,6 +617,9 @@ def with_cross(
     fold: str,
     prior_s3: Mapping[str, int],
     require_funding: bool = False,
+    n_rule: NRule = "raw",
+    space_version: int = 2,
+    prior_pairs: frozenset[str] = frozenset(),
 ) -> BatchSummary:
     """ADR-049 decision 3 for a batch whose best S2 and its own S3 are both positive: the same spec on the other
     window's confirmation split, pooled with the own S3 and judged against the two splits' best-of-N null bar."""
@@ -542,7 +646,20 @@ def with_cross(
     if x is None:
         return summary
     bar = pooled_null_threshold(state.history, prior_s3, x.days)
-    return replace(summary, cross_sr=x.cross_sr, pooled_sr=x.pooled_sr, pooled_threshold=bar, cross_trial_id=x.trial_id)
+    out = replace(summary, cross_sr=x.cross_sr, pooled_sr=x.pooled_sr, pooled_threshold=bar, cross_trial_id=x.trial_id)
+    if n_rule == "raw":
+        return out
+    # ADR-058 re-examination: the bar of the distinct pairs, the raw-N bar kept beside it, and only the best
+    # judgment of the cell group so far in this campaign may be a candidate (a tie is not better)
+    n = pooled_n_cell(state.history, space_version, prior_pairs, cell)
+    judged, best = group_record(state.history, cell)
+    return replace(
+        out,
+        pooled_threshold=expected_max_sr(n, 1.0 / max(x.days, 1)),
+        pooled_threshold_raw=bar,
+        cell_judged=judged + 1,
+        not_cell_best=best is not None and x.pooled_sr is not None and x.pooled_sr <= best,
+    )
 
 
 def run_campaign(
@@ -559,6 +676,7 @@ def run_campaign(
     out_of_time: Callable[[], bool] = lambda: False,
     rounds: Rounds | None = None,
     prior_s3: Mapping[str, int] | None = None,
+    prior_pairs: frozenset[str] = frozenset(),  # ADR-058 re-examination: earlier campaigns' pairs (cell rule)
 ) -> CampaignOutcome:
     """Run batches until the batch or time budget is used, the stop check fires or the gate refuses. When nothing is
     eligible: without `rounds` the campaign is `exhausted`; with them the next ADR-049 round starts (persisted), and
@@ -600,7 +718,14 @@ def run_campaign(
             continue
         try:
             cause, summary, reward = run_batch(
-                state, cell, ledger=ledger, catalog=catalog, panels=panels, config=config, prior_s3=prior_s3
+                state,
+                cell,
+                ledger=ledger,
+                catalog=catalog,
+                panels=panels,
+                config=config,
+                prior_s3=prior_s3,
+                prior_pairs=prior_pairs,
             )
         except (MemoryError, PermissionError) as e:  # not a property of the cell: stop, nothing recorded, resumable
             log.warning("campaign.batch_transient", cell=cell.key, error=f"{type(e).__name__}: {e}")

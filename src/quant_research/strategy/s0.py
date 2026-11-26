@@ -43,7 +43,10 @@ def warmup_bars(spec: StrategySpec) -> int:
     """Bars of history the spec needs before its first decision: the deepest window chain of its signal and entry
     trees (nested windows add up), or the sizing volatility window if that is longer."""
     trees = [t for t in expanded_trees(spec).values() if t is not None]
-    return max([spec.sizing.vol_window, *(tree_lookback(t) for t in trees)])
+    sizing = spec.sizing.vol_window
+    if spec.sizing.method == "portfolio_vol_target":  # ADR-059: then the correlation estimate's bars
+        sizing += max(5, sizing // 4)
+    return max([sizing, *(tree_lookback(t) for t in trees)])
 
 
 def _type(arg: Arg) -> ValueType:

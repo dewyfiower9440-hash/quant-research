@@ -8,13 +8,22 @@ import numpy as np
 import polars as pl
 import pytest
 
-from quant_research.backtest.panel import Panel, PanelConfig, assemble, decision_grid, settlements
+from quant_research.backtest.market import NAME_CAP, prepare
+from quant_research.backtest.panel import (
+    Panel,
+    PanelConfig,
+    assemble,
+    decision_grid,
+    select_top_liquidity,
+    settlements,
+)
 from quant_research.backtest.run import RunConfig, run_backtest, unblob
 from quant_research.catalog.bootstrap import bootstrap
 from quant_research.catalog.store import Catalog
 from quant_research.research.ledger import TrialLedger
 from quant_research.research.store import ResearchStore
-from quant_research.strategy.s0 import check
+from quant_research.strategy.compile import compile_spec
+from quant_research.strategy.s0 import check, warmup_bars
 from quant_research.strategy.spec import StrategySpec
 from quant_research.strategy.templates import all_templates, templates
 
@@ -224,3 +233,58 @@ def test_the_rebalance_interval_and_band_reach_both_engines(panel: Panel, env: t
     trades = (fast.metrics["trades"], slow.metrics["trades"])
     assert isinstance(trades[0], int) and isinstance(trades[1], int) and trades[1] < trades[0]
     assert slow.metrics["final_equity"] == pytest.approx(slow_ev.metrics["final_equity"], rel=1e-9)
+
+
+def _sized(method: str, window: int = 24) -> StrategySpec:
+    return _spec(sizing={"method": method, "target_ann_vol": 0.15, "max_leverage": 1.0, "vol_window": window})
+
+
+def _targets(spec: StrategySpec, panel: Panel) -> tuple[np.ndarray, np.ndarray]:
+    frame = select_top_liquidity(panel.frame, spec.universe.n)
+    market, targets = prepare(spec, compile_spec(spec, frame), frame, panel.funding, fidelity="L1")
+    return targets.weight, market.sigma_daily
+
+
+def test_the_per_name_volatility_target_is_what_it_was(panel: Panel) -> None:
+    """ADR-059 decision 4: specs of the earlier spaces keep their weights (min(target / sigma, leverage) / n)."""
+    spec = _sized("vol_target")
+    weight, sigma_daily = _targets(spec, panel)
+    held = weight != 0
+    assert held.any()  # precondition: the fixture trades
+    expected = np.minimum(0.15 / (sigma_daily[held] * np.sqrt(365.0)), 1.0) / spec.universe.n
+    np.testing.assert_allclose(np.abs(weight[held]), expected, rtol=1e-12)
+    assert warmup_bars(spec) == max(24, warmup_bars(_sized("equal")))
+
+
+def test_the_portfolio_volatility_target_respects_its_caps_and_both_engines_agree(
+    panel: Panel, env: tuple[Catalog, TrialLedger]
+) -> None:
+    """ADR-059: the names with a signal share the target; the per-name cap and the gross cap hold on every bar."""
+    catalog, ledger = env
+    spec = _sized("portfolio_vol_target")
+    weight, _sigma = _targets(spec, panel)
+    held = weight != 0
+    assert held.any()  # precondition: the fixture trades under the new sizing too
+    assert float(np.abs(weight).max()) <= NAME_CAP + 1e-12
+    assert float(np.abs(weight).sum(axis=1).max()) <= 1.0 + 1e-12
+    first = int(np.argmax(held.any(axis=1)))
+    assert first >= 24 + 5  # the volatility window, then the minimum bars of the correlation estimate
+    # what S0 asks for: vol_window + max(5, vol_window // 4), when that is longer than the signal's windows (96)
+    assert warmup_bars(_sized("portfolio_vol_target", 120)) == 150 and warmup_bars(_sized("vol_target", 120)) == 120
+    assert warmup_bars(spec) == 96
+    ev = run_backtest(spec, panel, catalog, ledger, RunConfig(engine="event"))
+    vec = run_backtest(spec, panel, catalog, ledger, RunConfig(engine="vector"))
+    assert ev.status == vec.status == "done" and ev.result is not None and vec.result is not None
+    np.testing.assert_allclose(ev.result.equity, vec.result.equity, rtol=1e-9, atol=1e-9)
+    assert ev.metrics["gross_exposure"] == pytest.approx(vec.metrics["gross_exposure"], rel=1e-9)
+
+
+def test_the_portfolio_volatility_target_never_reads_a_later_bar(panel: Panel) -> None:
+    """The weight at decision t is fixed by the bars up to t: cutting the panel after t leaves it as it was."""
+    spec = _sized("portfolio_vol_target")
+    full, _ = _targets(spec, panel)
+    cut_ns = sorted(set(panel.frame["decision_ns"].to_list()))[300]
+    short = Panel(panel.frame.filter(pl.col("decision_ns") <= cut_ns), panel.funding, panel.files, panel.config)
+    part, _ = _targets(spec, short)
+    assert (part != 0).any()  # precondition: there are weights before the cut
+    np.testing.assert_allclose(part, full[: part.shape[0]], rtol=1e-12, atol=1e-15)

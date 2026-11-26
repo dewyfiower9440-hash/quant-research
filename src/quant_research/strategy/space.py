@@ -373,15 +373,53 @@ def _regime_space(v3: Space) -> Space:
 REGIME_SPACES: dict[str, Space] = {s.family: s for s in (_regime_space(v3) for v3 in SPACES_V3.values())}
 
 
+# ADR-059: every v3 space (searched, model, regime-gated) again with the portfolio-level volatility target. The
+# axes are the v3 ones; only the `vol_target:<window>` choices of `sizing` become `portfolio_vol_target:<window>`
+# (`equal` stays as it is). Registered name: the v3 name with "/v4".
+SPACE_V4_SUFFIX = "/v4"
+PORTFOLIO_SIZING = "portfolio_vol_target"
+
+
+def _v4_space(v3: Space) -> Space:
+    struct = tuple(
+        ChoiceAxis(
+            a.name,
+            tuple(
+                f"{PORTFOLIO_SIZING}:{str(v).removeprefix('vol_target:')}" if str(v).startswith("vol_target:") else v
+                for v in a.choices
+            ),
+        )
+        if a.name == "sizing"
+        else a
+        for a in v3.struct
+    )
+    return Space(
+        v3.family.removesuffix(SPACE_V3_SUFFIX) + SPACE_V4_SUFFIX,
+        v3.params,
+        struct,
+        v3.constraint,
+        template=v3.template_family,
+        timeframe=v3.timeframe,
+        warmup_bars=v3.warmup_bars,
+    )
+
+
+SPACES_V4: dict[str, Space] = {
+    s.family: s
+    for s in (_v4_space(v3) for v3 in (*SPACES_V3.values(), *MODEL_SPACES.values(), *REGIME_SPACES.values()))
+}
+
+
 def space_of(name: str) -> Space:
     """The registered space a Point's `family` names (v1 family, v2 `family@timeframe`, v3 `...@timeframe/v3`,
-    a model space or a regime-gated space)."""
+    a model space, a regime-gated space, or the v4 form of one of the last three)."""
     space = (
         SPACES.get(name)
         or SPACES_V2.get(name)
         or SPACES_V3.get(name)
         or MODEL_SPACES.get(name)
         or REGIME_SPACES.get(name)
+        or SPACES_V4.get(name)
     )
     if space is None:
         raise KeyError(f"unknown space {name!r}")

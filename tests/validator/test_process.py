@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Generator
 from dataclasses import replace
@@ -293,3 +294,42 @@ def test_the_rule_hash_identifies_the_stress_definition() -> None:
     assert DecisionRule().stress_version == 2 and "stress_version" in asdict(DecisionRule())  # part of the hash
     with pytest.raises(ValueError, match="stress_version"):  # a version the code does not implement
         DecisionRule(stress_version=1)
+
+
+def test_the_validator_judges_a_portfolio_sized_spec_with_the_portfolio_weights(
+    venv: Env, panels: tuple[Panel, Panel]
+) -> None:
+    """ADR-059: a candidate of space v4 reaches the validator as its stored spec; the holdout run must size it with
+    the portfolio-level volatility target (the same weights a direct run of that spec gives), not the per-name one."""
+    sel, conf = panels
+
+    def sized(method: str) -> StrategySpec:
+        body = _spec().model_dump(mode="json")
+        body["sizing"] = {**body["sizing"], "method": method, "vol_window": 24}
+        return StrategySpec.model_validate(body)
+
+    spec = sized("portfolio_vol_target")
+    s3 = run_backtest(spec, sel, venv.catalog, venv.ledger, RunConfig(engine="event"), stage="S3", fold="v4")
+    assert s3.status == "done"
+    submit_candidate(venv.research, s3.trial_id, rule=LENIENT, now_ns=1)
+    ((_rid, status, _passed),) = venv.run(_holdout(conf), LENIENT)
+    assert status == "judged"
+    held = venv.vresearch.conn.execute(
+        "select t.spec_hash, t.metrics_json from trial t where t.fold = 'holdout' order by t.trial_id limit 1"
+    ).fetchone()
+    assert held is not None  # precondition: the base holdout run is in the validator's own ledger
+    exposure = json.loads(str(held[1]))["gross_exposure"]
+    direct = {
+        method: run_backtest(
+            sized(method), conf, venv.catalog, venv.ledger, RunConfig(engine="event"), stage="reference", fold=method
+        )
+        for method in ("portfolio_vol_target", "vol_target")
+    }
+    assert str(held[0]) == s3_hash(venv, s3.trial_id)  # the spec the validator ran is the candidate's
+    assert exposure > 0  # precondition: the spec trades on the holdout stand-in
+    assert exposure == pytest.approx(direct["portfolio_vol_target"].metrics["gross_exposure"], rel=1e-12)
+    assert exposure != pytest.approx(direct["vol_target"].metrics["gross_exposure"], rel=1e-3)
+
+
+def s3_hash(venv: Env, trial_id: int) -> str:
+    return str(venv.research.conn.execute("select spec_hash from trial where trial_id = ?", (trial_id,)).fetchone()[0])

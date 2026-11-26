@@ -42,7 +42,7 @@ CauseCode = Literal[
     "data_missing",
     "error",
 ]
-BelowBar = Literal["no_cross", "sign_mismatch", "pooled_below"]
+BelowBar = Literal["no_cross", "sign_mismatch", "pooled_below", "not_cell_best"]
 TIMEFRAMES = ("1h", "4h", "1d")
 TOP_MS = (30, 100)
 WINDOWS = ("w2", "w1")
@@ -115,6 +115,12 @@ class BatchSummary:
     cross_trial_id: int | None = None
     infeasible: bool = False  # ADR-051: the cell has no executable space (nothing was evaluated)
     best_funding_fraction: float | None = None  # funding cash flow of the best S2 / capital (negative: paid)
+    # ADR-058 re-examination (`n_rule = "cell"` only; None / False under the raw rule): the bar of the raw N
+    # kept beside the cell-level one, how often the cell group was judged (this batch included), and whether
+    # an earlier judgment of the group in this campaign had a pooled SR at least as large
+    pooled_threshold_raw: float | None = None
+    cell_judged: int | None = None
+    not_cell_best: bool = False
 
 
 def classify(b: BatchSummary, *, min_exposure: float) -> CauseCode:  # min_exposure: applied by the runner
@@ -147,6 +153,8 @@ def _combined_gap(b: BatchSummary) -> BelowBar | None:
         return "sign_mismatch"
     if b.pooled_sr <= b.pooled_threshold:
         return "pooled_below"  # within the best-of-N null of every S3 judged on the two splits
+    if b.not_cell_best:
+        return "not_cell_best"  # ADR-058: only the best judgment of a cell group can be a candidate
     return None
 
 
@@ -428,7 +436,7 @@ def next_round(state: CampaignState, available: Availability, groups: Sequence[S
 
 
 def _summary_json(s: BatchSummary) -> dict[str, object]:
-    return {
+    out: dict[str, object] = {
         "s1_scored": s.s1_scored,
         "s1_finite": s.s1_finite,
         "s2_done": s.s2_done,
@@ -449,6 +457,11 @@ def _summary_json(s: BatchSummary) -> dict[str, object]:
         "infeasible": s.infeasible,
         "best_funding_fraction": s.best_funding_fraction,
     }
+    if s.cell_judged is not None:  # written under the cell rule only: files of the raw rule keep their shape
+        out["pooled_threshold_raw"] = s.pooled_threshold_raw
+        out["cell_judged"] = s.cell_judged
+        out["not_cell_best"] = s.not_cell_best
+    return out
 
 
 def summary_from_json(raw: Mapping[str, object]) -> BatchSummary:
@@ -495,6 +508,9 @@ def summary_from_json(raw: Mapping[str, object]) -> BatchSummary:
         cross_trial_id=trial("cross_trial_id"),
         infeasible=raw.get("infeasible") is True,
         best_funding_fraction=number("best_funding_fraction"),
+        pooled_threshold_raw=number("pooled_threshold_raw"),
+        cell_judged=trial("cell_judged"),
+        not_cell_best=raw.get("not_cell_best") is True,
     )
 
 

@@ -47,7 +47,8 @@ class Exit(BaseModel):
 
 class Sizing(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    method: Literal["vol_target", "equal"]
+    # portfolio_vol_target (ADR-059): the names with a signal share the target; its caps are code constants
+    method: Literal["vol_target", "equal", "portfolio_vol_target"]
     target_ann_vol: float = Field(default=0.15, gt=0, le=1)
     max_leverage: float = Field(default=1.0, gt=0, le=10)
     vol_window: int = Field(default=96, ge=2, le=2_000)

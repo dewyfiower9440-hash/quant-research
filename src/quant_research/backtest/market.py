@@ -60,6 +60,71 @@ class Targets:
     desire: npt.NDArray[np.int8]  # (T, N) +1 / -1 / 0 from the entry conditions (eligible only)
 
 
+# ADR-059 (pre-registered): the constants of `portfolio_vol_target`. They are not spec fields, so the hash of every
+# earlier spec is unchanged; changing one of them takes a new sizing method name, never the same name.
+NAME_CAP = 0.10  # per-name weight, the hard limit D-09 of live trading applied to the backtest
+RHO_MAX = 0.95  # the average pairwise correlation is clipped to [0, RHO_MAX]
+
+
+def rho_min_bars(window: int) -> int:
+    """Bars with a cross-section the correlation estimate needs inside its window."""
+    return max(5, window // 4)
+
+
+def portfolio_warmup_bars(vol_window: int) -> int:
+    """Bars `portfolio_vol_target` needs before its first weight: the volatility window, then the correlation's."""
+    return vol_window + rho_min_bars(vol_window)
+
+
+def mean_pairwise_correlation(x: F64, member: npt.NDArray[np.bool_], window: int) -> F64:
+    """ADR-059 decision 1, steps 2-3. `x` (T, N): each bar's return over its trailing volatility. Per bar the mean
+    of x_i * x_j over the pairs of members with a finite x; then the mean of those over the last `window` bars
+    (this one included), clipped to [0, RHO_MAX]. NaN where fewer than `rho_min_bars(window)` bars had a
+    cross-section. Row t uses rows <= t only."""
+    ok = member & np.isfinite(x)
+    xz: F64 = np.asarray(np.where(ok, x, 0.0), dtype=np.float64)
+    m: F64 = np.asarray(np.count_nonzero(ok, axis=1), dtype=np.float64)
+    total = xz.sum(axis=1)
+    squares = (xz * xz).sum(axis=1)
+    has = m >= 2
+    pairs: F64 = np.asarray(np.where(has, m * (m - 1.0), 1.0), dtype=np.float64)
+    c: F64 = np.asarray(np.where(has, (total * total - squares) / pairs, 0.0), dtype=np.float64)
+    run_c = np.concatenate([np.zeros(1), np.cumsum(c)])
+    run_n = np.concatenate([np.zeros(1), np.cumsum(has.astype(np.float64))])
+    t: npt.NDArray[np.int64] = np.arange(x.shape[0], dtype=np.int64)
+    lo: npt.NDArray[np.int64] = np.asarray(np.maximum(t + 1 - window, 0), dtype=np.int64)
+    count = run_n[t + 1] - run_n[lo]
+    enough = count >= rho_min_bars(window)
+    mean: F64 = np.asarray(
+        np.where(enough, (run_c[t + 1] - run_c[lo]) / np.maximum(count, 1.0), np.nan), dtype=np.float64
+    )
+    return np.asarray(np.clip(mean, 0.0, RHO_MAX), dtype=np.float64)
+
+
+def portfolio_weights(
+    desire: npt.NDArray[np.int8], sigma_ann: F64, rho: F64, *, target: float, max_leverage: float
+) -> F64:
+    """ADR-059 decision 1, steps 4-5: the names with a signal are unit-risk legs (sign / annual volatility) scaled
+    so that the book's volatility is `target` under one pairwise correlation `rho[t]`; then the per-name cap, then
+    the gross cap (the whole row scaled down). No weight on a bar without a correlation estimate or for a name
+    without a volatility estimate."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        live = (desire != 0) & np.isfinite(sigma_ann) & (sigma_ann > 0)
+        d: F64 = np.asarray(np.where(live, desire, 0), dtype=np.float64)
+        k = np.abs(d).sum(axis=1)
+        net = d.sum(axis=1)
+        variance = np.maximum(k + rho * (net * net - k), k * (1.0 - RHO_MAX))
+        usable = (k > 0) & np.isfinite(rho)
+        v: F64 = np.asarray(np.where(usable, np.sqrt(np.where(usable, variance, 1.0)), np.nan), dtype=np.float64)
+        raw: F64 = np.asarray(d * target / (sigma_ann * v[:, None]), dtype=np.float64)
+    w: F64 = np.asarray(np.where(np.isfinite(raw), np.clip(raw, -NAME_CAP, NAME_CAP), 0.0), dtype=np.float64)
+    gross = np.abs(w).sum(axis=1)
+    scale: F64 = np.asarray(
+        np.where(gross > max_leverage, max_leverage / np.maximum(gross, 1e-300), 1.0), dtype=np.float64
+    )
+    return w * scale[:, None]
+
+
 def _matrix(frame: pl.DataFrame, column: str, decisions: list[int], symbols: list[str]) -> F64:
     wide = (
         frame.select("decision_ns", "symbol", pl.col(column).cast(pl.Float64))
@@ -144,14 +209,25 @@ def prepare(
     desire = np.where(long_ & ~short_, 1, np.where(short_ & ~long_, -1, 0)).astype(np.int8)
     desire = np.where(eligible, desire, 0).astype(np.int8)
     lev, n = spec.sizing.max_leverage, spec.universe.n
-    if spec.sizing.method == "equal":
-        size = np.full(price.shape, lev / n)
-    else:
+    if spec.sizing.method == "portfolio_vol_target":  # ADR-059: the names with a signal share the target
         with np.errstate(divide="ignore", invalid="ignore"):
-            size = np.minimum(spec.sizing.target_ann_vol / sigma_ann, lev) / n
-    size = np.where(np.isfinite(size) & (size > 0), size, 0.0)
-    desire = np.where(size > 0, desire, 0).astype(np.int8)  # no volatility estimate yet: no position
-    weight = (desire * size).astype(np.float64)
+            standardised = _matrix(frame, "_lr", decisions, symbols) / sd
+        if "member" in frame.columns:
+            member = _matrix(frame.with_columns(pl.col("member").cast(pl.Float64)), "member", decisions, symbols) == 1.0
+        else:
+            member = np.ones(price.shape, dtype=np.bool_)
+        rho = mean_pairwise_correlation(standardised, member, spec.sizing.vol_window)
+        weight = portfolio_weights(desire, sigma_ann, rho, target=spec.sizing.target_ann_vol, max_leverage=lev)
+        desire = np.where(weight != 0, desire, 0).astype(np.int8)  # no estimate yet: no position
+    else:
+        if spec.sizing.method == "equal":
+            size = np.full(price.shape, lev / n)
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                size = np.minimum(spec.sizing.target_ann_vol / sigma_ann, lev) / n
+        size = np.where(np.isfinite(size) & (size > 0), size, 0.0)
+        desire = np.where(size > 0, desire, 0).astype(np.int8)  # no volatility estimate yet: no position
+        weight = (desire * size).astype(np.float64)
     # funding settlements inside [d_t + latency, d_{t+1} + latency)
     fund = np.zeros(price.shape)
     events: dict[tuple[int, int], list[tuple[float, float]]] = {}

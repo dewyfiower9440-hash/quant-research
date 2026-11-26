@@ -27,6 +27,12 @@ Stack: Python (uv)
   (combination and ridge weights fitted on the first 75 % of selection), `search/campaign.py`
   (`preregistered_groups_v3`, causes `below_bar` / `infeasible`); tools `relabel_campaign.py`,
   `measure_combined_null.py`; campaign c2 = `run_campaign.py --run-id c2 --space-version 3`
+- v2.5 step 8a (ADR-058 re-examination, ADR-059, ADR-060): `backtest/market.py` (`portfolio_vol_target`: the names
+  with a signal share the volatility target, per-name cap 0.10), `strategy/space.py` (`SPACES_V4` = `.../v4`),
+  `search/campaign_runner.py` (`space_version=4`, `n_rule="cell"`: pairs instead of judged S3 runs, only a cell
+  group's best judgment can be a candidate), `validator/funnel_power.py` + `tools/measure_funnel_power.py` (the
+  funnel power measurement; registered runs only, `--trial` for anything else; no pass counts before both state
+  files are whole). `tools/run_campaign.py` has no v4 / cell option yet
 - Autonomous loop (v2.3, ADR-049): `search/campaign.py` (cells, causes, rounds), `search/campaign_runner.py` (driver,
   cross-window confirmation), `catalog/coverage.py`, `bulk/tiers.py` (data queue planning); tools `run_campaign.py`,
   `run_data_queue.py`, `run_validator.py`; user-run tasks `tools/register_campaign_task.ps1`,
@@ -102,4 +108,6 @@ Stack: Python (uv)
 - A model-cell or S1 fixture with a constant funding rate / premium per symbol has no rolling variance, so `zscore` is null and every combined signal (any null term) disappears → give test inputs movement over time (2026-11-24)
 - A long measurement beside pytest runs took 4 minutes per replication instead of 35 seconds → run resumable measurements alone, with a JSON-lines state file (2026-11-24)
 - structlog's JSON tracebacks print frame locals by default → `configure_logging(show_locals=False)` wherever locals can hold holdout results (the validator) (2026-11-22)
+- The synthetic panels of `validator/null_pipeline.py` repeat their last closes (the final decisions have no new bar): a tail slice of returns ended on two zero bars → cut windows with `funnel_power.oracle_tail` (it drops the dead tail), not `[-days:]` (2026-11-26)
+- A measurement tool that decides "complete" from the row count of its state file wrote its report early when a run was split across calls → decide from the set of keys the registered design names (`funnel_power.report_problems`) (2026-11-26)
 - Background shells in a Claude Code session are killed when the whole system runs low on memory (bulk funding download stopped at 280/632) → run long jobs in the foreground (20 min per call, resumable tools) or register a scheduled task (`tools/register_campaign_task.ps1`, user-run) (2026-11-21)

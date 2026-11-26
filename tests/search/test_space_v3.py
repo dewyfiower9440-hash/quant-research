@@ -161,7 +161,7 @@ def test_space_names_follow_the_campaign_space_version() -> None:
     assert "space_version" not in CampaignConfig().identity()  # a campaign saved before ADR-051 still resumes
     assert CampaignConfig(space_version=3).identity()["space_version"] == 3
     with pytest.raises(ValueError, match="space_version"):
-        CampaignConfig(space_version=4)
+        CampaignConfig(space_version=5)  # 4 is registered since ADR-059 (tests/search/test_space_v4.py)
     assert RandomSearcher(space_of(space_name(cell, 3)), 1).ask().family == "momentum@4h/v3"
 
 

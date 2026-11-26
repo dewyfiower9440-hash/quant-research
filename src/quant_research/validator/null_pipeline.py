@@ -141,6 +141,16 @@ def realizable_z(alpha: Alpha, rets: F64) -> float:
     (A3 review: the old formulas assumed independent symbols and an oracle that knows which hours drift).
     random -> long all symbols equally (the drifting hours are not observable); mechanism -> per symbol, fade the
     last hour (position -sign(r_{t-1})), equal weight; none -> the long-all z (a reference)."""
+    pnl = oracle_pnl(alpha, rets)
+    sd = float(np.std(pnl, ddof=1))
+    return float(np.mean(pnl)) / sd * math.sqrt(pnl.shape[0]) if sd > 0 else 0.0
+
+
+def oracle_pnl(alpha: Alpha, rets: F64) -> F64:
+    """The per-bar pnl of the strategy `realizable_z` scores, on log returns `rets` (T x N): equal weight over all
+    symbols, before costs, each position taken from the bars already seen. The last row is the last bar of `rets`;
+    the first rows a strategy needs as history are dropped (`cross`: CROSS_VOL_BARS, `slow_reversion`: SLOW_BARS,
+    `mechanism`: one)."""
     simple = np.expm1(rets)  # the engine's returns (re-review: z on log returns differs)
     if alpha == "cross":  # long the calm, short the wild, by the volatility of the bars already seen
         pnl = (_calm_tilt(simple) * simple)[CROSS_VOL_BARS:].mean(axis=1)
@@ -152,8 +162,7 @@ def realizable_z(alpha: Alpha, rets: F64) -> float:
         pnl = (-np.sign(window) * simple[SLOW_BARS:]).mean(axis=1)
     else:
         pnl = simple.mean(axis=1)
-    sd = float(np.std(pnl, ddof=1))
-    return float(np.mean(pnl)) / sd * math.sqrt(pnl.shape[0]) if sd > 0 else 0.0
+    return np.asarray(pnl, dtype=np.float64)
 
 
 def calibrate_strength(
